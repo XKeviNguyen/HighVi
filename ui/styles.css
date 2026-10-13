@@ -293,6 +293,49 @@ dd {
   line-height: 1.45;
 }
 
+.mode-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin: 0 0 16px;
+  padding: 0;
+  border: 0;
+}
+
+.mode-switch legend {
+  margin-bottom: 8px;
+  padding: 0;
+  color: #d9ddea;
+  font-size: 13px;
+}
+
+.mode-switch label {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: #c6cbe0;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.mode-switch input {
+  width: auto;
+  margin: 0;
+  padding: 0;
+  accent-color: #8a6fe6;
+}
+
+.field-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
 .hidden {
   display: none;
 }

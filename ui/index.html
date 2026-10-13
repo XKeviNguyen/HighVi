@@ -24,8 +24,14 @@
       </section>
 
       <form id="discover-form" class="card">
-        <label for="page-url">URL trang video</label>
-        <div class="input-row">
+        <fieldset class="mode-switch">
+          <legend>Nguồn</legend>
+          <label><input type="radio" name="mode" value="page" checked /> URL trang video</label>
+          <label><input type="radio" name="mode" value="directHls" /> Playlist HLS trực tiếp</label>
+        </fieldset>
+
+        <div id="page-fields" class="field-stack">
+          <label for="page-url">URL trang video</label>
           <input
             id="page-url"
             name="pageUrl"
@@ -36,6 +42,34 @@
             placeholder="https://example.com/watch/video"
             required
           />
+          <p class="hint">yt-dlp phải hỗ trợ trang này. Trang dựng player bằng JavaScript có thể không được hỗ trợ.</p>
+        </div>
+
+        <div id="direct-fields" class="field-stack hidden">
+          <label for="playlist-input">URL playlist (.m3u8)</label>
+          <input
+            id="playlist-input"
+            name="playlistUrl"
+            type="url"
+            inputmode="url"
+            autocomplete="off"
+            maxlength="8192"
+            placeholder="https://cdn.example.com/video/playlist.m3u8"
+          />
+          <label for="referer-input">Trang chứa playlist (dùng làm Referer)</label>
+          <input
+            id="referer-input"
+            name="refererPageUrl"
+            type="url"
+            inputmode="url"
+            autocomplete="off"
+            maxlength="2048"
+            placeholder="https://example.com/watch/video"
+          />
+          <p class="hint">Như trình duyệt, HighVi chỉ gửi origin của trang (ví dụ https://example.com/) khi playlist ở domain khác. Không gửi cookie hay phiên đăng nhập.</p>
+        </div>
+
+        <div class="actions">
           <button id="discover-button" class="primary" type="submit">Tìm HLS</button>
         </div>
         <p class="hint">Chỉ chấp nhận HTTPS công khai; địa chỉ local/private bị chặn.</p>

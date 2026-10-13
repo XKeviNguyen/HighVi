@@ -4,7 +4,11 @@ const { listen } = window.__TAURI__.event;
 const elements = {
   discoverForm: document.querySelector("#discover-form"),
   discoverButton: document.querySelector("#discover-button"),
+  pageFields: document.querySelector("#page-fields"),
   pageUrl: document.querySelector("#page-url"),
+  directFields: document.querySelector("#direct-fields"),
+  playlistInput: document.querySelector("#playlist-input"),
+  refererInput: document.querySelector("#referer-input"),
   resultCard: document.querySelector("#result-card"),
   resultHeading: document.querySelector("#result-heading"),
   playlistUrl: document.querySelector("#playlist-url"),
@@ -25,7 +29,43 @@ const elements = {
   savedPath: document.querySelector("#saved-path"),
 };
 
-let currentPageUrl = "";
+// The source of the last successful discovery. Rust re-validates it and
+// rediscovers before downloading, so this is not a security boundary.
+let currentSource = null;
+// Incremented whenever the inputs change, so a discovery that finishes
+// afterwards cannot show results or errors for a source the user has edited.
+let discoveryGeneration = 0;
+
+function invalidateDiscovery() {
+  discoveryGeneration += 1;
+  currentSource = null;
+  setHidden(elements.resultCard, true);
+}
+
+function selectedMode() {
+  return elements.discoverForm.querySelector('input[name="mode"]:checked').value;
+}
+
+function applyMode() {
+  const direct = selectedMode() === "directHls";
+  setHidden(elements.pageFields, direct);
+  setHidden(elements.directFields, !direct);
+  elements.pageUrl.required = !direct;
+  elements.playlistInput.required = direct;
+  elements.refererInput.required = direct;
+  invalidateDiscovery();
+}
+
+function readSource() {
+  if (selectedMode() === "directHls") {
+    return {
+      mode: "directHls",
+      playlistUrl: elements.playlistInput.value.trim(),
+      refererPageUrl: elements.refererInput.value.trim(),
+    };
+  }
+  return { mode: "page", pageUrl: elements.pageUrl.value.trim() };
+}
 
 function setHidden(element, hidden) {
   element.classList.toggle("hidden", hidden);
@@ -70,24 +110,42 @@ function updateProgress(progress) {
 
 listen("download-progress", ({ payload }) => updateProgress(payload)).catch(showError);
 
+for (const radio of elements.discoverForm.querySelectorAll('input[name="mode"]')) {
+  radio.addEventListener("change", () => {
+    clearMessages();
+    applyMode();
+  });
+}
+for (const input of [elements.pageUrl, elements.playlistInput, elements.refererInput]) {
+  input.addEventListener("input", invalidateDiscovery);
+}
+applyMode();
+
 elements.discoverForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   clearMessages();
-  setHidden(elements.resultCard, true);
+  invalidateDiscovery();
+  const generation = discoveryGeneration;
   setHidden(elements.statusCard, true);
   setBusy(elements.discoverButton, true, "Đang tìm…");
 
   try {
-    currentPageUrl = elements.pageUrl.value.trim();
-    const result = await invoke("discover_video", { pageUrl: currentPageUrl });
+    const source = readSource();
+    const result = await invoke("discover_video", { source });
+    if (generation !== discoveryGeneration) {
+      return;
+    }
+    currentSource = source;
     elements.resultHeading.textContent = result.title;
-    elements.playlistUrl.textContent = result.playlistUrl;
-    elements.refererUrl.textContent = result.referer;
+    elements.playlistUrl.textContent = result.playlistDisplay;
+    elements.refererUrl.textContent = result.refererDisplay || "Không gửi";
     elements.filename.value = result.suggestedFilename;
     setHidden(elements.resultCard, false);
     elements.filename.focus();
   } catch (error) {
-    showError(error);
+    if (generation === discoveryGeneration) {
+      showError(error);
+    }
   } finally {
     setBusy(elements.discoverButton, false, "");
   }
@@ -101,7 +159,7 @@ elements.downloadForm.addEventListener("submit", async (event) => {
   try {
     const result = await invoke("download_video", {
       request: {
-        pageUrl: currentPageUrl,
+        source: currentSource,
         filename: elements.filename.value,
       },
     });

@@ -17,10 +17,37 @@ pub fn validate_playlist_url(raw: &str) -> Result<Url, PublicError> {
     if !path.ends_with(".m3u8") {
         return Err(PublicError::new(
             "invalid_playlist_url",
-            "The discovered media URL is not an HLS playlist.",
+            "The media URL is not an HLS playlist (.m3u8).",
         ));
     }
     Ok(url)
+}
+
+/// The page a copied playlist came from. HighVi never requests it; it only
+/// derives the Referer header from it.
+pub fn validate_referer_page_url(raw: &str) -> Result<Url, PublicError> {
+    validate_https_url(raw, MAX_PAGE_URL_BYTES, "referer")
+}
+
+/// A short form of `url` that is safe to show: scheme, host, and the last path
+/// segment. Middle path segments and the query may carry tokens.
+pub fn redact_url_for_display(url: &Url) -> String {
+    let host = url.host_str().unwrap_or_default();
+    let port = url
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    let segments: Vec<&str> = url
+        .path_segments()
+        .map(|segments| segments.filter(|segment| !segment.is_empty()).collect())
+        .unwrap_or_default();
+    let path = match segments.as_slice() {
+        [] => "/".to_string(),
+        [only] => format!("/{only}"),
+        [.., last] => format!("/…/{last}"),
+    };
+    let query = if url.query().is_some() { "?…" } else { "" };
+    format!("{}://{host}{port}{path}{query}", url.scheme())
 }
 
 fn validate_https_url(raw: &str, max_bytes: usize, kind: &str) -> Result<Url, PublicError> {
@@ -249,6 +276,27 @@ mod tests {
                 ensure_public_network_target(&url).await.unwrap_err().code,
                 "unsafe_network_target"
             );
+        }
+    }
+
+    #[test]
+    fn display_redaction_hides_path_tokens_and_query() {
+        for (raw, expected) in [
+            ("https://site.example/", "https://site.example/"),
+            (
+                "https://cdn.example/master.m3u8",
+                "https://cdn.example/master.m3u8",
+            ),
+            (
+                "https://cdn.example/secret-token/abc/playlist.m3u8?sig=secret",
+                "https://cdn.example/…/playlist.m3u8?…",
+            ),
+            (
+                "https://cdn.example:8443/a/b.m3u8",
+                "https://cdn.example:8443/…/b.m3u8",
+            ),
+        ] {
+            assert_eq!(redact_url_for_display(&Url::parse(raw).unwrap()), expected);
         }
     }
 

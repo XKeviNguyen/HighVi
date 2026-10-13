@@ -1,13 +1,13 @@
 use crate::{PublicError, suggested_filename, validate_playlist_url};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
+/// Media found by yt-dlp. `playlist_url` may carry tokens; show it to the user
+/// only through `redact_url_for_display`.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Discovery {
     pub title: String,
     pub playlist_url: String,
     pub suggested_filename: String,
-    pub referer: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -36,7 +36,7 @@ struct Candidate<'a> {
     score: (bool, u32),
 }
 
-pub fn extract_hls_from_json(page_url: &str, raw_json: &[u8]) -> Result<Discovery, PublicError> {
+pub fn extract_hls_from_json(raw_json: &[u8]) -> Result<Discovery, PublicError> {
     let metadata: Metadata = serde_json::from_slice(raw_json).map_err(|_| {
         PublicError::new(
             "invalid_extractor_output",
@@ -111,7 +111,6 @@ pub fn extract_hls_from_json(page_url: &str, raw_json: &[u8]) -> Result<Discover
         suggested_filename: suggested_filename(metadata.title.as_deref(), metadata.id.as_deref()),
         title,
         playlist_url: playlist.to_string(),
-        referer: page_url.to_string(),
     })
 }
 
@@ -150,13 +149,12 @@ mod tests {
           ]
         }"#;
 
-        let result = extract_hls_from_json("https://page.example/watch", raw).unwrap();
+        let result = extract_hls_from_json(raw).unwrap();
         assert_eq!(
             result.playlist_url,
             "https://cdn.example/master.m3u8?token=x"
         );
         assert_eq!(result.suggested_filename, "Sample _ title.mp4");
-        assert_eq!(result.referer, "https://page.example/watch");
     }
 
     #[test]
@@ -168,9 +166,7 @@ mod tests {
           ]
         }"#;
         assert_eq!(
-            extract_hls_from_json("https://page.example/watch", raw)
-                .unwrap_err()
-                .code,
+            extract_hls_from_json(raw).unwrap_err().code,
             "drm_not_supported"
         );
     }
@@ -179,15 +175,11 @@ mod tests {
     fn rejects_non_hls_and_malformed_output() {
         let non_hls = br#"{"title":"Direct", "formats":[{"protocol":"https", "url":"https://cdn.example/video.mp4"}]}"#;
         assert_eq!(
-            extract_hls_from_json("https://page.example/watch", non_hls)
-                .unwrap_err()
-                .code,
+            extract_hls_from_json(non_hls).unwrap_err().code,
             "hls_not_found"
         );
         assert_eq!(
-            extract_hls_from_json("https://page.example/watch", b"not-json")
-                .unwrap_err()
-                .code,
+            extract_hls_from_json(b"not-json").unwrap_err().code,
             "invalid_extractor_output"
         );
     }
@@ -197,9 +189,7 @@ mod tests {
         let raw =
             br#"{"formats":[{"protocol":"m3u8_native", "url":"http://cdn.example/video.m3u8"}]}"#;
         assert_eq!(
-            extract_hls_from_json("https://page.example/watch", raw)
-                .unwrap_err()
-                .code,
+            extract_hls_from_json(raw).unwrap_err().code,
             "invalid_playlist_url"
         );
     }
