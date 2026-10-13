@@ -1,0 +1,7 @@
+/target/
+/node_modules/
+/src-tauri/gen/
+/.idea/
+/.vscode/
+*.part
+*.ytdl
