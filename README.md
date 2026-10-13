@@ -1,215 +1,127 @@
 <div align="center">
-  <img src="src-tauri/icons/icon.png" alt="HighVi icon" width="72" />
-  <h1>HighVi</h1>
-  <p><strong>Ubuntu desktop download helper for permitted HTTPS video pages.</strong></p>
+  <img src="docs/assets/matrix-banner.svg" alt="HighVi — green digital rain" width="100%" />
+
   <p>
-    <a href="https://tauri.app/"><img src="https://img.shields.io/badge/Tauri-v2-24C8DB?logo=tauri&logoColor=white" alt="Tauri v2" /></a>
-    <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-2024-000000?logo=rust&logoColor=white" alt="Rust 2024" /></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green" alt="MIT License" /></a>
+    <strong>English</strong> ·
+    <a href="README.vi.md">Tiếng Việt</a> ·
+    <a href="README.ja.md">日本語</a>
   </p>
+
+  <p>
+    <a href="https://tauri.app/"><img src="https://img.shields.io/badge/Tauri-v2-00ff41?style=flat-square&logo=tauri&logoColor=00ff41&labelColor=000000" alt="Tauri v2" /></a>
+    <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-2024-00ff41?style=flat-square&logo=rust&logoColor=00ff41&labelColor=000000" alt="Rust 2024" /></a>
+    <img src="https://img.shields.io/badge/Ubuntu-desktop-00ff41?style=flat-square&logo=ubuntu&logoColor=00ff41&labelColor=000000" alt="Ubuntu desktop" />
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-00ff41?style=flat-square&labelColor=000000" alt="MIT License" /></a>
+  </p>
+
+  <p><code>&gt; wake up... the video is waiting_</code></p>
 </div>
 
-HighVi is a small desktop app for Ubuntu that downloads permitted HLS media as MP4. It has two modes:
+## 🟩 What is HighVi?
 
-- **Page URL:** `yt-dlp` extracts a clear HLS playlist from a page it supports.
-- **Direct HLS:** you paste a playlist URL and the page you found it on. HighVi sends that page as the `Referer`, the way a browser playing the video would.
+Lots of videos on the internet aren't one big file. They're chopped into **lots of tiny pieces**, and a small list called a **playlist** (a file ending in `.m3u8`) says where every piece lives. Think of it as a **treasure map**.
 
-## Safety and permission boundaries
+HighVi reads the treasure map, collects every piece, and glues them back together into **one MP4 file** you can watch anywhere.
 
-- HighVi only accepts HTTPS page and playlist URLs and rejects empty, credentialed, local, private, and reserved targets before launching external tools.
-- The app does not bypass DRM, sign-in, paywalls, or other access controls. Users must have permission to download the media they submit.
-- `yt-dlp` is spawned with hermetic arguments: `--ignore-config`, `--no-plugin-dirs`, `--no-exec`, `--no-cookies`, and `--no-cookies-from-browser`. Its environment is cleared except for `PATH`, `HOME`, locale, `TMPDIR`, and proxy variables, and `YTDLP_NO_PLUGINS=1` is set. The app does not inherit personal browser sessions, `yt-dlp` config, or Python overrides from the user environment.
-- The `Referer` is never a credential or a copied session. HighVi sends only the page origin (`https://site.example/`). `yt-dlp` applies one header to every request, including segments and keys on other hosts, where a browser would also send only the origin, so the page path and query never leave the app.
-- The filename is validated before use and cannot contain path separators, reserved characters, or template variables.
-- Download results are published to a fixed output directory in `~/Downloads/HighVi` with a no-overwrite rename on Linux.
+<div align="center">
+  <img src="docs/assets/screenshot-en.png" alt="HighVi window in the green Matrix theme" width="720" />
+  <br />
+  <sub>The HighVi window (shown with example data).</sub>
+</div>
 
-## Current platform scope
+## 🕹️ Two ways to use it
 
-This project is an Ubuntu desktop MVP. It is not a cross-platform web, Android, iOS, macOS, or Windows build.
+| Mode | You paste | Good for |
+| --- | --- | --- |
+| **Video page link** | The link to the video page | Sites that `yt-dlp` already knows |
+| **Playlist link (.m3u8)** | The playlist link **and** the page you found it on | When you already have the `.m3u8` link |
 
-## What HighVi does
+HighVi speaks **English, Tiếng Việt, and 日本語**. Pick one with the buttons in the top corner, and HighVi will remember it.
 
-The actual app flow in this repository is:
+**Why does “Playlist link” ask for the page too?**
+Some websites only hand out the treasure map if you say where you came from, like showing a ticket at the door. That note is called the **Referer**. HighVi only tells them the website's front-door address (for example `https://example.com/`). It never sends the rest of the page link, your cookies, or your logins.
 
-1. A user chooses a mode in the Tauri webview and enters either a page URL, or a playlist URL plus the page it came from.
-2. Rust validates the URLs, blocks local/private network targets, and resolves the host it will contact before discovery continues.
-3. Rust runs `yt-dlp` in discovery mode against the page (no `Referer`) or the playlist (with the page as `Referer`) and identifies a clear HLS playlist.
-4. Rust rejects DRM-marked streams and validates the discovered HLS URL before the download begins. The UI only receives redacted URLs (`https://host/…/*.m3u8?…`); path segments, file names, and queries are masked.
-5. The user triggers the download, and Rust re-discovers the playlist so it is not trusting stale URL data from the UI.
-6. `yt-dlp` downloads the stream with its native HLS downloader, sends the `Referer` derived from the page, and emits structured progress events.
-7. The completed file is staged in a per-job directory and published to `~/Downloads/HighVi` with an atomic no-overwrite rename.
+**Where do I find a playlist link?** In your browser, press <kbd>F12</kbd>, open the **Network** tab, play the video, and type `m3u8` in the filter box. Only do this for videos you're allowed to download.
 
-## Prerequisites
+## ✅ What HighVi does
 
-HighVi is built for Ubuntu and expects the following system tools to be present:
+1. You paste a link.
+2. HighVi checks that it's a safe `https://` link, and not a computer inside your home or office network.
+3. `yt-dlp` looks for the treasure map.
+4. HighVi shows you the title, a **shortened** playlist link (the secret parts are hidden), and the Referer it will send.
+5. You pick a file name and press **Download MP4**.
+6. The finished video lands in **`~/Downloads/HighVi`**. HighVi never writes over a file that's already there.
 
-- Rust
-- Node.js
-- `yt-dlp`
-- FFmpeg
-- Tauri v2 system libraries for GTK/WebKitGTK on Linux
+## 🛑 What HighVi will never do
 
-Install the Linux packages required by Tauri v2:
+- Break DRM, paywalls, or logins.
+- Use your browser's cookies or sessions.
+- Pretend to be a web browser to sneak past bot protection.
+- Run plugins or extra commands from your `yt-dlp` settings.
+
+> [!IMPORTANT]
+> Only download videos you own or have permission to download.
+
+## 🚀 Get started
+
+You need **Ubuntu**, **Rust**, **Node.js**, **`yt-dlp`**, and **FFmpeg**.
+
+Install the system libraries Tauri needs:
 
 ```bash
 sudo apt update
-sudo apt install build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev libwebkit2gtk-4.1-dev
+sudo apt install build-essential curl wget file libxdo-dev libssl-dev \
+  libayatana-appindicator3-dev librsvg2-dev libwebkit2gtk-4.1-dev ffmpeg
 ```
 
-If `yt-dlp` is not available, install it from your distro or the upstream project, then confirm it is on `PATH`:
+Install `yt-dlp` from your package manager or from the [official project](https://github.com/yt-dlp/yt-dlp), and keep it up to date. Then check that everything is there:
 
 ```bash
-yt-dlp --version
-ffmpeg -version
-node --version
-cargo --version
+yt-dlp --version && ffmpeg -version && node --version && cargo --version
 ```
 
-## Development and build commands
-
-From the repository root:
+Run the app:
 
 ```bash
 npm install
-npm run dev
-npm run build
-cargo test -p highvi-core --offline
+npm run dev     # open HighVi
+npm run build   # make a .deb and an AppImage
+```
+
+## 🧯 When something goes wrong
+
+| Message code | What it means | What to try |
+| --- | --- | --- |
+| `access_denied` / `host_firewall_block` | The website said **no** (HTTP 403). | If you pasted a `.m3u8` link as a page, switch to **Playlist link** and add the page you found it on. Check it's the right page, or copy a fresh playlist link. If the site needs you logged in through a browser, HighVi can't help. |
+| `unsupported_page` | `yt-dlp` doesn't know this website, or the video player is built with JavaScript. | Use **Playlist link** if you have the playlist link. |
+| `unsupported_playlist` | The link isn't a playlist HighVi can read. | Make sure it's the `.m3u8` link itself. |
+| `media_not_found` | The video is gone (HTTP 404/410). | The link may have expired. Copy a fresh one. |
+| `drm_not_supported` | The video is locked with DRM. | HighVi won't unlock it. |
+| `authentication_required` | You have to sign in to watch it. | HighVi doesn't use your logins. |
+| `network_timeout` | The website took too long to answer. | Try again later. |
+| `output_exists` | There's already a file with that name. | Pick another name. |
+| `missing_dependency` | `yt-dlp` or FFmpeg isn't installed. | Install it, then try again. |
+
+## 🧠 For developers
+
+```bash
+cargo test --workspace --offline
+cargo clippy --workspace --all-targets --offline -- -D warnings
 cargo fmt --all -- --check
-cargo clippy -p highvi-core --offline -- -D warnings
-node --check ui/app.js
+node --check ui/app.js && node --check ui/i18n.js && node --check ui/rain.js
 ```
-
-If the GTK and WebKitGTK development libraries are already installed, this Tauri app check can also run:
-
-```bash
-cargo check -p highvi --locked
-```
-
-## Verified flow
-
-```mermaid
-flowchart LR
-    A[Webview input] --> B[URL validation in Rust]
-    B --> C[yt-dlp discovery]
-    C --> D[HLS manifest validation]
-    D --> E[Download job]
-    E --> F[Atomic publication]
-    E --> G[Progress events to UI]
-    D --> H[DRM / access-control rejection]
-```
-
-## Output location and no-overwrite behavior
-
-Downloads are placed under:
 
 ```text
-~/Downloads/HighVi
+crates/highvi-core/   URL checks, Referer rules, yt-dlp arguments, error messages (all unit-tested)
+src-tauri/            Tauri commands: run yt-dlp, report progress, save the file safely
+ui/                   The green window: index.html, styles.css, app.js, i18n.js (English · Tiếng Việt · 日本語), rain.js
+docs/assets/          README banner and screenshots
 ```
 
-The application creates a temporary job directory, writes the completed file there, and publishes it with Linux `renameat2(..., RENAME_NOREPLACE)`. If the destination name already exists, HighVi stops instead of overwriting the user's file.
+[SECURITY.md](SECURITY.md) explains how HighVi keeps you safe and what its limits are today. In short: HighVi checks the links you give it, but `yt-dlp` downloads the video pieces by itself, so those later requests aren't checked one by one yet.
 
-## Security design
+## 📜 License
 
-The security model is described in [SECURITY.md](SECURITY.md). The app validates the initial page URL and the extracted HLS playlist URL before launch, and it runs `yt-dlp` with a restricted argument set. However, this is not a full SSRF defense for every child request made by `yt-dlp` itself. Redirects, segment URLs, and HLS key fetches can still be outside the app’s preflight DNS checks. HighVi forces `yt-dlp`'s native HLS downloader, but `yt-dlp` may still fall back to FFmpeg for streams the native downloader cannot handle. HighVi intentionally does not proxy or sandbox every downstream network request yet. The repo’s current guarantee is: block clearly public-inappropriate inputs up front, reject DRM and blocked access cases, and keep `yt-dlp` isolated from browser state.
+[MIT](LICENSE)
 
-## Repository layout
-
-```text
-.
-├── Cargo.toml
-├── LICENSE
-├── README.md
-├── SECURITY.md
-├── package.json
-├── src-tauri/
-│   ├── Cargo.toml
-│   ├── build.rs
-│   ├── capabilities/
-│   ├── gen/
-│   ├── icons/
-│   └── src/
-├── crates/
-│   └── highvi-core/
-│       └── src/
-├── ui/
-│   ├── app.js
-│   ├── index.html
-│   └── styles.css
-└── target/
-```
-
-## Troubleshooting
-
-### `yt-dlp` is missing
-
-```bash
-yt-dlp --version
-```
-
-Install `yt-dlp` and confirm it is on your `PATH`.
-
-### FFmpeg is missing
-
-```bash
-ffmpeg -version
-```
-
-HighVi relies on FFmpeg for the final MP4 remux step.
-
-### GTK or WebKitGTK is missing
-
-```bash
-pkg-config --modversion webkit2gtk-4.1
-```
-
-If this fails, install the Tauri v2 Linux packages listed above before running the desktop app.
-
-### HTTP 403 (`access_denied`, `host_firewall_block`)
-
-The host refused the request. Common causes:
-
-- **A playlist pasted as a page URL.** Many CDNs only serve playlists to the page that embeds them. Switch to Direct HLS and enter that page.
-- **Wrong Referer page in Direct HLS.** Enter the page where you actually found the playlist.
-- **Expired or signed playlist URL.** Copy a fresh one.
-- **The host blocks automated clients or requires a browser session.** HighVi does not copy sessions or bypass bot protection, so this case is unsupported.
-
-`yt-dlp` reports some of these as "Cloudflare anti-bot challenge" whenever a 403 body is a Cloudflare page. That text alone does not prove a browser challenge.
-
-### Unsupported page or playlist (`unsupported_page`, `unsupported_playlist`)
-
-`yt-dlp` has no extractor for the site and found no media in the page HTML. Pages that build their player with JavaScript are not supported. If you have the playlist URL and its page, use Direct HLS.
-
-### No HLS format found
-
-The page may not expose an HLS playlist, or the page may be behind an access control layer.
-
-### The output filename already exists
-
-Choose a different filename or delete the file in `~/Downloads/HighVi` before retrying. HighVi does not overwrite existing files.
-
-## Roadmap
-
-The following items are ideas for future work and are not implemented in this repository yet:
-
-- stronger end-to-end network policy enforcement for every downstream HLS request
-- additional UI validation and error states for file collisions and blocked hosts
-- richer retry and recovery handling for transient `yt-dlp` errors
-- broader testing with local fixture pages and media playlists
-- additional platform support beyond the Ubuntu desktop MVP
-
-## Contributing
-
-Contributions are welcome if they are grounded in a clear reproduction and a minimal change.
-
-Please include:
-
-- sanitized reproduction steps
-- the exact command or UI flow that triggered the issue
-- the expected result and the actual result
-- any error output after redaction
-
-Do not include secrets, cookies, signed URLs, browser sessions, or copyrighted sample media in issues or pull requests.
-
-## License
-
-HighVi is available under the [MIT License](LICENSE).
+<div align="center"><sub><code>there is no spoon — only segments_</code></sub></div>
