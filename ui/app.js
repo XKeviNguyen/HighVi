@@ -76,24 +76,72 @@ function clearMessages() {
   setHidden(elements.successCard, true);
 }
 
-function showError(error) {
-  const fallback = "HighVi gặp lỗi không xác định.";
-  elements.errorMessage.textContent = error?.message || fallback;
+const { t } = I18N;
+
+// Kept so the visible error and progress text can be re-rendered when the
+// user switches language.
+let lastError = null;
+let lastProgress = null;
+
+// Which advice fits a 403 depends on how the user gave us the source.
+function sourceKind(source) {
+  if (source?.mode === "directHls") {
+    return "direct";
+  }
+  try {
+    if (new URL(source?.pageUrl ?? "").pathname.toLowerCase().endsWith(".m3u8")) {
+      return "bare";
+    }
+  } catch {
+    // Not a URL; Rust has already rejected it.
+  }
+  return "page";
+}
+
+function errorText({ error, kind }) {
+  const code = typeof error?.code === "string" ? error.code : "";
+  if (code === "access_denied" || code === "host_firewall_block") {
+    return t(`error.${code}.${kind}`);
+  }
+  if (code === "output_publish_failed") {
+    // Rust's message carries the recovery path, which the user needs.
+    return `${t("error.output_publish_failed")}\n${error.message ?? ""}`;
+  }
+  if (code && I18N.has(`error.${code}`)) {
+    return t(`error.${code}`);
+  }
+  return error?.message || t("error.unknown");
+}
+
+function showError(error, source = null) {
+  lastError = { error, kind: sourceKind(source) };
+  elements.errorMessage.textContent = errorText(lastError);
   setHidden(elements.errorCard, false);
 }
 
-function setBusy(button, busy, label) {
+function setBusy(button, busy, busyKey) {
   button.disabled = busy;
-  button.dataset.defaultLabel ||= button.textContent;
-  button.textContent = busy ? label : button.dataset.defaultLabel;
+  button.textContent = t(busy ? busyKey : button.dataset.i18n);
+  button.dataset.busyKey = busy ? busyKey : "";
 }
 
+const progressKeys = {
+  recheck: "progress.recheck",
+  checking: "progress.checking",
+  downloading: "progress.downloading",
+  processing: "progress.processing",
+  finished: "progress.finished",
+};
+
 function updateProgress(progress) {
+  lastProgress = progress;
   setHidden(elements.statusCard, false);
-  elements.statusMessage.textContent = progress.message || "Đang xử lý…";
+  elements.statusMessage.textContent = t(progressKeys[progress.stage] ?? "progress.working");
   elements.statusPercent.textContent = progress.percent || "";
-  elements.statusSpeed.textContent = progress.speed ? `Tốc độ: ${progress.speed}` : "";
-  elements.statusEta.textContent = progress.eta ? `Còn lại: ${progress.eta}` : "";
+  elements.statusSpeed.textContent = progress.speed
+    ? t("progress.speed", { value: progress.speed })
+    : "";
+  elements.statusEta.textContent = progress.eta ? t("progress.eta", { value: progress.eta }) : "";
 
   const parsed = Number.parseFloat(progress.percent || "");
   if (Number.isFinite(parsed)) {
@@ -108,7 +156,31 @@ function updateProgress(progress) {
   }
 }
 
-listen("download-progress", ({ payload }) => updateProgress(payload)).catch(showError);
+listen("download-progress", ({ payload }) => updateProgress(payload)).catch((error) =>
+  showError(error),
+);
+
+for (const button of document.querySelectorAll("[data-lang]")) {
+  button.addEventListener("click", () => I18N.set(button.dataset.lang));
+}
+
+document.addEventListener("highvi:language", () => {
+  for (const button of [elements.discoverButton, elements.downloadButton]) {
+    if (button.dataset.busyKey) {
+      button.textContent = t(button.dataset.busyKey);
+    }
+  }
+  if (lastError && !elements.errorCard.classList.contains("hidden")) {
+    elements.errorMessage.textContent = errorText(lastError);
+  }
+  if (lastProgress && !elements.statusCard.classList.contains("hidden")) {
+    updateProgress(lastProgress);
+  }
+  if (currentSource && !elements.resultCard.classList.contains("hidden")) {
+    elements.refererUrl.textContent = elements.refererUrl.dataset.value || t("result.refererNone");
+  }
+});
+I18N.apply();
 
 for (const radio of elements.discoverForm.querySelectorAll('input[name="mode"]')) {
   radio.addEventListener("change", () => {
@@ -127,10 +199,10 @@ elements.discoverForm.addEventListener("submit", async (event) => {
   invalidateDiscovery();
   const generation = discoveryGeneration;
   setHidden(elements.statusCard, true);
-  setBusy(elements.discoverButton, true, "Đang tìm…");
+  setBusy(elements.discoverButton, true, "discover.busy");
+  const source = readSource();
 
   try {
-    const source = readSource();
     const result = await invoke("discover_video", { source });
     if (generation !== discoveryGeneration) {
       return;
@@ -138,13 +210,14 @@ elements.discoverForm.addEventListener("submit", async (event) => {
     currentSource = source;
     elements.resultHeading.textContent = result.title;
     elements.playlistUrl.textContent = result.playlistDisplay;
-    elements.refererUrl.textContent = result.refererDisplay || "Không gửi";
+    elements.refererUrl.dataset.value = result.refererDisplay || "";
+    elements.refererUrl.textContent = result.refererDisplay || t("result.refererNone");
     elements.filename.value = result.suggestedFilename;
     setHidden(elements.resultCard, false);
     elements.filename.focus();
   } catch (error) {
     if (generation === discoveryGeneration) {
-      showError(error);
+      showError(error, source);
     }
   } finally {
     setBusy(elements.discoverButton, false, "");
@@ -153,13 +226,14 @@ elements.discoverForm.addEventListener("submit", async (event) => {
 elements.downloadForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   clearMessages();
-  setBusy(elements.downloadButton, true, "Đang tải…");
-  updateProgress({ message: "Đang kiểm tra lại playlist…" });
+  setBusy(elements.downloadButton, true, "download.busy");
+  updateProgress({ stage: "recheck" });
+  const source = currentSource;
 
   try {
     const result = await invoke("download_video", {
       request: {
-        source: currentSource,
+        source,
         filename: elements.filename.value,
       },
     });
@@ -167,7 +241,7 @@ elements.downloadForm.addEventListener("submit", async (event) => {
     setHidden(elements.successCard, false);
   } catch (error) {
     setHidden(elements.statusCard, true);
-    showError(error);
+    showError(error, source);
   } finally {
     setBusy(elements.downloadButton, false, "");
   }

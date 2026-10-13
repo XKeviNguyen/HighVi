@@ -1,37 +1,44 @@
 <!doctype html>
-<html lang="vi">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark" />
     <title>HighVi</title>
     <link rel="stylesheet" href="./styles.css" />
+    <script src="./i18n.js" defer></script>
+    <script src="./rain.js" defer></script>
     <script src="./app.js" defer></script>
   </head>
   <body>
+    <canvas id="matrix-rain" aria-hidden="true"></canvas>
     <main class="shell">
+      <nav class="lang-switch" data-i18n-aria-label="lang.label">
+        <button type="button" data-lang="en" lang="en">English</button>
+        <button type="button" data-lang="vi" lang="vi">Tiếng Việt</button>
+        <button type="button" data-lang="ja" lang="ja">日本語</button>
+      </nav>
+
       <header class="hero">
         <div class="brand-mark" aria-hidden="true">H</div>
         <div>
-          <p class="eyebrow">HLS downloader · Ubuntu MVP</p>
+          <p class="eyebrow" data-i18n="hero.eyebrow"></p>
           <h1>HighVi</h1>
-          <p class="subtitle">Dán trang video, tìm playlist HLS và tải MP4 — không cần mở DevTools.</p>
+          <p class="subtitle" data-i18n="hero.subtitle"></p>
         </div>
       </header>
 
-      <section class="notice" aria-label="Lưu ý sử dụng">
-        Chỉ tải nội dung bạn sở hữu hoặc được phép tải. HighVi không vượt đăng nhập, DRM hay kiểm soát truy cập.
-      </section>
+      <section class="notice" data-i18n="notice"></section>
 
       <form id="discover-form" class="card">
         <fieldset class="mode-switch">
-          <legend>Nguồn</legend>
-          <label><input type="radio" name="mode" value="page" checked /> URL trang video</label>
-          <label><input type="radio" name="mode" value="directHls" /> Playlist HLS trực tiếp</label>
+          <legend data-i18n="mode.legend"></legend>
+          <label><input type="radio" name="mode" value="page" checked /> <span data-i18n="mode.page"></span></label>
+          <label><input type="radio" name="mode" value="directHls" /> <span data-i18n="mode.direct"></span></label>
         </fieldset>
 
         <div id="page-fields" class="field-stack">
-          <label for="page-url">URL trang video</label>
+          <label for="page-url" data-i18n="page.label"></label>
           <input
             id="page-url"
             name="pageUrl"
@@ -42,11 +49,11 @@
             placeholder="https://example.com/watch/video"
             required
           />
-          <p class="hint">yt-dlp phải hỗ trợ trang này. Trang dựng player bằng JavaScript có thể không được hỗ trợ.</p>
+          <p class="hint" data-i18n="page.hint"></p>
         </div>
 
         <div id="direct-fields" class="field-stack hidden">
-          <label for="playlist-input">URL playlist (.m3u8)</label>
+          <label for="playlist-input" data-i18n="playlist.label"></label>
           <input
             id="playlist-input"
             name="playlistUrl"
@@ -56,7 +63,7 @@
             maxlength="8192"
             placeholder="https://cdn.example.com/video/playlist.m3u8"
           />
-          <label for="referer-input">Trang chứa playlist (dùng làm Referer)</label>
+          <label for="referer-input" data-i18n="referer.label"></label>
           <input
             id="referer-input"
             name="refererPageUrl"
@@ -66,19 +73,19 @@
             maxlength="2048"
             placeholder="https://example.com/watch/video"
           />
-          <p class="hint">HighVi chỉ gửi origin của trang (ví dụ https://example.com/), không gửi đường dẫn, query, cookie hay phiên đăng nhập.</p>
+          <p class="hint" data-i18n="direct.hint"></p>
         </div>
 
         <div class="actions">
-          <button id="discover-button" class="primary" type="submit">Tìm HLS</button>
+          <button id="discover-button" class="primary" type="submit" data-i18n="discover.button"></button>
         </div>
-        <p class="hint">Chỉ chấp nhận HTTPS công khai; địa chỉ local/private bị chặn.</p>
+        <p class="hint" data-i18n="discover.hint"></p>
       </form>
 
       <section id="result-card" class="card hidden" aria-labelledby="result-heading">
         <div class="section-heading">
           <div>
-            <p class="eyebrow">Đã tìm thấy</p>
+            <p class="eyebrow" data-i18n="result.eyebrow"></p>
             <h2 id="result-heading">Video</h2>
           </div>
           <span class="badge">HLS</span>
@@ -86,36 +93,36 @@
 
         <dl class="details">
           <div>
-            <dt>Playlist</dt>
+            <dt data-i18n="result.playlist"></dt>
             <dd id="playlist-url"></dd>
           </div>
           <div>
-            <dt>Referer</dt>
+            <dt data-i18n="result.referer"></dt>
             <dd id="referer-url"></dd>
           </div>
         </dl>
 
         <form id="download-form" class="download-form">
-          <label for="filename">Tên file đầu ra</label>
+          <label for="filename" data-i18n="filename.label"></label>
           <div class="input-row">
             <input id="filename" name="filename" type="text" maxlength="124" required />
-            <button id="download-button" class="primary" type="submit">Tải MP4</button>
+            <button id="download-button" class="primary" type="submit" data-i18n="download.button"></button>
           </div>
-          <p class="hint">File được lưu vào <strong>Downloads/HighVi</strong>. File đã có sẽ không bị ghi đè.</p>
+          <p class="hint" data-i18n="download.hint"></p>
         </form>
       </section>
 
       <section id="status-card" class="status card hidden" aria-live="polite">
         <div class="status-line">
           <span id="status-dot" class="status-dot" aria-hidden="true"></span>
-          <strong id="status-message">Đang chuẩn bị…</strong>
+          <strong id="status-message"></strong>
           <span id="status-percent" class="percent"></span>
         </div>
         <div
           id="progress-track"
           class="progress-track"
           role="progressbar"
-          aria-label="Tiến độ tải"
+          data-i18n-aria-label="progress.aria"
           aria-valuemin="0"
           aria-valuemax="100"
         >
@@ -128,12 +135,12 @@
       </section>
 
       <section id="error-card" class="error-card hidden" role="alert">
-        <strong>Không thể hoàn tất</strong>
+        <strong data-i18n="error.title"></strong>
         <p id="error-message"></p>
       </section>
 
       <section id="success-card" class="success-card hidden" aria-live="polite">
-        <strong>Đã tải xong</strong>
+        <strong data-i18n="success.title"></strong>
         <p id="saved-path"></p>
       </section>
     </main>
