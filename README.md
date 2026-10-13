@@ -1,66 +1,127 @@
-# HighVi
+<div align="center">
+  <img src="docs/assets/matrix-banner.svg" alt="HighVi — green digital rain" width="100%" />
 
-HighVi là MVP desktop cho Ubuntu: dán URL trang video được phép truy cập, để `yt-dlp` tìm playlist HLS (`.m3u8`), rồi tải và remux thành MP4 với đúng `Referer`.
+  <p>
+    <strong>English</strong> ·
+    <a href="README.vi.md">Tiếng Việt</a> ·
+    <a href="README.ja.md">日本語</a>
+  </p>
 
-## Phạm vi MVP
+  <p>
+    <a href="https://tauri.app/"><img src="https://img.shields.io/badge/Tauri-v2-00ff41?style=flat-square&logo=tauri&logoColor=00ff41&labelColor=000000" alt="Tauri v2" /></a>
+    <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-2024-00ff41?style=flat-square&logo=rust&logoColor=00ff41&labelColor=000000" alt="Rust 2024" /></a>
+    <img src="https://img.shields.io/badge/Ubuntu-desktop-00ff41?style=flat-square&logo=ubuntu&logoColor=00ff41&labelColor=000000" alt="Ubuntu desktop" />
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-00ff41?style=flat-square&labelColor=000000" alt="MIT License" /></a>
+  </p>
 
-- Giao diện Tauri v2 bằng HTML/CSS/JavaScript thuần; Rust là backend và nơi giữ toàn bộ kiểm tra an toàn.
-- Chỉ nhận URL HTTPS công khai; chặn hostname/IP local, private và reserved trước khi gọi công cụ ngoài.
-- Gọi `yt-dlp` bằng danh sách đối số, không dùng shell; tên file không thể chứa đường dẫn.
-- Bỏ qua toàn bộ config/plugin/cookie/`--exec` bên ngoài của `yt-dlp`; hành vi app không phụ thuộc config cá nhân.
-- Tìm HLS, từ chối media được đánh dấu DRM, làm mới playlist trước khi tải, hiển thị tiến độ có cấu trúc.
-- Mỗi lần chỉ chạy một download. File được tải vào thư mục job riêng rồi publish atomically, không thay thế, vào `~/Downloads/HighVi`; file đã có không bị ghi đè.
-- Không nhập cookie, không sao chép phiên trình duyệt, không vượt đăng nhập/DRM/kiểm soát truy cập.
+  <p><code>&gt; wake up... the video is waiting_</code></p>
+</div>
 
-## Chạy trên Ubuntu
+## 🟩 What is HighVi?
 
-Máy hiện đã có Rust, Node.js, `yt-dlp` và FFmpeg. Tauri còn cần thư viện WebKitGTK hệ thống:
+Lots of videos on the internet aren't one big file. They're chopped into **lots of tiny pieces**, and a small list called a **playlist** (a file ending in `.m3u8`) says where every piece lives. Think of it as a **treasure map**.
+
+HighVi reads the treasure map, collects every piece, and glues them back together into **one MP4 file** you can watch anywhere.
+
+<div align="center">
+  <img src="docs/assets/screenshot-en.png" alt="HighVi window in the green Matrix theme" width="720" />
+  <br />
+  <sub>The HighVi window (shown with example data).</sub>
+</div>
+
+## 🕹️ Two ways to use it
+
+| Mode | You paste | Good for |
+| --- | --- | --- |
+| **Video page link** | The link to the video page | Sites that `yt-dlp` already knows |
+| **Playlist link (.m3u8)** | The playlist link **and** the page you found it on | When you already have the `.m3u8` link |
+
+HighVi speaks **English, Tiếng Việt, and 日本語**. Pick one with the buttons in the top corner, and HighVi will remember it.
+
+**Why does “Playlist link” ask for the page too?**
+Some websites only hand out the treasure map if you say where you came from, like showing a ticket at the door. That note is called the **Referer**. HighVi only tells them the website's front-door address (for example `https://example.com/`). It never sends the rest of the page link, your cookies, or your logins.
+
+**Where do I find a playlist link?** In your browser, press <kbd>F12</kbd>, open the **Network** tab, play the video, and type `m3u8` in the filter box. Only do this for videos you're allowed to download.
+
+## ✅ What HighVi does
+
+1. You paste a link.
+2. HighVi checks that it's a safe `https://` link, and not a computer inside your home or office network.
+3. `yt-dlp` looks for the treasure map.
+4. HighVi shows you the title, a **shortened** playlist link (the secret parts are hidden), and the Referer it will send.
+5. You pick a file name and press **Download MP4**.
+6. The finished video lands in **`~/Downloads/HighVi`**. HighVi never writes over a file that's already there.
+
+## 🛑 What HighVi will never do
+
+- Break DRM, paywalls, or logins.
+- Use your browser's cookies or sessions.
+- Pretend to be a web browser to sneak past bot protection.
+- Run plugins or extra commands from your `yt-dlp` settings.
+
+> [!IMPORTANT]
+> Only download videos you own or have permission to download.
+
+## 🚀 Get started
+
+You need **Ubuntu**, **Rust**, **Node.js**, **`yt-dlp`**, and **FFmpeg**.
+
+Install the system libraries Tauri needs:
 
 ```bash
 sudo apt update
-sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+sudo apt install build-essential curl wget file libxdo-dev libssl-dev \
+  libayatana-appindicator3-dev librsvg2-dev libwebkit2gtk-4.1-dev ffmpeg
 ```
 
-Sau đó, trong thư mục dự án:
+Install `yt-dlp` from your package manager or from the [official project](https://github.com/yt-dlp/yt-dlp), and keep it up to date. Then check that everything is there:
+
+```bash
+yt-dlp --version && ffmpeg -version && node --version && cargo --version
+```
+
+Run the app:
 
 ```bash
 npm install
-npm run dev
+npm run dev     # open HighVi
+npm run build   # make a .deb and an AppImage
 ```
 
-Tạo gói `.deb` và AppImage:
+## 🧯 When something goes wrong
+
+| Message code | What it means | What to try |
+| --- | --- | --- |
+| `access_denied` / `host_firewall_block` | The website said **no** (HTTP 403). | If you pasted a `.m3u8` link as a page, switch to **Playlist link** and add the page you found it on. Check it's the right page, or copy a fresh playlist link. If the site needs you logged in through a browser, HighVi can't help. |
+| `unsupported_page` | `yt-dlp` doesn't know this website, or the video player is built with JavaScript. | Use **Playlist link** if you have the playlist link. |
+| `unsupported_playlist` | The link isn't a playlist HighVi can read. | Make sure it's the `.m3u8` link itself. |
+| `media_not_found` | The video is gone (HTTP 404/410). | The link may have expired. Copy a fresh one. |
+| `drm_not_supported` | The video is locked with DRM. | HighVi won't unlock it. |
+| `authentication_required` | You have to sign in to watch it. | HighVi doesn't use your logins. |
+| `network_timeout` | The website took too long to answer. | Try again later. |
+| `output_exists` | There's already a file with that name. | Pick another name. |
+| `missing_dependency` | `yt-dlp` or FFmpeg isn't installed. | Install it, then try again. |
+
+## 🧠 For developers
 
 ```bash
-npm run build
+cargo test --workspace --offline
+cargo clippy --workspace --all-targets --offline -- -D warnings
+cargo fmt --all -- --check
+node --check ui/app.js && node --check ui/i18n.js && node --check ui/rain.js
 ```
 
-Chạy riêng kiểm thử lõi Rust (không cần WebKitGTK):
-
-```bash
-cargo test -p highvi-core
+```text
+crates/highvi-core/   URL checks, Referer rules, yt-dlp arguments, error messages (all unit-tested)
+src-tauri/            Tauri commands: run yt-dlp, report progress, save the file safely
+ui/                   The green window: index.html, styles.css, app.js, i18n.js (English · Tiếng Việt · 日本語), rain.js
+docs/assets/          README banner and screenshots
 ```
 
-## Luồng xử lý
+[SECURITY.md](SECURITY.md) explains how HighVi keeps you safe and what its limits are today. In short: HighVi checks the links you give it, but `yt-dlp` downloads the video pieces by itself, so those later requests aren't checked one by one yet.
 
-1. Rust xác thực URL trang và DNS, từ chối đích mạng không công khai.
-2. Rust chạy `yt-dlp --dump-single-json --no-playlist --skip-download -- <URL>` trong tối đa 60 giây.
-3. Rust parse JSON có giới hạn, chọn manifest HLS không DRM và kiểm tra URL/DNS của playlist.
-4. Khi người dùng bấm tải, Rust lặp lại bước khám phá để tránh URL HLS đã hết hạn hoặc dữ liệu webview bị sửa.
-5. Rust chạy `yt-dlp` với `--referer`, output template cố định và progress template; giao diện chỉ hiển thị sự kiện tiến độ đã parse.
-6. Trên Linux, file hoàn tất được đổi tên atomically bằng `RENAME_NOREPLACE`; nếu tên đã tồn tại, file cũ không bị thay thế. Job HighVi bị gián đoạn được giữ để phục hồi và tự dọn sau 7 ngày.
+## 📜 License
 
-## Tauri v2 hay Dioxus?
+[MIT](LICENSE)
 
-Tauri v2 hợp với MVP này vì UI nhỏ, backend Rust rõ ràng và có thể dùng webview có sẵn của Ubuntu. Dioxus Desktop cũng dùng webview và không làm mất yêu cầu phụ thuộc WebKitGTK, trong khi sẽ thêm một lớp UI Rust chưa cần thiết.
-
-Tauri hỗ trợ desktop/mobile về mặt framework, nhưng chính chức năng này phụ thuộc vào tiến trình `yt-dlp` + FFmpeg. Trình duyệt web không được phép spawn tiến trình; Android/iOS cần cách đóng gói, sandbox, lưu file và chính sách phân phối riêng. Vì vậy bản đầu chỉ cam kết Ubuntu desktop; phần lõi Rust được tách thành crate để có thể tái sử dụng sau.
-
-## Giới hạn an toàn đã biết
-
-Kiểm tra DNS được thực hiện cho URL ban đầu và playlist đã trích xuất. Tuy nhiên `yt-dlp` có thể tự theo redirect hoặc tải các segment con; MVP chưa có proxy mạng riêng để ép chính sách IP trên từng request. Không nên dán URL từ nguồn không tin cậy. Một bản hardening sau có thể chạy mọi request qua proxy lọc địa chỉ hoặc sandbox mạng.
-
-HighVi không khẳng định người dùng có quyền tải bất kỳ nội dung cụ thể nào. Trách nhiệm quyền sử dụng thuộc về người dùng.
-
-## License
-
-HighVi is available under the [MIT License](LICENSE).
+<div align="center"><sub><code>there is no spoon — only segments_</code></sub></div>

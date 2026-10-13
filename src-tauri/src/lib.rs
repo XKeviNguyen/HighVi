@@ -1,10 +1,12 @@
 use highvi_core::{
-    Discovery, PublicError, YT_DLP_HERMETIC_ARGS, ensure_public_network_target,
-    extract_hls_from_json, read_capped, rename_without_replacement, validate_output_filename,
-    validate_page_url, validate_playlist_url,
+    Discovery, PublicError, SourceRequest, ToolSignals, ValidatedSource, YT_DLP_ENV_PASSTHROUGH,
+    YT_DLP_FIXED_ENV, classify_tool_failure, discovery_args, download_args,
+    ensure_public_network_target, extract_hls_from_json, read_capped, redact_url_for_display,
+    rename_without_replacement, validate_output_filename, validate_playlist_url, validate_source,
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    ffi::OsString,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -33,8 +35,19 @@ struct AppState {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DownloadRequest {
-    page_url: String,
+    source: SourceRequest,
     filename: String,
+}
+
+/// What the webview may see about a discovery. URLs are redacted because the
+/// full playlist URL can carry access tokens.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoveryView {
+    title: String,
+    suggested_filename: String,
+    playlist_display: String,
+    referer_display: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -53,17 +66,20 @@ struct DownloadProgress {
     message: String,
 }
 
-#[derive(Default)]
-struct ToolSignals {
-    forbidden: bool,
-    unsupported: bool,
-    authentication: bool,
-    no_formats: bool,
-}
-
 #[tauri::command]
-async fn discover_video(page_url: String) -> Result<Discovery, PublicError> {
-    inspect_page(&page_url).await
+async fn discover_video(source: SourceRequest) -> Result<DiscoveryView, PublicError> {
+    let source = validate_source(&source)?;
+    let discovery = inspect_source(&source).await?;
+    let playlist = validate_playlist_url(&discovery.playlist_url)?;
+    Ok(DiscoveryView {
+        title: discovery.title,
+        suggested_filename: discovery.suggested_filename,
+        playlist_display: redact_url_for_display(&playlist),
+        referer_display: source
+            .download_referer()
+            .and_then(|referer| url::Url::parse(&referer).ok())
+            .map(|referer| redact_url_for_display(&referer)),
+    })
 }
 
 #[tauri::command]
@@ -84,34 +100,41 @@ async fn download_video(
         *active = true;
     }
 
-    let result = run_download(&app, &request.page_url, &filename).await;
+    let result = match validate_source(&request.source) {
+        Ok(source) => run_download(&app, &source, &filename).await,
+        Err(error) => Err(error),
+    };
     *state.download_active.lock().await = false;
     result
 }
 
-async fn inspect_page(raw_page_url: &str) -> Result<Discovery, PublicError> {
-    let page_url = validate_page_url(raw_page_url)?;
-    ensure_public_network_target(&page_url).await?;
-
+/// A yt-dlp process with a cleared environment and no shell. The arguments
+/// come from `highvi_core::ytdlp_args`, which starts them with the hermetic
+/// policy.
+fn ytdlp_command(args: Vec<OsString>) -> Command {
     let mut command = Command::new("yt-dlp");
     command
         .kill_on_drop(true)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .args(YT_DLP_HERMETIC_ARGS)
-        .args([
-            "--dump-single-json",
-            "--no-playlist",
-            "--skip-download",
-            "--no-warnings",
-            "--socket-timeout",
-            "20",
-            "--",
-            page_url.as_str(),
-        ]);
+        .env_clear()
+        .envs(
+            YT_DLP_ENV_PASSTHROUGH
+                .iter()
+                .filter_map(|name| std::env::var_os(name).map(|value| (*name, value))),
+        )
+        .envs(YT_DLP_FIXED_ENV.iter().copied())
+        .args(args);
+    command
+}
 
-    let mut child = command
+async fn inspect_source(source: &ValidatedSource) -> Result<Discovery, PublicError> {
+    let target = source.discovery_target();
+    ensure_public_network_target(target).await?;
+
+    let referer = source.discovery_referer();
+    let mut child = ytdlp_command(discovery_args(target, referer.as_deref()))
         .spawn()
         .map_err(|error| missing_tool_error(error, "yt-dlp"))?;
     let stdout = child.stdout.take().ok_or_else(process_start_error)?;
@@ -141,19 +164,21 @@ async fn inspect_page(raw_page_url: &str) -> Result<Discovery, PublicError> {
         }
     };
 
-    if stdout.overflowed || stderr.overflowed {
+    // Oversized stderr is only truncated diagnostics; oversized metadata is unsafe.
+    if stdout.overflowed {
         return Err(PublicError::new(
             "extractor_output_too_large",
             "The media page returned more metadata than HighVi can safely process.",
         ));
     }
     if !status.success() {
-        return Err(classify_tool_failure(&String::from_utf8_lossy(
-            &stderr.bytes,
-        )));
+        return Err(classify_tool_failure(
+            &String::from_utf8_lossy(&stderr.bytes),
+            source.kind(),
+        ));
     }
 
-    let discovery = extract_hls_from_json(page_url.as_str(), &stdout.bytes)?;
+    let discovery = extract_hls_from_json(&stdout.bytes)?;
     let playlist_url = validate_playlist_url(&discovery.playlist_url)?;
     ensure_public_network_target(&playlist_url).await?;
     Ok(discovery)
@@ -161,7 +186,7 @@ async fn inspect_page(raw_page_url: &str) -> Result<Discovery, PublicError> {
 
 async fn run_download(
     app: &AppHandle,
-    raw_page_url: &str,
+    source: &ValidatedSource,
     filename: &str,
 ) -> Result<DownloadResult, PublicError> {
     emit_progress(
@@ -177,9 +202,9 @@ async fn run_download(
 
     // Rediscover here instead of trusting playlist data sent by the webview. This
     // catches expired URLs and keeps the DRM/network checks at the Rust boundary.
-    let discovery = inspect_page(raw_page_url).await?;
-    let page_url = validate_page_url(&discovery.referer)?;
+    let discovery = inspect_source(source).await?;
     let playlist_url = validate_playlist_url(&discovery.playlist_url)?;
+    let referer = source.download_referer();
 
     let download_dir = app.path().download_dir().map_err(|_| {
         PublicError::new(
@@ -215,36 +240,11 @@ async fn run_download(
     let job_output = job_dir.join(filename);
 
     let process_result: Result<(), PublicError> = async {
-        let mut command = Command::new("yt-dlp");
-        command
-            .kill_on_drop(true)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .args(YT_DLP_HERMETIC_ARGS)
-            .args([
-                "--no-playlist",
-                "--newline",
-                "--progress",
-                "--progress-template",
-                "download:HIGHVI_PROGRESS|%(progress.status)s|%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
-                "--progress-template",
-                "postprocess:HIGHVI_POSTPROCESS|%(progress.status)s|%(progress.postprocessor)s",
-                "--socket-timeout",
-                "20",
-                "--no-overwrites",
-                "--no-post-overwrites",
-                "--merge-output-format",
-                "mp4",
-                "--remux-video",
-                "mp4",
-                "--referer",
-                page_url.as_str(),
-                "--output",
-            ])
-            .arg(&output_template)
-            .arg("--")
-            .arg(playlist_url.as_str());
+        let mut command = ytdlp_command(download_args(
+            &playlist_url,
+            referer.as_deref(),
+            &output_template,
+        ));
 
         let mut child = command
             .spawn()
@@ -253,16 +253,8 @@ async fn run_download(
         let stderr = child.stderr.take().ok_or_else(process_start_error)?;
         let signals = Arc::new(StdMutex::new(ToolSignals::default()));
 
-        let stdout_task = tokio::spawn(read_tool_stream(
-            stdout,
-            app.clone(),
-            Arc::clone(&signals),
-        ));
-        let stderr_task = tokio::spawn(read_tool_stream(
-            stderr,
-            app.clone(),
-            Arc::clone(&signals),
-        ));
+        let stdout_task = tokio::spawn(read_tool_stream(stdout, app.clone(), Arc::clone(&signals)));
+        let stderr_task = tokio::spawn(read_tool_stream(stderr, app.clone(), Arc::clone(&signals)));
 
         let status = child.wait().await.map_err(|_| process_start_error())?;
         let (stdout_result, stderr_result) = tokio::join!(stdout_task, stderr_task);
@@ -273,7 +265,7 @@ async fn run_download(
             let signals = signals
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            return Err(classify_signals(&signals));
+            return Err(signals.classify(source.kind()));
         }
         if !job_output.is_file() {
             return Err(PublicError::new(
@@ -290,10 +282,10 @@ async fn run_download(
         return Err(error);
     }
 
-    let source = job_output.clone();
+    let completed = job_output.clone();
     let destination = final_path.clone();
     let publish_result =
-        tokio::task::spawn_blocking(move || rename_without_replacement(&source, &destination))
+        tokio::task::spawn_blocking(move || rename_without_replacement(&completed, &destination))
             .await
             .map_err(|_| process_start_error())?;
     if let Err(error) = publish_result {
@@ -505,50 +497,10 @@ fn clean_progress_value(value: Option<&str>) -> Option<String> {
 }
 
 fn observe_tool_line(signals: &StdMutex<ToolSignals>, line: &str) {
-    let lower = line.to_ascii_lowercase();
-    let mut signals = signals
+    signals
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    signals.forbidden |= lower.contains("http error 403") || lower.contains("forbidden");
-    signals.unsupported |= lower.contains("unsupported url");
-    signals.authentication |= lower.contains("sign in") || lower.contains("login required");
-    signals.no_formats |=
-        lower.contains("no video formats") || lower.contains("requested format is not available");
-}
-
-fn classify_tool_failure(stderr: &str) -> PublicError {
-    let signals = StdMutex::new(ToolSignals::default());
-    for line in stderr.lines().take(2_000) {
-        observe_tool_line(&signals, line);
-    }
-    let signals = signals.into_inner().unwrap_or_default();
-    classify_signals(&signals)
-}
-
-fn classify_signals(signals: &ToolSignals) -> PublicError {
-    if signals.forbidden {
-        PublicError::new(
-            "site_blocked_request",
-            "The video host rejected the request (HTTP 403). The page may require a browser session that HighVi does not copy or bypass.",
-        )
-    } else if signals.authentication {
-        PublicError::new(
-            "authentication_required",
-            "This media requires sign-in or access that HighVi will not bypass.",
-        )
-    } else if signals.unsupported {
-        PublicError::new(
-            "unsupported_page",
-            "yt-dlp does not support this page or could not recognize its media.",
-        )
-    } else if signals.no_formats {
-        PublicError::new("no_formats", "No downloadable media format was available.")
-    } else {
-        PublicError::new(
-            "yt_dlp_failed",
-            "yt-dlp could not process this media. Check that the URL is accessible and that yt-dlp is up to date.",
-        )
-    }
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .observe(line);
 }
 
 fn missing_tool_error(error: std::io::Error, tool: &str) -> PublicError {
@@ -602,15 +554,5 @@ mod tests {
         assert_eq!(progress.speed.as_deref(), Some("2.3MiB/s"));
         assert_eq!(progress.eta.as_deref(), Some("00:12"));
         assert!(parse_progress_line("https://secret.example/path?token=abc").is_none());
-    }
-
-    #[test]
-    fn classifies_tool_errors_without_returning_raw_urls() {
-        let error = classify_tool_failure(
-            "ERROR: https://secret.example/a?token=abc HTTP Error 403: Forbidden",
-        );
-        assert_eq!(error.code, "site_blocked_request");
-        assert!(!error.message.contains("secret.example"));
-        assert!(!error.message.contains("token"));
     }
 }
