@@ -72,23 +72,18 @@ impl ValidatedSource {
     pub fn discovery_referer(&self) -> Option<String> {
         match self {
             Self::Page { .. } => None,
-            Self::DirectHls {
-                playlist,
-                referer_page,
-            } => Some(referer_for_request(referer_page, playlist)),
+            Self::DirectHls { referer_page, .. } => Some(referer_origin(referer_page)),
         }
     }
 
-    /// Referer for downloading `playlist`, the HLS manifest chosen by discovery.
-    pub fn download_referer(&self, playlist: &Url) -> Option<String> {
+    /// Referer for downloading the HLS media chosen by discovery.
+    pub fn download_referer(&self) -> Option<String> {
         match self {
             // A pasted playlist has no known referring page; it must never be
             // sent as its own Referer, even when discovery returns another URL.
             Self::Page { .. } if self.kind() == SourceKind::BarePlaylist => None,
-            Self::Page { page } => Some(referer_for_request(page, playlist)),
-            Self::DirectHls { referer_page, .. } => {
-                Some(referer_for_request(referer_page, playlist))
-            }
+            Self::Page { page } => Some(referer_origin(page)),
+            Self::DirectHls { referer_page, .. } => Some(referer_origin(referer_page)),
         }
     }
 
@@ -103,18 +98,13 @@ impl ValidatedSource {
     }
 }
 
-/// The Referer a browser sends for a subresource under the default
-/// `strict-origin-when-cross-origin` policy: the page URL (without fragment)
-/// for same-origin requests, otherwise only the page origin. Both URLs are
-/// HTTPS, so the policy's downgrade rule never applies.
-pub fn referer_for_request(page: &Url, target: &Url) -> String {
-    if page.origin() == target.origin() {
-        let mut referer = page.clone();
-        referer.set_fragment(None);
-        referer.to_string()
-    } else {
-        format!("{}/", page.origin().ascii_serialization())
-    }
+/// The Referer HighVi sends: only the page origin. yt-dlp applies one header
+/// value to every request (playlist, variants, segments, keys), and some of
+/// those may go to other hosts, where a browser would also send only the
+/// origin under its default `strict-origin-when-cross-origin` policy. Never
+/// sending the page path or query keeps page tokens away from those hosts.
+pub fn referer_origin(page: &Url) -> String {
+    format!("{}/", page.origin().ascii_serialization())
 }
 
 #[cfg(test)]
@@ -155,25 +145,24 @@ mod tests {
     }
 
     #[test]
-    fn cross_origin_referer_is_reduced_to_the_page_origin() {
-        assert_eq!(
-            referer_for_request(
-                &url("https://site.example/ja/watch/123?session=secret#t=10"),
-                &url("https://cdn.example/abc/playlist.m3u8"),
+    fn referer_is_reduced_to_the_page_origin() {
+        for (page, expected) in [
+            (
+                "https://site.example/ja/watch/123?session=secret#t=10",
+                "https://site.example/",
             ),
-            "https://site.example/"
-        );
-    }
-
-    #[test]
-    fn same_origin_referer_keeps_the_page_without_fragment() {
-        assert_eq!(
-            referer_for_request(
-                &url("https://site.example/watch?v=1#player"),
-                &url("https://site.example/media/master.m3u8"),
+            (
+                "https://site.example:8443/watch",
+                "https://site.example:8443/",
             ),
-            "https://site.example/watch?v=1"
-        );
+            ("https://site.example:443/watch", "https://site.example/"),
+            (
+                "https://bücher.example/watch",
+                "https://xn--bcher-kva.example/",
+            ),
+        ] {
+            assert_eq!(referer_origin(&url(page)), expected);
+        }
     }
 
     #[test]
@@ -192,9 +181,7 @@ mod tests {
             Some("https://site.example/")
         );
         assert_eq!(
-            source
-                .download_referer(&url("https://cdn.example/abc/playlist.m3u8"))
-                .as_deref(),
+            source.download_referer().as_deref(),
             Some("https://site.example/")
         );
         assert_eq!(source.kind(), SourceKind::DirectHls);
@@ -208,18 +195,12 @@ mod tests {
         .unwrap();
         assert_eq!(bare.kind(), SourceKind::BarePlaylist);
         assert_eq!(bare.discovery_referer(), None);
-        assert_eq!(
-            bare.download_referer(&url("https://cdn.example/abc/playlist.m3u8")),
-            None
-        );
+        assert_eq!(bare.download_referer(), None);
         let signed = validate_source(&SourceRequest::Page {
             page_url: "https://cdn.example/abc/playlist.m3u8?token=T".to_string(),
         })
         .unwrap();
-        assert_eq!(
-            signed.download_referer(&url("https://cdn.example/abc/720p/video.m3u8")),
-            None
-        );
+        assert_eq!(signed.download_referer(), None);
 
         let page = validate_source(&SourceRequest::Page {
             page_url: "https://site.example/watch/1".to_string(),
@@ -228,8 +209,7 @@ mod tests {
         assert_eq!(page.kind(), SourceKind::Page);
         assert_eq!(page.discovery_referer(), None);
         assert_eq!(
-            page.download_referer(&url("https://cdn.example/master.m3u8"))
-                .as_deref(),
+            page.download_referer().as_deref(),
             Some("https://site.example/")
         );
     }
@@ -281,23 +261,47 @@ mod tests {
 
     #[test]
     fn referer_value_cannot_carry_header_injection() {
-        // WHATWG URL parsing strips raw CR/LF/tab anywhere in the input and
-        // keeps percent-encoded ones encoded, so neither can split the header.
+        // WHATWG URL parsing strips raw CR/LF/tab anywhere in the input,
+        // including the host, and the Referer keeps only the origin.
         let source = validate_source(&direct(
             "https://cdn.example/a.m3u8",
-            "https://site.example/wa\r\ntch?x=%0d%0aX-Injected:%201\nY: 2",
+            "https://site.exa\r\nmple/wa\r\ntch?x=%0d%0aX-Injected:%201\nY: 2",
         ))
         .unwrap();
+        for referer in [
+            source.discovery_referer().unwrap(),
+            source.download_referer().unwrap(),
+        ] {
+            assert_eq!(referer, "https://site.example/");
+        }
+
+        // Percent-encoded control characters are not valid in a host.
         assert_eq!(
-            source.discovery_referer().as_deref(),
-            Some("https://site.example/")
+            validate_source(&direct(
+                "https://cdn.example/a.m3u8",
+                "https://site.example%0d%0aX-Injected:%201/watch",
+            ))
+            .unwrap_err()
+            .code,
+            "invalid_referer_url"
         );
-        assert_eq!(
-            source
-                .download_referer(&url("https://site.example/a.m3u8"))
-                .as_deref(),
-            Some("https://site.example/watch?x=%0d%0aX-Injected:%201Y:%202")
-        );
+    }
+
+    #[test]
+    fn same_origin_playlist_still_gets_only_the_page_origin() {
+        // yt-dlp sends --add-headers on every request, including segments and
+        // keys on other hosts, so the page path and query must never be sent.
+        let source = validate_source(&direct(
+            "https://site.example/media/master.m3u8",
+            "https://site.example/watch/1?session=secret",
+        ))
+        .unwrap();
+        for referer in [
+            source.discovery_referer().unwrap(),
+            source.download_referer().unwrap(),
+        ] {
+            assert_eq!(referer, "https://site.example/");
+        }
     }
 
     #[test]

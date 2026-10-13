@@ -15,9 +15,7 @@ pub use error::PublicError;
 pub use filesystem::rename_without_replacement;
 pub use process_output::{CappedOutput, read_capped};
 pub use process_policy::{YT_DLP_ENV_PASSTHROUGH, YT_DLP_FIXED_ENV, YT_DLP_HERMETIC_ARGS};
-pub use source::{
-    SourceKind, SourceRequest, ValidatedSource, referer_for_request, validate_source,
-};
+pub use source::{SourceKind, SourceRequest, ValidatedSource, referer_origin, validate_source};
 pub use validation::{
     ensure_public_network_target, redact_url_for_display, suggested_filename,
     validate_output_filename, validate_page_url, validate_playlist_url, validate_referer_page_url,

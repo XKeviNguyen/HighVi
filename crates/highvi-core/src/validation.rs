@@ -29,22 +29,29 @@ pub fn validate_referer_page_url(raw: &str) -> Result<Url, PublicError> {
     validate_https_url(raw, MAX_PAGE_URL_BYTES, "referer")
 }
 
-/// A short form of `url` that is safe to show: scheme, host, and the last path
-/// segment. Middle path segments and the query may carry tokens.
+/// A short form of `url` that is safe to show: scheme, host, port, and the
+/// file extension. Any path segment, including the file name, and the query
+/// may carry signed tokens, so they are masked.
 pub fn redact_url_for_display(url: &Url) -> String {
     let host = url.host_str().unwrap_or_default();
     let port = url
         .port()
         .map(|port| format!(":{port}"))
         .unwrap_or_default();
-    let segments: Vec<&str> = url
+    let last = url
         .path_segments()
-        .map(|segments| segments.filter(|segment| !segment.is_empty()).collect())
-        .unwrap_or_default();
-    let path = match segments.as_slice() {
-        [] => "/".to_string(),
-        [only] => format!("/{only}"),
-        [.., last] => format!("/…/{last}"),
+        .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()));
+    let path = match last {
+        None => "/".to_string(),
+        Some(last) => match last.rsplit_once('.') {
+            Some((_, extension))
+                if (1..=5).contains(&extension.len())
+                    && extension.bytes().all(|byte| byte.is_ascii_alphanumeric()) =>
+            {
+                format!("/…/*.{extension}")
+            }
+            _ => "/…".to_string(),
+        },
     };
     let query = if url.query().is_some() { "?…" } else { "" };
     format!("{}://{host}{port}{path}{query}", url.scheme())
@@ -280,21 +287,36 @@ mod tests {
     }
 
     #[test]
+    fn display_redaction_hides_a_signed_final_path_segment() {
+        for raw in [
+            "https://cdn.example/sig-secret.m3u8",
+            "https://cdn.example/a/b/sig-secret.m3u8?x=1",
+        ] {
+            let shown = redact_url_for_display(&Url::parse(raw).unwrap());
+            assert!(!shown.contains("secret"), "{shown}");
+            assert!(shown.starts_with("https://cdn.example/"), "{shown}");
+            assert!(shown.contains(".m3u8"), "{shown}");
+        }
+    }
+
+    #[test]
     fn display_redaction_hides_path_tokens_and_query() {
         for (raw, expected) in [
             ("https://site.example/", "https://site.example/"),
             (
                 "https://cdn.example/master.m3u8",
-                "https://cdn.example/master.m3u8",
+                "https://cdn.example/…/*.m3u8",
             ),
             (
                 "https://cdn.example/secret-token/abc/playlist.m3u8?sig=secret",
-                "https://cdn.example/…/playlist.m3u8?…",
+                "https://cdn.example/…/*.m3u8?…",
             ),
             (
                 "https://cdn.example:8443/a/b.m3u8",
-                "https://cdn.example:8443/…/b.m3u8",
+                "https://cdn.example:8443/…/*.m3u8",
             ),
+            ("https://cdn.example/a/secret", "https://cdn.example/…"),
+            ("https://cdn.example/a/x.sec%2Fret", "https://cdn.example/…"),
         ] {
             assert_eq!(redact_url_for_display(&Url::parse(raw).unwrap()), expected);
         }

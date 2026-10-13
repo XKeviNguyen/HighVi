@@ -19,7 +19,7 @@ HighVi is a small desktop app for Ubuntu that downloads permitted HLS media as M
 - HighVi only accepts HTTPS page and playlist URLs and rejects empty, credentialed, local, private, and reserved targets before launching external tools.
 - The app does not bypass DRM, sign-in, paywalls, or other access controls. Users must have permission to download the media they submit.
 - `yt-dlp` is spawned with hermetic arguments: `--ignore-config`, `--no-plugin-dirs`, `--no-exec`, `--no-cookies`, and `--no-cookies-from-browser`. Its environment is cleared except for `PATH`, `HOME`, locale, `TMPDIR`, and proxy variables, and `YTDLP_NO_PLUGINS=1` is set. The app does not inherit personal browser sessions, `yt-dlp` config, or Python overrides from the user environment.
-- The `Referer` is never a credential or a copied session. Following the browser default (`strict-origin-when-cross-origin`), HighVi sends only the page origin when the playlist is on another host.
+- The `Referer` is never a credential or a copied session. HighVi sends only the page origin (`https://site.example/`). `yt-dlp` applies one header to every request, including segments and keys on other hosts, where a browser would also send only the origin, so the page path and query never leave the app.
 - The filename is validated before use and cannot contain path separators, reserved characters, or template variables.
 - Download results are published to a fixed output directory in `~/Downloads/HighVi` with a no-overwrite rename on Linux.
 
@@ -34,7 +34,7 @@ The actual app flow in this repository is:
 1. A user chooses a mode in the Tauri webview and enters either a page URL, or a playlist URL plus the page it came from.
 2. Rust validates the URLs, blocks local/private network targets, and resolves the host it will contact before discovery continues.
 3. Rust runs `yt-dlp` in discovery mode against the page (no `Referer`) or the playlist (with the page as `Referer`) and identifies a clear HLS playlist.
-4. Rust rejects DRM-marked streams and validates the discovered HLS URL before the download begins. The UI only receives redacted URLs (`https://host/…/playlist.m3u8?…`).
+4. Rust rejects DRM-marked streams and validates the discovered HLS URL before the download begins. The UI only receives redacted URLs (`https://host/…/*.m3u8?…`); path segments, file names, and queries are masked.
 5. The user triggers the download, and Rust re-discovers the playlist so it is not trusting stale URL data from the UI.
 6. `yt-dlp` downloads the stream with its native HLS downloader, sends the `Referer` derived from the page, and emits structured progress events.
 7. The completed file is staged in a per-job directory and published to `~/Downloads/HighVi` with an atomic no-overwrite rename.

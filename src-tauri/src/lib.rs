@@ -76,7 +76,7 @@ async fn discover_video(source: SourceRequest) -> Result<DiscoveryView, PublicEr
         suggested_filename: discovery.suggested_filename,
         playlist_display: redact_url_for_display(&playlist),
         referer_display: source
-            .download_referer(&playlist)
+            .download_referer()
             .and_then(|referer| url::Url::parse(&referer).ok())
             .map(|referer| redact_url_for_display(&referer)),
     })
@@ -204,7 +204,7 @@ async fn run_download(
     // catches expired URLs and keeps the DRM/network checks at the Rust boundary.
     let discovery = inspect_source(source).await?;
     let playlist_url = validate_playlist_url(&discovery.playlist_url)?;
-    let referer = source.download_referer(&playlist_url);
+    let referer = source.download_referer();
 
     let download_dir = app.path().download_dir().map_err(|_| {
         PublicError::new(
