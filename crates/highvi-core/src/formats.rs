@@ -198,7 +198,9 @@ pub fn select_media(raw_json: &[u8]) -> Result<MediaInfo, PublicError> {
 
 /// Leaves only the chosen formats in the info JSON handed back to yt-dlp,
 /// so no selector, however yt-dlp interprets it, can reach a format HighVi
-/// rejected. Top-level media fields are removed for the same reason.
+/// rejected. Top-level media fields are removed for the same reason, and so
+/// is `webpage_url`: when a download fails, `--load-info-json` re-extracts
+/// that URL and downloads whatever it yields, skipping HighVi's checks.
 fn keep_only_selected(entry: &mut Value, selection: &Selection) {
     let chosen = |format: &Value| {
         let id = format.get("format_id").and_then(Value::as_str);
@@ -216,6 +218,8 @@ fn keep_only_selected(entry: &mut Value, selection: &Selection) {
             "requested_formats",
             "requested_downloads",
             "entries",
+            "webpage_url",
+            "original_url",
         ] {
             map.remove(key);
         }
@@ -501,7 +505,7 @@ mod tests {
     #[test]
     fn info_json_holds_only_the_chosen_formats_and_no_control_headers() {
         let media = select_media(
-            br#"{"url":"mms://192.168.1.1/x","http_headers":{"Ytdl-Request-Proxy":"__noproxy__","YouTubeDL-No-Compression":"1","X-Ok":"1"},
+            br#"{"url":"mms://192.168.1.1/x","webpage_url":"https://site.example/w","http_headers":{"Ytdl-Request-Proxy":"__noproxy__","YouTubeDL-No-Compression":"1","X-Ok":"1"},
               "formats":[
                 {"format_id":"all","protocol":"https","url":"https://c.example/v.mp4","ext":"mp4","height":2160},
                 {"format_id":"lan","protocol":"mms","url":"mms://192.168.1.1:8080/admin/reboot","height":4320},
@@ -520,6 +524,7 @@ mod tests {
             .collect();
         assert_eq!(ids, ["hls-720"]);
         assert!(entry.get("url").is_none());
+        assert!(entry.get("webpage_url").is_none());
         let text = String::from_utf8(media.info_json)
             .unwrap()
             .to_ascii_lowercase();
