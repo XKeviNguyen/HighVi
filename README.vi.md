@@ -26,7 +26,7 @@ HighVi đọc tấm bản đồ đó, đi gom từng mảnh rồi ghép lại th
 <div align="center">
   <img src="docs/assets/screenshot-vi.png" alt="Cửa sổ HighVi với giao diện Matrix màu xanh" width="720" />
   <br />
-  <sub>Cửa sổ HighVi (dữ liệu chỉ để minh họa).</sub>
+  <sub>Cửa sổ HighVi thật, chạy trên Ubuntu.</sub>
 </div>
 
 ## 🕹️ Hai cách dùng
@@ -87,6 +87,21 @@ npm run dev     # mở HighVi
 npm run build   # đóng gói .deb và AppImage
 ```
 
+## 📦 Cài đặt
+
+Hiện chưa có bản phát hành sẵn; hãy tự đóng gói (xem **Bắt đầu**), rồi:
+
+```bash
+# .deb (Ubuntu/Debian): tự cài kèm yt-dlp và FFmpeg
+sudo apt install ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+
+# hoặc AppImage (cần có sẵn yt-dlp và FFmpeg trong PATH)
+chmod +x target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
+./target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
+```
+
+Nếu AppImage báo lỗi FUSE, chạy với `APPIMAGE_EXTRACT_AND_RUN=1`. Muốn tìm video trên trang có trình phát dựng bằng JavaScript thì cài thêm Google Chrome hoặc Chromium.
+
 ## 🧯 Khi có lỗi
 
 | Mã lỗi | Nghĩa là gì | Thử làm gì |
@@ -104,7 +119,21 @@ npm run build   # đóng gói .deb và AppImage
 | `live_not_supported` | Đây là phát trực tiếp. | HighVi chỉ tải video đã phát xong. |
 | `missing_dependency` | Chưa cài `yt-dlp` hoặc FFmpeg. | Cài vào rồi thử lại. |
 
+## 🚧 Giới hạn hiện tại
+
+- **Chỉ HLS và MP4 thường.** Trang chỉ có DASH, phát trực tiếp và video có DRM sẽ bị từ chối, cố ý vậy.
+- **Không đăng nhập, không cookie.** Video cần đăng nhập, hoặc cần cookie mà trang đặt cho trình phát, sẽ không tải được. HighVi không bao giờ mượn phiên trình duyệt của bạn.
+- **Tìm bằng trình duyệt cần Google Chrome hoặc Chromium.** HighVi không kèm trình duyệt. Bản Chromium dạng snap chưa được kiểm thử.
+- **Trình phát cần bấm nút đặc biệt** (lớp “play” riêng, hỏi tuổi, hỏi đồng ý cookie) sẽ không được bấm. HighVi chỉ bật các thẻ `<video>` bình thường.
+- **Không dùng proxy hệ thống hay proxy công ty.** Lớp bảo vệ mạng của HighVi là lối ra duy nhất. Nếu mạng chặn kết nối trực tiếp thì sẽ không tải được.
+- **Media dùng `http://` bị từ chối,** kể cả khi trang là `https://`.
+- **Chỉ Linux** (đã thử trên Ubuntu 26.04, Google Chrome 153/154, yt-dlp 2026.03.17, FFmpeg 8).
+- **Mỗi lần một video.** Chưa có hàng đợi.
+- **URL media rất dài (trên 8 KiB) thấy trong trình duyệt sẽ bị bỏ qua.**
+
 ## 🧠 Dành cho lập trình viên
+
+Kiến trúc, quy trình và các giới hạn: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ```bash
 HIGHVI_REQUIRE_E2E=1 cargo test --workspace --offline

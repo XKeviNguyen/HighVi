@@ -26,7 +26,7 @@ HighVi reads the treasure map, collects every piece, and glues them back togethe
 <div align="center">
   <img src="docs/assets/screenshot-en.png" alt="HighVi window in the green Matrix theme" width="720" />
   <br />
-  <sub>The HighVi window (shown with example data).</sub>
+  <sub>The real HighVi window on Ubuntu.</sub>
 </div>
 
 ## 🕹️ Two ways to use it
@@ -87,6 +87,21 @@ npm run dev     # open HighVi
 npm run build   # make a .deb and an AppImage
 ```
 
+## 📦 Install
+
+There is no published release yet; build the packages yourself (see **Get started**), then:
+
+```bash
+# .deb (Ubuntu/Debian): also installs yt-dlp and FFmpeg
+sudo apt install ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+
+# or the AppImage (needs yt-dlp and FFmpeg on your PATH)
+chmod +x target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
+./target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
+```
+
+If the AppImage complains about FUSE, run it with `APPIMAGE_EXTRACT_AND_RUN=1`. For pages whose player is built with JavaScript, also install Google Chrome or Chromium.
+
 ## 🧯 When something goes wrong
 
 | Message code | What it means | What to try |
@@ -104,7 +119,21 @@ npm run build   # make a .deb and an AppImage
 | `live_not_supported` | It's a live stream. | HighVi downloads finished videos only. |
 | `missing_dependency` | `yt-dlp` or FFmpeg isn't installed. | Install it, then try again. |
 
+## 🚧 Known limitations
+
+- **HLS and plain MP4 only.** DASH-only sites, live streams, and DRM-protected video are refused on purpose.
+- **No logins, no cookies.** Videos that need you to be signed in, or a cookie the page sets for the player, won't download. HighVi never borrows your browser session.
+- **Browser search needs Google Chrome or Chromium.** HighVi doesn't ship a browser. The snap version of Chromium is untested.
+- **A player that needs a special click** (a custom "play" overlay, an age gate, a consent wall) won't be pressed. HighVi only starts normal `<video>` elements.
+- **No system or company proxy.** HighVi's own network guard is the only way out. Behind a proxy that blocks direct connections, downloads fail.
+- **Plain `http://` media is refused,** even when the page itself is `https://`.
+- **Linux only** (tested on Ubuntu 26.04, Google Chrome 153/154, yt-dlp 2026.03.17, FFmpeg 8).
+- **One download at a time.** No queue yet.
+- **Very long media URLs (over 8 KiB) seen in the browser are ignored.**
+
 ## 🧠 For developers
+
+Architecture, pipeline and limits: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ```bash
 HIGHVI_REQUIRE_E2E=1 cargo test --workspace --offline
