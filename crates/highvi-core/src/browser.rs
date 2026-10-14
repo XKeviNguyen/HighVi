@@ -48,7 +48,15 @@ const SETTLE: Duration = Duration::from_secs(2);
 const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_SESSIONS: usize = 48;
 const MAX_TRACKED_REQUESTS: usize = 4_000;
-const MAX_BODY_FETCHES: usize = 60;
+/// Body reads for responses named or typed as HLS, and separately for
+/// generic responses that are only sniffed, so analytics calls cannot use
+/// up the budget a real playlist needs.
+const MAX_PLAYLIST_FETCHES: usize = 40;
+const MAX_SNIFF_FETCHES: usize = 40;
+/// Longer URLs are ignored: they are not playlists a player requests, and
+/// a page could otherwise make HighVi hold gigabytes of them.
+const MAX_TRACKED_URL_BYTES: usize = 8 * 1024;
+const MAX_BACKLOG: usize = 256;
 const MAX_SNIFF_BYTES: f64 = 512.0 * 1024.0;
 const MAX_PLAYLIST_BYTES: f64 = 8.0 * 1024.0 * 1024.0;
 const MAX_TITLE_CHARS: usize = 200;
@@ -130,7 +138,7 @@ pub async fn discover_in_browser(
     cancel: &mut CancelToken,
 ) -> Result<BrowserFinding, PublicError> {
     let profile = run.work_dir.join("chrome-profile");
-    tokio::fs::create_dir(&profile)
+    write_profile_preferences(&profile)
         .await
         .map_err(|_| browser_failed())?;
     let (mut child, mut cdp) = launch(&run, &profile).map_err(|error| {
@@ -157,6 +165,21 @@ pub async fn discover_in_browser(
     drop(cdp);
     kill_group(&mut child).await;
     result
+}
+
+/// A fresh profile whose preferences forbid WebRTC from sending UDP that
+/// does not go through the proxy (Chrome's proxy only carries TCP).
+async fn write_profile_preferences(profile: &Path) -> io::Result<()> {
+    let default = profile.join("Default");
+    tokio::fs::create_dir_all(&default).await?;
+    let preferences = json!({
+        "webrtc": {
+            "ip_handling_policy": "disable_non_proxied_udp",
+            "multiple_routes_enabled": false,
+            "nonproxied_udp_enabled": false
+        }
+    });
+    tokio::fs::write(default.join("Preferences"), preferences.to_string()).await
 }
 
 fn browser_failed() -> PublicError {
@@ -189,7 +212,9 @@ pub fn chrome_args(run: &BrowserRun<'_>, profile: &Path) -> Vec<OsString> {
         "--mute-audio",
         "--autoplay-policy=no-user-gesture-required",
         "--disable-quic",
-        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+        // Chrome has no --force-… variant of this switch; the profile
+        // preferences below repeat the policy as a second guard.
+        "--webrtc-ip-handling-policy=disable_non_proxied_udp",
         "--disable-features=Translate,MediaRouter,OptimizationHints,AutofillServerCommunication,DialMediaRouteProvider",
         "--window-size=1280,720",
         // All traffic goes to the egress proxy, loopback included (Chrome
@@ -299,7 +324,8 @@ impl Drop for Cdp {
 
 impl Cdp {
     fn new(writer: pipe::Sender, mut receiver: pipe::Receiver) -> Self {
-        let (sender, incoming) = mpsc::channel(1024);
+        // Small: Chrome then buffers in its own process, not in HighVi.
+        let (sender, incoming) = mpsc::channel(64);
         let reader = tokio::spawn(async move {
             let mut buffer = Vec::new();
             let mut chunk = vec![0_u8; 64 * 1024];
@@ -310,9 +336,13 @@ impl Cdp {
                 if read == 0 {
                     return;
                 }
+                // Only the new bytes can hold the next delimiter.
+                let mut scan_from = buffer.len();
                 buffer.extend_from_slice(&chunk[..read]);
-                while let Some(end) = buffer.iter().position(|byte| *byte == 0) {
+                while let Some(offset) = buffer[scan_from..].iter().position(|byte| *byte == 0) {
+                    let end = scan_from + offset;
                     let message: Vec<u8> = buffer.drain(..=end).collect();
+                    scan_from = 0;
                     if let Ok(value) = serde_json::from_slice::<Value>(&message[..end])
                         && sender.send(value).await.is_err()
                     {
@@ -360,7 +390,10 @@ impl Cdp {
             if message.get("id").and_then(Value::as_u64) == Some(id) {
                 return message.get("result").cloned();
             }
-            self.backlog.push_back(message);
+            // Events that arrive while waiting are kept, within a bound.
+            if self.backlog.len() < MAX_BACKLOG {
+                self.backlog.push_back(message);
+            }
         }
     }
 
@@ -422,6 +455,14 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
         .as_str()
         .ok_or_else(browser_failed)?
         .to_string();
+    // Pages may not save files, not even into the throw-away profile.
+    cdp.call(
+        None,
+        "Browser.setDownloadBehavior",
+        json!({ "behavior": "deny" }),
+    )
+    .await
+    .ok_or_else(browser_failed)?;
     // Watch the network and attach to frames and workers before navigating,
     // so the first request of every frame is seen.
     for (method, params) in [
@@ -449,7 +490,8 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
     let mut sessions: Vec<String> = vec![main.clone()];
     let mut requests: HashMap<(String, String), Request> = HashMap::new();
     let mut pending_bodies: HashMap<u64, (Url, Option<String>)> = HashMap::new();
-    let mut body_fetches = 0;
+    let mut playlist_fetches = 0;
+    let mut sniff_fetches = 0;
     let mut observation = Observation::default();
     let mut loaded_at: Option<Instant> = None;
     let mut played_at: Option<Instant> = None;
@@ -574,6 +616,9 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
                 let Some(url) = request["url"].as_str() else {
                     continue;
                 };
+                if url.len() > MAX_TRACKED_URL_BYTES {
+                    continue;
+                }
                 let referer = header(&request["headers"], "referer").and_then(origin_referer);
                 if let Some(id) = params["requestId"].as_str() {
                     requests.insert(
@@ -585,6 +630,11 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
                             want: Want::Nothing,
                         },
                     );
+                }
+            }
+            "Network.loadingFailed" => {
+                if let Some(id) = params["requestId"].as_str() {
+                    requests.remove(&(session, id.to_string()));
                 }
             }
             "Network.responseReceived" => {
@@ -603,7 +653,7 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
                 let Ok(url) = Url::parse(&request.url) else {
                     continue;
                 };
-                if !(200..300).contains(&status) || url.scheme() != "https" {
+                if !(200..300).contains(&status) || status == 204 || url.scheme() != "https" {
                     continue;
                 }
                 let by_name = url.path().to_ascii_lowercase().ends_with(".m3u8");
@@ -627,23 +677,28 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
                 let Some(id) = params["requestId"].as_str() else {
                     continue;
                 };
-                let Some(request) = requests.get(&(session.clone(), id.to_string())) else {
+                // Finished: nothing more to learn about this request.
+                let Some(request) = requests.remove(&(session.clone(), id.to_string())) else {
                     continue;
                 };
                 let size = params["encodedDataLength"].as_f64().unwrap_or(0.0);
-                let wanted = match request.want {
-                    Want::Playlist => size <= MAX_PLAYLIST_BYTES,
-                    Want::Sniff => size <= MAX_SNIFF_BYTES,
-                    Want::Nothing => false,
+                let budget = match request.want {
+                    Want::Playlist if size <= MAX_PLAYLIST_BYTES => {
+                        (&mut playlist_fetches, MAX_PLAYLIST_FETCHES)
+                    }
+                    Want::Sniff if size > 0.0 && size <= MAX_SNIFF_BYTES => {
+                        (&mut sniff_fetches, MAX_SNIFF_FETCHES)
+                    }
+                    _ => continue,
                 };
-                if !wanted || body_fetches >= MAX_BODY_FETCHES {
+                if *budget.0 >= budget.1 {
                     continue;
                 }
+                *budget.0 += 1;
                 let Ok(url) = Url::parse(&request.url) else {
                     continue;
                 };
-                let referer = request.referer.clone();
-                body_fetches += 1;
+                let referer = request.referer;
                 if let Ok(command) = cdp
                     .send(
                         Some(&session),
@@ -780,9 +835,22 @@ fn rank(playlists: &[(Url, Option<String>, Option<String>)]) -> (Vec<Candidate>,
         .flatten()
         .map(|variant| variant.as_str().to_string())
         .collect();
+    let drm_urls: HashSet<&str> = inspected
+        .iter()
+        .filter(|(_, _, info)| info.as_ref().is_some_and(|info| info.drm))
+        .map(|(url, _, _)| url.as_str())
+        .collect();
     let mut scored = Vec::new();
     for (order, (url, referer, info)) in inspected.iter().enumerate() {
         if info.as_ref().is_some_and(|info| info.drm) {
+            continue;
+        }
+        // A master whose observed variant signals DRM is DRM too.
+        if let Some(PlaylistKind::Master { variants }) = info.as_ref().map(|info| &info.kind)
+            && variants
+                .iter()
+                .any(|variant| drm_urls.contains(variant.as_str()))
+        {
             continue;
         }
         let (class, duration) = match info.as_ref().map(|info| &info.kind) {
@@ -955,6 +1023,21 @@ mod tests {
     }
 
     #[test]
+    fn masters_with_a_drm_variant_are_not_candidates() {
+        let drm = "#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"skd://k\"\n#EXTINF:1,\na.ts\n#EXT-X-ENDLIST\n";
+        let (ranked, drm_only) = rank(&[
+            (
+                url("https://c.example/master.m3u8"),
+                None,
+                Some("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nv.m3u8\n".into()),
+            ),
+            (url("https://c.example/v.m3u8"), None, Some(drm.into())),
+        ]);
+        assert!(ranked.is_empty(), "{ranked:?}");
+        assert!(drm_only);
+    }
+
+    #[test]
     fn referers_are_reduced_to_https_origins() {
         assert_eq!(
             origin_referer("https://player.example/embed/1?token=x").as_deref(),
@@ -983,7 +1066,7 @@ mod tests {
             "--proxy-bypass-list=<-loopback>",
             "--user-data-dir=/job/chrome-profile",
             "--disable-quic",
-            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+            "--webrtc-ip-handling-policy=disable_non_proxied_udp",
             "--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
         ] {
             assert!(args.contains(&required.to_string()), "{required}");

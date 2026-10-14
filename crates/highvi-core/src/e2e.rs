@@ -1368,3 +1368,53 @@ async fn cancelling_during_browser_discovery_stops_chrome() {
     assert_no_chrome_left(&fixture).await;
     fixture.assert_no_job_dirs();
 }
+
+/// The machine's first non-loopback IPv4 address, where a LAN service would
+/// listen. WebRTC is the classic way for a page to reach one without HTTP.
+fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
+    crate::netpolicy::local_addresses()?
+        .into_iter()
+        .find_map(|address| match address {
+            std::net::IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_link_local() => Some(v4),
+            _ => None,
+        })
+}
+
+#[tokio::test]
+async fn webrtc_cannot_send_udp_around_the_proxy() {
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    let mut targets = vec![std::net::Ipv4Addr::LOCALHOST];
+    targets.extend(lan_ipv4());
+    let mut sockets = Vec::new();
+    let mut servers = Vec::new();
+    for address in targets {
+        let socket = tokio::net::UdpSocket::bind((address, 0)).await.unwrap();
+        servers.push(format!("{{urls:'stun:{}'}}", socket.local_addr().unwrap()));
+        sockets.push(socket);
+    }
+    fixture.server.route(
+        "page.test/rtc",
+        Route::html(&format!(
+            "<script>\
+             const pc = new RTCPeerConnection({{iceServers:[{}]}});\
+             pc.createDataChannel('x');\
+             pc.createOffer().then(o => pc.setLocalDescription(o));\
+             </script>",
+            servers.join(",")
+        )),
+    );
+    let (result, _) = fixture.run(page("https://page.test/rtc")).await;
+    assert_code(&result, "no_media_found");
+    let mut buffer = [0_u8; 1500];
+    for socket in &sockets {
+        let received = socket.try_recv_from(&mut buffer);
+        assert!(
+            received.is_err(),
+            "a STUN packet reached {} directly",
+            socket.local_addr().unwrap()
+        );
+    }
+    assert_no_chrome_left(&fixture).await;
+}
