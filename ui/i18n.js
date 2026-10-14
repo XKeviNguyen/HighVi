@@ -14,7 +14,7 @@ const I18N = (() => {
       "mode.direct": "Playlist link (.m3u8)",
       "page.label": "Video page link",
       "page.hint":
-        "Works on sites yt-dlp knows and on pages with a normal video player.",
+        "Paste the page that plays the video. HighVi asks yt-dlp first, then watches the page's own player in a private browser.",
       "playlist.label": "Playlist link (.m3u8)",
       "referer.label": "Page where you found it",
       "direct.hint":
@@ -33,6 +33,13 @@ const I18N = (() => {
       "progress.aria": "Download progress",
       "progress.working": "Working…",
       "progress.discovering": "Looking for the video…",
+      "progress.browsing": "Opening the page in a private browser to find the video…",
+      "deps.browserMissing":
+        "Optional: install Google Chrome or Chromium so HighVi can find videos on pages whose player is built with JavaScript.",
+      "error.browser_unavailable": "This page needs Google Chrome or Chromium to find the video. Install one, then try again.",
+      "error.browser_failed": "The private browser HighVi uses to find videos stopped unexpectedly. Try again.",
+      "error.no_media_found":
+        "HighVi opened the page in a private browser, but no video showed up. The video may need a sign-in, a special button, or use a format HighVi doesn't support.",
       "progress.downloadingVideo": "Downloading the picture…",
       "progress.downloadingAudio": "Downloading the sound…",
       "progress.merging": "Putting it together as an MP4…",
@@ -81,7 +88,7 @@ const I18N = (() => {
       "error.media_not_found":
         "The video isn't there anymore (HTTP 404/410). The link may have expired, so copy a fresh one.",
       "error.unsupported_page":
-        "yt-dlp doesn't know this website, or its player is built with JavaScript. If you have the playlist link, use “Playlist link”.",
+        "yt-dlp doesn't know this website and found no video in it. If you have the playlist link, use “Playlist link”.",
       "error.unsupported_playlist":
         "yt-dlp couldn't read this as a playlist. Make sure it's the .m3u8 link itself and that it hasn't expired.",
       "error.no_formats": "There was no video that could be downloaded.",
@@ -116,7 +123,7 @@ const I18N = (() => {
       "mode.page": "Link trang video",
       "mode.direct": "Link playlist (.m3u8)",
       "page.label": "Link trang video",
-      "page.hint": "Dùng được với các trang mà yt-dlp biết và các trang có trình phát video thông thường.",
+      "page.hint": "Dán trang đang phát video. HighVi hỏi yt-dlp trước, rồi xem trình phát của chính trang đó trong một trình duyệt riêng.",
       "playlist.label": "Link playlist (.m3u8)",
       "referer.label": "Trang bạn tìm thấy playlist",
       "direct.hint":
@@ -135,6 +142,13 @@ const I18N = (() => {
       "progress.aria": "Tiến độ tải",
       "progress.working": "Đang làm…",
       "progress.discovering": "Đang tìm video…",
+      "progress.browsing": "Đang mở trang trong một trình duyệt riêng để tìm video…",
+      "deps.browserMissing":
+        "Không bắt buộc: cài Google Chrome hoặc Chromium để HighVi tìm được video trên các trang có trình phát dựng bằng JavaScript.",
+      "error.browser_unavailable": "Trang này cần Google Chrome hoặc Chromium để tìm video. Hãy cài một cái rồi thử lại.",
+      "error.browser_failed": "Trình duyệt riêng mà HighVi dùng để tìm video bị dừng bất ngờ. Thử lại nhé.",
+      "error.no_media_found":
+        "HighVi đã mở trang trong trình duyệt riêng nhưng không thấy video nào. Có thể video cần đăng nhập, cần bấm một nút đặc biệt, hoặc dùng định dạng HighVi chưa hỗ trợ.",
       "progress.downloadingVideo": "Đang tải phần hình…",
       "progress.downloadingAudio": "Đang tải phần tiếng…",
       "progress.merging": "Đang ghép lại thành MP4…",
@@ -183,7 +197,7 @@ const I18N = (() => {
       "error.media_not_found":
         "Video không còn ở đó nữa (HTTP 404/410). Có thể link đã hết hạn, hãy lấy link mới.",
       "error.unsupported_page":
-        "yt-dlp không biết trang này, hoặc trình phát được dựng bằng JavaScript. Nếu có link playlist, hãy chọn “Link playlist”.",
+        "yt-dlp không biết trang này và không tìm thấy video nào. Nếu có link playlist, hãy chọn “Link playlist”.",
       "error.unsupported_playlist":
         "yt-dlp không đọc được link này như một playlist. Kiểm tra đó đúng là link .m3u8 và chưa hết hạn.",
       "error.no_formats": "Không có video nào tải được.",
@@ -216,7 +230,7 @@ const I18N = (() => {
       "mode.page": "動画ページのリンク",
       "mode.direct": "プレイリストのリンク（.m3u8）",
       "page.label": "動画ページのリンク",
-      "page.hint": "yt-dlp が知っているサイトや、ふつうの動画プレーヤーがあるページで使えます。",
+      "page.hint": "動画が再生されるページを入れてください。HighVi はまず yt-dlp にきき、つぎに専用のブラウザーでページのプレーヤーを見ます。",
       "playlist.label": "プレイリストのリンク（.m3u8）",
       "referer.label": "プレイリストを見つけたページ",
       "direct.hint":
@@ -235,6 +249,13 @@ const I18N = (() => {
       "progress.aria": "ダウンロードの進みぐあい",
       "progress.working": "作業中…",
       "progress.discovering": "動画をさがしています…",
+      "progress.browsing": "動画をさがすために、専用のブラウザーでページを開いています…",
+      "deps.browserMissing":
+        "なくても使えます：Google Chrome か Chromium を入れると、JavaScript で作られたプレーヤーのページでも動画をさがせます。",
+      "error.browser_unavailable": "このページで動画をさがすには Google Chrome か Chromium が必要です。入れてから、もう一度ためしてください。",
+      "error.browser_failed": "動画さがし用のブラウザーが、とちゅうで止まってしまいました。もう一度ためしてください。",
+      "error.no_media_found":
+        "専用のブラウザーでページを開きましたが、動画は出てきませんでした。ログインや特別なボタンが必要か、HighVi がまだあつかえない形式かもしれません。",
       "progress.downloadingVideo": "映像をダウンロードしています…",
       "progress.downloadingAudio": "音声をダウンロードしています…",
       "progress.merging": "MP4 にまとめています…",
@@ -285,7 +306,7 @@ const I18N = (() => {
       "error.media_not_found":
         "動画がもうありません（HTTP 404/410）。リンクの期限が切れたのかもしれません。新しいリンクをコピーしてください。",
       "error.unsupported_page":
-        "yt-dlp がこのサイトを知らないか、プレーヤーが JavaScript で作られています。プレイリストのリンクがあれば「プレイリストのリンク」を使ってください。",
+        "yt-dlp がこのサイトを知らず、動画も見つかりませんでした。プレイリストのリンクがあれば「プレイリストのリンク」を使ってください。",
       "error.unsupported_playlist":
         "yt-dlp がプレイリストとして読めませんでした。.m3u8 のリンクそのものか、期限が切れていないかたしかめてください。",
       "error.no_formats": "ダウンロードできる動画がありませんでした。",

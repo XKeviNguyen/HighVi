@@ -5,7 +5,9 @@
 //! final path.
 
 use crate::{
-    PublicError, SourceKind, ToolSignals, ValidatedSource, classify_tool_failure,
+    PublicError, SourceKind, ToolSignals, ValidatedSource,
+    browser::{BrowserRun, discover_in_browser},
+    classify_tool_failure,
     egress::{EgressProxy, EgressStats, RefusalCounts, Resolver},
     filesystem::{
         JobDir, cleanup_stale_jobs, output_dir_error, prepare_output_dir, publish_unique,
@@ -32,6 +34,9 @@ const OUTPUT_FILE: &str = "output.mp4";
 pub struct JobEnvironment {
     pub yt_dlp: PathBuf,
     pub ffmpeg: PathBuf,
+    /// Chrome/Chromium for pages whose player is built by JavaScript.
+    /// Without it, those pages fail as yt-dlp reports them.
+    pub chrome: Option<PathBuf>,
     /// The fixed output directory, e.g. `~/Downloads/HighVi`.
     pub output_dir: PathBuf,
     #[cfg(test)]
@@ -39,10 +44,16 @@ pub struct JobEnvironment {
 }
 
 impl JobEnvironment {
-    pub fn new(yt_dlp: PathBuf, ffmpeg: PathBuf, output_dir: PathBuf) -> Self {
+    pub fn new(
+        yt_dlp: PathBuf,
+        ffmpeg: PathBuf,
+        chrome: Option<PathBuf>,
+        output_dir: PathBuf,
+    ) -> Self {
         Self {
             yt_dlp,
             ffmpeg,
+            chrome,
             output_dir,
             #[cfg(test)]
             fixture: None,
@@ -71,6 +82,8 @@ impl JobEnvironment {
 #[serde(rename_all = "camelCase")]
 pub enum Stage {
     Discovering,
+    /// Watching the page in the isolated browser.
+    Browsing,
     DownloadingVideo,
     DownloadingAudio,
     Merging,
@@ -122,17 +135,8 @@ pub async fn run_job(
     })?;
     let proxy_url = proxy.url();
 
-    let discovery_referer = source.discovery_referer();
-    let policy = env.policy(&proxy_url, discovery_referer.as_deref());
-    let media = Box::pin(discover(
-        env,
-        &job,
-        &policy,
-        source,
-        proxy.stats(),
-        &mut cancel,
-    ))
-    .await?;
+    let discovered = Box::pin(discover(env, &job, &proxy, source, &mut cancel, report)).await?;
+    let media = discovered.media;
     report(JobUpdate {
         title: Some(media.title.clone()),
         ..JobUpdate::stage(Stage::Discovering)
@@ -141,8 +145,7 @@ pub async fn run_job(
         .await
         .map_err(|_| output_dir_error())?;
 
-    let download_referer = source.download_referer();
-    let policy = env.policy(&proxy_url, download_referer.as_deref());
+    let policy = env.policy(&proxy_url, discovered.referer.as_deref());
     let tracks = [
         Some((
             media.selection.video.as_str(),
@@ -219,18 +222,140 @@ pub async fn run_job(
     }
 }
 
+/// What discovery settled on, and the Referer its media needs.
+struct Discovered {
+    media: MediaInfo,
+    referer: Option<String>,
+}
+
+/// yt-dlp first; when it finds nothing on a page, the page's own player in
+/// an isolated browser, with each playlist it loads checked by yt-dlp.
 async fn discover(
     env: &JobEnvironment,
     job: &JobDir,
-    policy: &YtDlpPolicy<'_>,
+    proxy: &EgressProxy,
     source: &ValidatedSource,
+    cancel: &mut CancelToken,
+    report: &(dyn Fn(JobUpdate) + Send + Sync),
+) -> Result<Discovered, PublicError> {
+    let proxy_url = proxy.url();
+    let referer = source.discovery_referer();
+    let first = probe(
+        env,
+        job,
+        &env.policy(&proxy_url, referer.as_deref()),
+        source.discovery_target(),
+        source.kind(),
+        proxy.stats(),
+        cancel,
+    )
+    .await;
+    let error = match first {
+        Ok(media) => {
+            return Ok(Discovered {
+                media,
+                referer: source.download_referer(),
+            });
+        }
+        Err(error) => error,
+    };
+    let (Some(chrome), ValidatedSource::Page { page }) = (&env.chrome, source) else {
+        return Err(error);
+    };
+    if source.kind() != SourceKind::Page || !worth_a_browser(&error) {
+        return Err(error);
+    }
+
+    report(JobUpdate::stage(Stage::Browsing));
+    let finding = discover_in_browser(
+        BrowserRun {
+            chrome,
+            page,
+            proxy_url: &proxy_url,
+            work_dir: job.path(),
+            #[cfg(test)]
+            insecure_tls: env.fixture.is_some(),
+        },
+        cancel,
+    )
+    .await;
+    // The profile holds whatever the page stored; it is not needed again.
+    let _ = tokio::fs::remove_dir_all(job.path().join("chrome-profile")).await;
+    let finding = match finding {
+        Ok(finding) => finding,
+        // No browser installed: the original explanation is the useful one.
+        Err(browser) if browser.code == "browser_unavailable" => return Err(error),
+        Err(browser) => return Err(browser),
+    };
+    if finding.candidates.is_empty() {
+        return Err(if finding.drm_only {
+            PublicError::new(
+                "drm_not_supported",
+                "This media reports DRM protection. HighVi will not bypass DRM or access controls.",
+            )
+        } else {
+            PublicError::new(
+                "no_media_found",
+                "HighVi opened the page in an isolated browser, but no video stream appeared.",
+            )
+        });
+    }
+
+    report(JobUpdate::stage(Stage::Discovering));
+    let mut last_error = error;
+    for candidate in finding.candidates {
+        let checked = probe(
+            env,
+            job,
+            &env.policy(&proxy_url, candidate.referer.as_deref()),
+            &candidate.url,
+            SourceKind::Page,
+            proxy.stats(),
+            cancel,
+        )
+        .await;
+        match checked {
+            Ok(mut media) => {
+                // yt-dlp only sees the playlist, whose name is meaningless.
+                if let Some(title) = &finding.title {
+                    media.title.clone_from(title);
+                    media.suggested_filename = crate::suggested_filename(Some(title), None);
+                }
+                return Ok(Discovered {
+                    media,
+                    referer: candidate.referer,
+                });
+            }
+            Err(error) if error.code == "cancelled" => return Err(error),
+            Err(error) => last_error = error,
+        }
+    }
+    Err(last_error)
+}
+
+/// yt-dlp failures that mean "nothing found here", as opposed to a refusal
+/// (blocked address, sign-in, DRM, 403…) that a browser must not work around.
+fn worth_a_browser(error: &PublicError) -> bool {
+    matches!(
+        error.code.as_str(),
+        "unsupported_page" | "hls_not_found" | "no_formats" | "yt_dlp_failed"
+    )
+}
+
+/// Runs yt-dlp's metadata extraction on `target` and picks formats.
+async fn probe(
+    env: &JobEnvironment,
+    job: &JobDir,
+    policy: &YtDlpPolicy<'_>,
+    target: &url::Url,
+    kind: SourceKind,
     stats: &EgressStats,
     cancel: &mut CancelToken,
 ) -> Result<MediaInfo, PublicError> {
     let before = stats.counts();
     let mut command = tool_command(
         &env.yt_dlp,
-        policy.discovery_args(source.discovery_target()),
+        policy.discovery_args(target),
         ytdlp_env(job.path()),
     );
     command.current_dir(job.path());
@@ -247,7 +372,7 @@ async fn discover(
     if !captured.success {
         let output = String::from_utf8_lossy(&captured.stderr.bytes);
         return Err(network_refusal(stats.counts().since(before))
-            .unwrap_or_else(|| classify_tool_failure(&output, source.kind())));
+            .unwrap_or_else(|| classify_tool_failure(&output, kind)));
     }
     // Oversized stderr is only truncated diagnostics; oversized metadata is unsafe.
     if captured.stdout.overflowed {

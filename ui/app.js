@@ -12,6 +12,7 @@ const elements = {
   downloadButton: document.querySelector("#download-button"),
   depsCard: document.querySelector("#deps-card"),
   depsMessage: document.querySelector("#deps-message"),
+  browserNote: document.querySelector("#browser-note"),
   statusCard: document.querySelector("#status-card"),
   statusTitle: document.querySelector("#status-title"),
   statusMessage: document.querySelector("#status-message"),
@@ -37,9 +38,11 @@ let lastError = null;
 let lastUpdate = null;
 let lastTitle = null;
 let missingTools = [];
+let browserMissing = false;
 
 const stageKeys = {
   discovering: "progress.discovering",
+  browsing: "progress.browsing",
   downloadingVideo: "progress.downloadingVideo",
   downloadingAudio: "progress.downloadingAudio",
   merging: "progress.merging",
@@ -126,6 +129,7 @@ function showError(error, source) {
 }
 
 function setRunning(running) {
+  document.dispatchEvent(new CustomEvent("highvi:busy", { detail: running }));
   elements.downloadButton.disabled = running;
   elements.downloadButton.textContent = t(running ? "download.busy" : "download.button");
   elements.cancelButton.disabled = false;
@@ -166,6 +170,7 @@ function renderMissingTools() {
   elements.depsMessage.textContent = missingTools.length
     ? t("deps.missing", { tools: missingTools.join(", ") })
     : "";
+  setHidden(elements.browserNote, !browserMissing || missingTools.length > 0);
 }
 
 listen("job-update", ({ payload }) => {
@@ -253,6 +258,7 @@ invoke("dependency_status")
       ...(status.ytDlp ? [] : ["yt-dlp"]),
       ...(status.ffmpeg ? [] : ["FFmpeg"]),
     ];
+    browserMissing = !status.browser;
     renderMissingTools();
   })
   .catch(() => {

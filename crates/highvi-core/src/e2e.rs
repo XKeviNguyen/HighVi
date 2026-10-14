@@ -38,6 +38,7 @@ pub(crate) struct Tools {
     pub yt_dlp: PathBuf,
     pub ffmpeg: PathBuf,
     pub ffprobe: PathBuf,
+    pub chrome: Option<PathBuf>,
 }
 
 pub(crate) fn tools() -> Option<Tools> {
@@ -50,6 +51,7 @@ pub(crate) fn tools() -> Option<Tools> {
             yt_dlp,
             ffmpeg,
             ffprobe,
+            chrome: crate::find_browser(),
         }),
         _ if std::env::var_os("HIGHVI_REQUIRE_E2E").is_some() => {
             panic!("HIGHVI_REQUIRE_E2E is set but yt-dlp, ffmpeg or ffprobe is missing")
@@ -180,6 +182,8 @@ pub(crate) struct Route {
     pub body: Arc<Vec<u8>>,
     pub location: Option<String>,
     pub delay: Duration,
+    /// Answer 403 unless the request carries exactly this Referer.
+    pub required_referer: Option<&'static str>,
 }
 
 impl Route {
@@ -190,6 +194,14 @@ impl Route {
             body: Arc::new(body.into()),
             location: None,
             delay: Duration::ZERO,
+            required_referer: None,
+        }
+    }
+
+    pub fn requiring_referer(self, referer: &'static str) -> Self {
+        Self {
+            required_referer: Some(referer),
+            ..self
         }
     }
 
@@ -373,20 +385,34 @@ async fn serve(
     hits.lock().unwrap().push(Hit {
         host: host.clone(),
         path: path.clone(),
-        referer,
+        referer: referer.clone(),
     });
     let route = routes
         .lock()
         .unwrap()
         .get(&format!("{host}{path}"))
         .cloned();
-    let route = route.unwrap_or_else(|| Route {
-        status: 404,
-        ..Route::ok("text/plain", "not found")
-    });
+    let route = match route {
+        Some(route)
+            if route
+                .required_referer
+                .is_some_and(|required| referer.as_deref() != Some(required)) =>
+        {
+            Route {
+                status: 403,
+                ..Route::ok("text/plain", "forbidden")
+            }
+        }
+        Some(route) => route,
+        None => Route {
+            status: 404,
+            ..Route::ok("text/plain", "not found")
+        },
+    };
     tokio::time::sleep(route.delay).await;
     let mut response = format!(
-        "HTTP/1.1 {} Fixture\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+        // CDNs that serve web players allow cross-origin reads.
+        "HTTP/1.1 {} Fixture\r\nContent-Type: {}\r\nContent-Length: {}\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n",
         route.status,
         route.content_type,
         route.body.len()
@@ -440,6 +466,7 @@ impl Fixture {
             ..JobEnvironment::new(
                 self.tools.yt_dlp.clone(),
                 self.tools.ffmpeg.clone(),
+                self.tools.chrome.clone(),
                 self.output_dir.clone(),
             )
         }
@@ -1026,4 +1053,368 @@ async fn missing_tools_are_reported_as_dependencies() {
         .await;
     assert_code(&result, "missing_dependency");
     fixture.assert_no_job_dirs();
+}
+
+// ------------------------------------------------------- browser discovery
+
+/// Browser tests need Chrome; it is mandatory when `HIGHVI_REQUIRE_E2E` is set.
+async fn browser_fixture() -> Option<Fixture> {
+    let fixture = Fixture::new().await?;
+    if fixture.tools.chrome.is_none() {
+        assert!(
+            std::env::var_os("HIGHVI_REQUIRE_E2E").is_none(),
+            "HIGHVI_REQUIRE_E2E is set but Chrome/Chromium is missing"
+        );
+        eprintln!("skipping browser test: Chrome/Chromium not found");
+        return None;
+    }
+    Some(fixture)
+}
+
+/// Chrome processes still running with a profile under this fixture.
+fn chrome_survivors(fixture: &Fixture) -> Vec<String> {
+    let needle = fixture.output_dir.to_string_lossy().into_owned();
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        if let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) {
+            let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+            if cmdline.contains(&needle) && cmdline.contains("chrome") {
+                found.push(cmdline.chars().take(120).collect());
+            }
+        }
+    }
+    found
+}
+
+async fn assert_no_chrome_left(fixture: &Fixture) {
+    for _ in 0..50 {
+        if chrome_survivors(fixture).is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!(
+        "browser processes survived: {:?}",
+        chrome_survivors(fixture)
+    );
+}
+
+const SPLIT_MASTER_ABSOLUTE: &str = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=600000,RESOLUTION=320x240,CODECS=\"avc1.64000d,mp4a.40.2\"\nhttps://media.test/muxed/index.m3u8\n";
+
+#[tokio::test]
+async fn javascript_built_player_is_found_in_the_browser() {
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    // The URL only exists once the script runs, so yt-dlp alone cannot see
+    // it; the playlist host also insists on the page's Referer.
+    fixture.server.route(
+        "page.test/js",
+        Route::html(
+            "<!doctype html><title>Bản tin 夜 🎬</title><script>\
+             const parts = ['https://media.test', 'js', 'master.m3u8'];\
+             fetch(parts.join('/')).then(r => r.text()).then(() =>\
+               fetch('https://media.test/muxed/index.m3u8'));\
+             </script>",
+        ),
+    );
+    fixture.server.route(
+        "media.test/js/master.m3u8",
+        Route::playlist(SPLIT_MASTER_ABSOLUTE).requiring_referer("https://page.test/"),
+    );
+    let started = Instant::now();
+    let (result, updates) = fixture.run(page("https://page.test/js")).await;
+    let outcome = result.unwrap();
+    assert_eq!(outcome.title, "Bản tin 夜 🎬");
+    assert_eq!(
+        outcome.saved_to,
+        fixture.output_dir.join("Bản tin 夜 🎬.mp4")
+    );
+    let (streams, _, clean) = fixture.inspect(&outcome.saved_to);
+    assert_eq!(streams, ["video", "audio"]);
+    assert!(clean);
+    assert!(updates.iter().any(|update| update.stage == Stage::Browsing));
+    assert!(
+        started.elapsed() < Duration::from_secs(40),
+        "{:?}",
+        started.elapsed()
+    );
+    for hit in fixture
+        .server
+        .hits()
+        .iter()
+        .filter(|hit| hit.host == "media.test")
+    {
+        assert_eq!(
+            hit.referer.as_deref(),
+            Some("https://page.test/"),
+            "{hit:?}"
+        );
+    }
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+#[tokio::test]
+async fn delayed_player_in_an_iframe_beats_an_advert() {
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/embed",
+        Route::html(
+            "<!doctype html><title>Main video</title>\
+             <iframe src=\"https://ads.test/ad\"></iframe>\
+             <iframe src=\"https://player.test/embed?id=7\"></iframe>",
+        ),
+    );
+    fixture.server.route(
+        "ads.test/ad",
+        Route::html("<script>fetch('https://ads.test/ad.m3u8').then(r => r.text())</script>"),
+    );
+    fixture.server.route(
+        "ads.test/ad.m3u8",
+        Route::playlist(&media_playlist(&["https://media.test/muxed/s0.ts"], "")),
+    );
+    // Served without a .m3u8 suffix; only the MIME type says it is HLS.
+    fixture.server.route(
+        "player.test/embed",
+        Route::html(
+            "<script>setTimeout(() => fetch('https://media.test/api/stream').then(r => r.text()), 1500)</script>",
+        ),
+    );
+    fixture.server.route(
+        "media.test/api/stream",
+        Route::playlist(SPLIT_MASTER_ABSOLUTE).requiring_referer("https://player.test/"),
+    );
+    let (result, _) = fixture.run(page("https://page.test/embed")).await;
+    let outcome = result.unwrap();
+    assert_eq!(outcome.title, "Main video");
+    let (_, duration, clean) = fixture.inspect(&outcome.saved_to);
+    assert!(duration > 3.5, "picked the advert: {duration}");
+    assert!(clean);
+    // The media was fetched with the iframe's origin, as the browser did.
+    let segment_referers: Vec<_> = fixture
+        .server
+        .hits()
+        .into_iter()
+        .filter(|hit| hit.path.starts_with("/muxed/s"))
+        .map(|hit| hit.referer)
+        .collect();
+    assert!(segment_referers.contains(&Some("https://player.test/".to_string())));
+    assert_no_chrome_left(&fixture).await;
+}
+
+#[tokio::test]
+async fn playlists_are_recognised_by_content_and_after_pressing_play() {
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    // Generic content type, no suffix: recognised by its #EXTM3U body.
+    fixture.server.route(
+        "page.test/sniff",
+        Route::html(
+            "<script>fetch('https://media.test/api/manifest').then(r => r.text())</script>",
+        ),
+    );
+    fixture.server.route(
+        "media.test/api/manifest",
+        Route::ok("text/plain", SPLIT_MASTER_ABSOLUTE),
+    );
+    // Nothing loads until the video is played.
+    fixture.server.route(
+        "page.test/click",
+        Route::html(
+            "<video id=v></video><script>\
+             document.getElementById('v').addEventListener('play', () =>\
+               fetch('https://media.test/muxed/master.m3u8').then(r => r.text()));\
+             </script>",
+        ),
+    );
+    for url in ["https://page.test/sniff", "https://page.test/click"] {
+        let (result, _) = fixture.run(page(url)).await;
+        let outcome = result.unwrap_or_else(|error| panic!("{url}: {error:?}"));
+        let (streams, _, clean) = fixture.inspect(&outcome.saved_to);
+        assert_eq!(streams, ["video", "audio"], "{url}");
+        assert!(clean, "{url}");
+    }
+    assert_no_chrome_left(&fixture).await;
+}
+
+#[tokio::test]
+async fn browser_requests_to_private_networks_are_blocked() {
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    let port = fixture.server.address.port();
+    fixture.server.route(
+        "page.test/probe",
+        Route::html(&format!(
+            "<iframe src=\"https://127.0.0.1:{port}/canary/frame\"></iframe>\
+             <img src=\"https://[::1]:{port}/canary/pixel\">\
+             <script>\
+             fetch('https://127.0.0.1:{port}/canary/a.m3u8').catch(() => {{}});\
+             fetch('https://rebind.test/canary/b.m3u8').catch(() => {{}});\
+             fetch('http://media.test/canary/c.m3u8').catch(() => {{}});\
+             new WebSocket('wss://127.0.0.1:{port}/canary/ws');\
+             </script>"
+        )),
+    );
+    let started = Instant::now();
+    let (result, _) = fixture.run(page("https://page.test/probe")).await;
+    assert_code(&result, "no_media_found");
+    assert!(
+        started.elapsed() < Duration::from_secs(40),
+        "{:?}",
+        started.elapsed()
+    );
+    let leaked: Vec<Hit> = fixture
+        .server
+        .hits()
+        .into_iter()
+        .filter(|hit| hit.path.starts_with("/canary"))
+        .collect();
+    assert!(leaked.is_empty(), "blocked destination reached: {leaked:?}");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+#[tokio::test]
+async fn browser_reports_drm_and_never_downloads_it() {
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/drm",
+        Route::html("<script>fetch('https://media.test/drm/p.m3u8').then(r => r.text())</script>"),
+    );
+    fixture.server.route(
+        "media.test/drm/p.m3u8",
+        Route::playlist(&media_playlist(
+            &["https://media.test/muxed/s0.ts"],
+            "#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"skd://key\",KEYFORMAT=\"com.apple.streamingkeydelivery\"\n",
+        )),
+    );
+    let (result, _) = fixture.run(page("https://page.test/drm")).await;
+    assert_code(&result, "drm_not_supported");
+    assert!(
+        !fixture
+            .server
+            .hits()
+            .iter()
+            .any(|hit| hit.path.ends_with(".ts")),
+        "DRM media was fetched"
+    );
+}
+
+#[tokio::test]
+async fn pages_without_media_and_broken_browsers_fail_cleanly() {
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/empty",
+        Route::html("<title>Nothing</title><p>hi</p>"),
+    );
+    let started = Instant::now();
+    let (result, _) = fixture.run(page("https://page.test/empty")).await;
+    assert_code(&result, "no_media_found");
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "{:?}",
+        started.elapsed()
+    );
+
+    let mut crashing = fixture.environment();
+    crashing.chrome = Some(PathBuf::from("/bin/false"));
+    let (result, _) = fixture
+        .run_with(&crashing, page("https://page.test/empty"), None)
+        .await;
+    assert_code(&result, "browser_failed");
+
+    // Without a browser, yt-dlp's own explanation is kept.
+    let mut without = fixture.environment();
+    without.chrome = None;
+    let (result, _) = fixture
+        .run_with(&without, page("https://page.test/empty"), None)
+        .await;
+    assert_code(&result, "unsupported_page");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+#[tokio::test]
+async fn cancelling_during_browser_discovery_stops_chrome() {
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    fixture
+        .server
+        .route("page.test/slow", Route::html("<title>slow</title>"));
+    let started = Instant::now();
+    let (result, _) = fixture
+        .run_with(
+            &fixture.environment(),
+            page("https://page.test/slow"),
+            Some((Stage::Browsing, Duration::from_secs(2))),
+        )
+        .await;
+    assert_code(&result, "cancelled");
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// The machine's first non-loopback IPv4 address, where a LAN service would
+/// listen. WebRTC is the classic way for a page to reach one without HTTP.
+fn lan_ipv4() -> Option<std::net::Ipv4Addr> {
+    crate::netpolicy::local_addresses()?
+        .into_iter()
+        .find_map(|address| match address {
+            std::net::IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_link_local() => Some(v4),
+            _ => None,
+        })
+}
+
+#[tokio::test]
+async fn webrtc_cannot_send_udp_around_the_proxy() {
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    let mut targets = vec![std::net::Ipv4Addr::LOCALHOST];
+    targets.extend(lan_ipv4());
+    let mut sockets = Vec::new();
+    let mut servers = Vec::new();
+    for address in targets {
+        let socket = tokio::net::UdpSocket::bind((address, 0)).await.unwrap();
+        servers.push(format!("{{urls:'stun:{}'}}", socket.local_addr().unwrap()));
+        sockets.push(socket);
+    }
+    fixture.server.route(
+        "page.test/rtc",
+        Route::html(&format!(
+            "<script>\
+             const pc = new RTCPeerConnection({{iceServers:[{}]}});\
+             pc.createDataChannel('x');\
+             pc.createOffer().then(o => pc.setLocalDescription(o));\
+             </script>",
+            servers.join(",")
+        )),
+    );
+    let (result, _) = fixture.run(page("https://page.test/rtc")).await;
+    assert_code(&result, "no_media_found");
+    let mut buffer = [0_u8; 1500];
+    for socket in &sockets {
+        let received = socket.try_recv_from(&mut buffer);
+        assert!(
+            received.is_err(),
+            "a STUN packet reached {} directly",
+            socket.local_addr().unwrap()
+        );
+    }
+    assert_no_chrome_left(&fixture).await;
 }

@@ -37,6 +37,14 @@ jobs:
           yt-dlp --version
           ffmpeg -hide_banner -version | head -1
 
+      # Browser-discovery tests drive the runner's Google Chrome with its
+      # sandbox ON. Ubuntu 24.04 restricts unprivileged user namespaces,
+      # which the sandbox needs; relax that on this throwaway VM only.
+      - name: Chrome with sandbox
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          google-chrome --version
+
       - name: Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal --component rustfmt,clippy
