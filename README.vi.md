@@ -45,12 +45,11 @@ Có những trang chỉ đưa bản đồ kho báu khi bạn nói mình đến t
 
 ## ✅ HighVi làm gì
 
-1. Bạn dán link vào.
-2. HighVi kiểm tra đó là link `https://` an toàn, không phải máy tính trong mạng nhà hay mạng công ty.
-3. `yt-dlp` đi tìm tấm bản đồ kho báu.
-4. HighVi hiện tên video, link playlist **đã rút gọn** (giấu phần bí mật) và Referer sẽ gửi đi.
-5. Bạn đặt tên file rồi bấm **Tải MP4**.
-6. Video tải xong nằm trong **`~/Downloads/HighVi`**. HighVi không bao giờ ghi đè lên file đã có.
+1. Bạn dán link rồi bấm **Tải MP4**.
+2. HighVi kiểm tra đó là link `https://`, rồi bật một **lớp bảo vệ mạng** riêng: mọi request mà `yt-dlp` gửi đi (trang, redirect, playlist, từng mảnh, khóa) đều phải tới địa chỉ internet công khai. Máy trong mạng nhà hay mạng công ty luôn bị chặn.
+3. `yt-dlp` tìm tấm bản đồ kho báu, HighVi chọn hình đẹp nhất (và phần tiếng nếu tách riêng).
+4. Các mảnh được tải về và ghép thành một file MP4 ngay trên máy bạn. Bạn thấy tiến độ, tốc độ, thời gian còn lại, và có thể bấm **Hủy** bất cứ lúc nào.
+5. Video xong nằm trong **`~/Downloads/HighVi`**, đặt theo tên video. Nếu trùng tên, HighVi thêm ` (2)`. Không bao giờ ghi đè. Bấm **Mở thư mục** để xem.
 
 ## 🛑 Những điều HighVi không bao giờ làm
 
@@ -99,26 +98,29 @@ npm run build   # đóng gói .deb và AppImage
 | `drm_not_supported` | Video bị khóa bằng DRM. | HighVi sẽ không mở khóa. |
 | `authentication_required` | Phải đăng nhập mới xem được. | HighVi không dùng tài khoản của bạn. |
 | `network_timeout` | Trang web trả lời quá lâu. | Thử lại sau nhé. |
-| `output_exists` | Đã có file trùng tên. | Đặt tên khác. |
+| `unsafe_network_target` | Video định kết nối tới máy trong mạng nhà hay mạng công ty. | HighVi cố ý chặn lại. |
+| `live_not_supported` | Đây là phát trực tiếp. | HighVi chỉ tải video đã phát xong. |
 | `missing_dependency` | Chưa cài `yt-dlp` hoặc FFmpeg. | Cài vào rồi thử lại. |
 
 ## 🧠 Dành cho lập trình viên
 
 ```bash
-cargo test --workspace --offline
+HIGHVI_REQUIRE_E2E=1 cargo test --workspace --offline
 cargo clippy --workspace --all-targets --offline -- -D warnings
 cargo fmt --all -- --check
 node --check ui/app.js && node --check ui/i18n.js && node --check ui/rain.js
+node scripts/check-ui.mjs   # translation parity
 ```
 
 ```text
-crates/highvi-core/   Kiểm tra URL, quy tắc Referer, tham số yt-dlp, thông báo lỗi (đều có unit test)
-src-tauri/            Lệnh Tauri: chạy yt-dlp, báo tiến độ, lưu file an toàn
+crates/highvi-core/   Lớp bảo vệ mạng (egress proxy), tìm video, chọn format, job tải, ghép MP4, lưu file an toàn
+                      (unit test + test end-to-end với yt-dlp/FFmpeg thật và server HTTPS cục bộ)
+src-tauri/            Lệnh Tauri: bắt đầu/hủy job, sự kiện tiến độ, mở thư mục
 ui/                   Cửa sổ màu xanh: index.html, styles.css, app.js, i18n.js (English · Tiếng Việt · 日本語), rain.js
 docs/assets/          Banner và ảnh chụp màn hình cho README
 ```
 
-Cách HighVi giữ an toàn cho bạn và các giới hạn hiện tại được viết trong [SECURITY.md](SECURITY.md). Nói gọn: HighVi kiểm tra những link bạn đưa vào, nhưng `yt-dlp` tự tải các mảnh video, nên những request sau đó chưa được kiểm tra từng cái một.
+Cách HighVi giữ an toàn cho bạn và các giới hạn hiện tại được viết trong [SECURITY.md](SECURITY.md). Nói gọn: mọi request mà công cụ của HighVi gửi đi đều phải qua lớp bảo vệ chỉ cho phép địa chỉ HTTPS công khai, và FFmpeg không bao giờ ra mạng.
 
 ## 📜 Giấy phép
 

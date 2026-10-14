@@ -12,7 +12,7 @@ where
 {
     let mut bytes = Vec::with_capacity(limit.min(64 * 1024));
     let mut overflowed = false;
-    let mut chunk = [0_u8; 8 * 1024];
+    let mut chunk = vec![0_u8; 8 * 1024];
 
     loop {
         let bytes_read = reader.read(&mut chunk).await.map_err(|_| {

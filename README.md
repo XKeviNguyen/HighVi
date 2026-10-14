@@ -45,12 +45,11 @@ Some websites only hand out the treasure map if you say where you came from, lik
 
 ## ✅ What HighVi does
 
-1. You paste a link.
-2. HighVi checks that it's a safe `https://` link, and not a computer inside your home or office network.
-3. `yt-dlp` looks for the treasure map.
-4. HighVi shows you the title, a **shortened** playlist link (the secret parts are hidden), and the Referer it will send.
-5. You pick a file name and press **Download MP4**.
-6. The finished video lands in **`~/Downloads/HighVi`**. HighVi never writes over a file that's already there.
+1. You paste a link and press **Download MP4**.
+2. HighVi checks that it's an `https://` link, then starts a private **network guard**: every request `yt-dlp` makes (the page, redirects, playlists, pieces, keys) must go to a public internet address. Computers inside your home or office network are always blocked.
+3. `yt-dlp` finds the treasure map, and HighVi picks the best picture (and the sound, if it's separate).
+4. The pieces are downloaded and glued into one MP4 on your computer. You see progress, speed, and time left, and you can press **Cancel** at any time.
+5. The finished video lands in **`~/Downloads/HighVi`**, named after the video. If the name is taken, HighVi adds ` (2)`. It never writes over a file. Press **Open folder** to see it.
 
 ## 🛑 What HighVi will never do
 
@@ -99,26 +98,29 @@ npm run build   # make a .deb and an AppImage
 | `drm_not_supported` | The video is locked with DRM. | HighVi won't unlock it. |
 | `authentication_required` | You have to sign in to watch it. | HighVi doesn't use your logins. |
 | `network_timeout` | The website took too long to answer. | Try again later. |
-| `output_exists` | There's already a file with that name. | Pick another name. |
+| `unsafe_network_target` | The video tried to reach a computer on a home or office network. | HighVi blocked it on purpose. |
+| `live_not_supported` | It's a live stream. | HighVi downloads finished videos only. |
 | `missing_dependency` | `yt-dlp` or FFmpeg isn't installed. | Install it, then try again. |
 
 ## 🧠 For developers
 
 ```bash
-cargo test --workspace --offline
+HIGHVI_REQUIRE_E2E=1 cargo test --workspace --offline
 cargo clippy --workspace --all-targets --offline -- -D warnings
 cargo fmt --all -- --check
 node --check ui/app.js && node --check ui/i18n.js && node --check ui/rain.js
+node scripts/check-ui.mjs   # translation parity
 ```
 
 ```text
-crates/highvi-core/   URL checks, Referer rules, yt-dlp arguments, error messages (all unit-tested)
-src-tauri/            Tauri commands: run yt-dlp, report progress, save the file safely
+crates/highvi-core/   Network guard (egress proxy), discovery, format choice, download job, MP4 mux, safe saving
+                      (unit tests + end-to-end tests with real yt-dlp/FFmpeg against a local HTTPS fixture)
+src-tauri/            Tauri commands: start/cancel a job, progress events, open the folder
 ui/                   The green window: index.html, styles.css, app.js, i18n.js (English · Tiếng Việt · 日本語), rain.js
 docs/assets/          README banner and screenshots
 ```
 
-[SECURITY.md](SECURITY.md) explains how HighVi keeps you safe and what its limits are today. In short: HighVi checks the links you give it, but `yt-dlp` downloads the video pieces by itself, so those later requests aren't checked one by one yet.
+[SECURITY.md](SECURITY.md) explains how HighVi keeps you safe and what its limits are today. In short: every request HighVi's tools make goes through a guard that only lets public HTTPS addresses through, and FFmpeg never touches the network.
 
 ## 📜 License
 

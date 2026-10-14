@@ -341,12 +341,6 @@ dt {
 
 /* ---------- inputs and buttons ---------- */
 
-.input-row {
-  display: flex;
-  gap: 10px;
-  margin-top: 9px;
-}
-
 input {
   width: 100%;
   min-width: 0;
@@ -407,7 +401,9 @@ button:disabled {
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
+  gap: 10px;
   margin-top: 16px;
 }
 
@@ -419,67 +415,32 @@ button:disabled {
   opacity: 0.85;
 }
 
-/* ---------- result ---------- */
+/* ---------- status ---------- */
 
-.section-heading,
 .status-line,
 .metrics {
   display: flex;
   align-items: center;
 }
 
-.section-heading {
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.badge {
-  padding: 5px 10px;
-  border: 1px solid var(--green);
-  background: rgba(0, 255, 65, 0.1);
-  box-shadow: var(--glow);
-  color: var(--green);
-  font-size: 11px;
-  font-weight: 800;
-  letter-spacing: 0.18em;
-}
-
-.details {
-  display: grid;
-  gap: 12px;
-  margin: 20px 0;
-  padding: 14px;
-  border: 1px dashed var(--line);
-  background: rgba(0, 0, 0, 0.5);
-}
-
-.details > div {
-  min-width: 0;
-}
-
-dd {
-  margin: 6px 0 0;
-  overflow: hidden;
-  color: var(--green);
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-dd::before {
-  color: var(--green-dim);
-  content: "└─ ";
-}
-
-.download-form {
-  padding-top: 19px;
-  border-top: 1px solid var(--line-soft);
+.status-title {
+  margin: 0 0 12px;
+  color: var(--green-bright);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
 }
 
 /* ---------- progress ---------- */
 
 .status-line {
   gap: 10px;
+  min-width: 0;
+}
+
+#status-message {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .status-dot {
@@ -519,6 +480,7 @@ dd::before {
 }
 
 .metrics {
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
   color: var(--muted);
@@ -634,12 +596,7 @@ dd::before {
     font-size: 28px;
   }
 
-  .input-row {
-    flex-direction: column;
-  }
-
-  .actions button,
-  .input-row button {
+  .actions button {
     width: 100%;
   }
 }

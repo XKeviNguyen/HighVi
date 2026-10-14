@@ -5,7 +5,7 @@ const I18N = (() => {
   const messages = {
     en: {
       "lang.label": "Language",
-      "hero.eyebrow": "HLS downloader · Ubuntu",
+      "hero.eyebrow": "Video downloader · Linux",
       "hero.subtitle": "Paste a link, and HighVi turns the video into one MP4 file.",
       notice:
         "Only download videos you own or are allowed to download. HighVi never breaks logins, DRM, or any other lock.",
@@ -14,35 +14,36 @@ const I18N = (() => {
       "mode.direct": "Playlist link (.m3u8)",
       "page.label": "Video page link",
       "page.hint":
-        "Works on sites yt-dlp knows. Sites that build their video player with JavaScript may not work.",
+        "Works on sites yt-dlp knows and on pages with a normal video player.",
       "playlist.label": "Playlist link (.m3u8)",
       "referer.label": "Page where you found it",
       "direct.hint":
         "HighVi only tells the site its front-door address (like https://example.com/). It never sends the page path, cookies, or logins.",
-      "discover.button": "Find video",
-      "discover.busy": "Searching…",
-      "discover.hint": "Only public https:// links. Home and office network addresses are blocked.",
-      "result.eyebrow": "Found it",
-      "result.playlist": "Playlist",
-      "result.referer": "Referer",
-      "result.refererNone": "Not sent",
-      "filename.label": "Save as",
       "download.button": "Download MP4",
-      "download.busy": "Downloading…",
+      "download.busy": "Working…",
       "download.hint":
-        "Saved in Downloads/HighVi. HighVi never writes over a file that's already there.",
+        "Saved in Downloads/HighVi. If the name is taken, HighVi adds a number. It never writes over a file.",
+      "network.hint":
+        "Only public https:// links. Home and office network addresses are always blocked, even if the video points to them later.",
+      "deps.title": "Missing tools",
+      "deps.missing": "HighVi needs {tools} to download videos. Install it, then restart HighVi.",
+      "deps.hint": "On Ubuntu: sudo apt install yt-dlp ffmpeg",
+      "cancel.button": "Cancel",
+      "cancel.busy": "Stopping…",
       "progress.aria": "Download progress",
-      "progress.preparing": "Getting ready…",
       "progress.working": "Working…",
-      "progress.recheck": "Checking the playlist again…",
-      "progress.checking": "Checking the page and getting a fresh playlist…",
-      "progress.downloading": "Downloading the pieces…",
-      "progress.processing": "Gluing the pieces into an MP4…",
-      "progress.finished": "Done!",
+      "progress.discovering": "Looking for the video…",
+      "progress.downloadingVideo": "Downloading the picture…",
+      "progress.downloadingAudio": "Downloading the sound…",
+      "progress.merging": "Putting it together as an MP4…",
+      "progress.saving": "Saving…",
+      "progress.title": "Found: {title}",
       "progress.speed": "Speed: {value}",
       "progress.eta": "Time left: {value}",
+      "cancelled.title": "Stopped. Nothing was saved.",
       "error.title": "Couldn't finish",
       "success.title": "All done!",
+      "success.open": "Open folder",
       "error.unknown": "Something went wrong, and HighVi doesn't know why.",
       "error.invalid_page_url":
         "That doesn't look like a web page link. Use a full https:// link with no username or password in it.",
@@ -51,14 +52,17 @@ const I18N = (() => {
       "error.invalid_referer_url":
         "Type the web page where you found the playlist (an https:// link), not the playlist itself.",
       "error.unsafe_network_target":
-        "HighVi won't connect to computers on your home or office network.",
+        "This video tried to reach a computer on a home or office network. HighVi blocked it.",
+      "error.insecure_media_url":
+        "Part of this video uses plain http://, which isn't safe. HighVi only downloads over https://.",
       "error.network_lookup_failed":
         "HighVi couldn't find that website. Check the spelling and your internet connection.",
       "error.discovery_timeout": "Looking for the video took too long (over 60 seconds). Try again.",
       "error.extractor_output_too_large":
         "The page sent back too much information for HighVi to handle safely.",
       "error.invalid_extractor_output": "yt-dlp sent back something HighVi couldn't read.",
-      "error.hls_not_found": "No playlist was found on this page.",
+      "error.hls_not_found": "No video that HighVi can download was found on this page.",
+      "error.live_not_supported": "This is a live stream. HighVi only downloads finished videos.",
       "error.drm_not_supported": "This video is locked with DRM. HighVi won't unlock it.",
       "error.authentication_required":
         "You have to sign in to watch this. HighVi doesn't use your logins.",
@@ -84,24 +88,27 @@ const I18N = (() => {
       "error.network_timeout": "The website took too long to answer. Try again later.",
       "error.yt_dlp_failed":
         "yt-dlp couldn't handle this video. Check the link, and make sure yt-dlp is up to date.",
-      "error.missing_dependency": "yt-dlp isn't installed, or HighVi can't find it.",
-      "error.process_start_failed": "HighVi couldn't start the downloader.",
+      "error.missing_dependency":
+        "A tool HighVi needs (yt-dlp or FFmpeg) isn't installed, or HighVi can't find it.",
+      "error.process_start_failed": "HighVi couldn't start one of its tools.",
       "error.process_output_failed": "HighVi lost track of the download's progress.",
+      "error.proxy_failed": "HighVi couldn't start its network guard, so it didn't download anything.",
       "error.download_already_active":
         "Another download is still running. Please wait for it to finish.",
       "error.download_directory_unavailable": "HighVi can't use its folder in Downloads.",
-      "error.output_exists":
-        "There's already a file with that name in Downloads/HighVi. Pick another name.",
-      "error.output_missing": "yt-dlp finished, but the MP4 file wasn't made.",
+      "error.output_missing": "The download finished, but the video file wasn't there.",
+      "error.unsupported_container":
+        "The video came in a format HighVi can't safely turn into an MP4.",
+      "error.mux_failed":
+        "HighVi couldn't put the picture and sound together into an MP4, so nothing was saved.",
       "error.output_publish_failed":
         "The video finished, but HighVi couldn't move it into its folder.",
-      "error.invalid_filename":
-        "Use a name with 1–120 characters and none of these: / \\ : * ? \" < > | % $",
+      "error.open_folder_failed": "HighVi couldn't open the folder.",
     },
 
     vi: {
       "lang.label": "Ngôn ngữ",
-      "hero.eyebrow": "Trình tải HLS · Ubuntu",
+      "hero.eyebrow": "Trình tải video · Linux",
       "hero.subtitle": "Dán link vào là HighVi gom video lại thành một file MP4.",
       notice:
         "Chỉ tải video của bạn hoặc video bạn được phép tải. HighVi không bao giờ phá đăng nhập, DRM hay bất kỳ ổ khóa nào.",
@@ -109,36 +116,36 @@ const I18N = (() => {
       "mode.page": "Link trang video",
       "mode.direct": "Link playlist (.m3u8)",
       "page.label": "Link trang video",
-      "page.hint":
-        "Dùng được với các trang mà yt-dlp biết. Trang dựng trình phát bằng JavaScript thì có thể không được.",
+      "page.hint": "Dùng được với các trang mà yt-dlp biết và các trang có trình phát video thông thường.",
       "playlist.label": "Link playlist (.m3u8)",
       "referer.label": "Trang bạn tìm thấy playlist",
       "direct.hint":
         "HighVi chỉ cho trang web biết địa chỉ cổng chính (như https://example.com/). Không gửi đường dẫn trang, cookie hay tài khoản.",
-      "discover.button": "Tìm video",
-      "discover.busy": "Đang tìm…",
-      "discover.hint": "Chỉ nhận link https:// công khai. Địa chỉ mạng trong nhà hay công ty sẽ bị chặn.",
-      "result.eyebrow": "Tìm thấy rồi",
-      "result.playlist": "Playlist",
-      "result.referer": "Referer",
-      "result.refererNone": "Không gửi",
-      "filename.label": "Lưu với tên",
       "download.button": "Tải MP4",
-      "download.busy": "Đang tải…",
+      "download.busy": "Đang làm…",
       "download.hint":
-        "File sẽ nằm trong Downloads/HighVi. HighVi không bao giờ ghi đè lên file đã có.",
+        "File nằm trong Downloads/HighVi. Nếu trùng tên, HighVi thêm số vào sau. Không bao giờ ghi đè lên file đã có.",
+      "network.hint":
+        "Chỉ nhận link https:// công khai. Địa chỉ mạng trong nhà hay công ty luôn bị chặn, kể cả khi video trỏ tới đó về sau.",
+      "deps.title": "Thiếu công cụ",
+      "deps.missing": "HighVi cần {tools} để tải video. Hãy cài vào rồi mở lại HighVi.",
+      "deps.hint": "Trên Ubuntu: sudo apt install yt-dlp ffmpeg",
+      "cancel.button": "Hủy",
+      "cancel.busy": "Đang dừng…",
       "progress.aria": "Tiến độ tải",
-      "progress.preparing": "Đang chuẩn bị…",
       "progress.working": "Đang làm…",
-      "progress.recheck": "Đang kiểm tra lại playlist…",
-      "progress.checking": "Đang xem lại trang và lấy playlist mới…",
-      "progress.downloading": "Đang tải từng mảnh…",
-      "progress.processing": "Đang ghép các mảnh thành MP4…",
-      "progress.finished": "Xong rồi!",
+      "progress.discovering": "Đang tìm video…",
+      "progress.downloadingVideo": "Đang tải phần hình…",
+      "progress.downloadingAudio": "Đang tải phần tiếng…",
+      "progress.merging": "Đang ghép lại thành MP4…",
+      "progress.saving": "Đang lưu…",
+      "progress.title": "Đã tìm thấy: {title}",
       "progress.speed": "Tốc độ: {value}",
       "progress.eta": "Còn khoảng: {value}",
+      "cancelled.title": "Đã dừng. Không có gì được lưu.",
       "error.title": "Chưa xong được",
       "success.title": "Tải xong rồi!",
+      "success.open": "Mở thư mục",
       "error.unknown": "Có lỗi gì đó mà HighVi không rõ nguyên nhân.",
       "error.invalid_page_url":
         "Link này không giống link trang web. Hãy dùng link https:// đầy đủ, không chứa tên đăng nhập hay mật khẩu.",
@@ -146,14 +153,18 @@ const I18N = (() => {
         "Đây không phải link playlist. Link phải bắt đầu bằng https:// và kết thúc bằng .m3u8.",
       "error.invalid_referer_url":
         "Hãy nhập trang web nơi bạn tìm thấy playlist (một link https://), chứ không phải chính playlist.",
-      "error.unsafe_network_target": "HighVi không kết nối tới máy trong mạng nhà hay mạng công ty.",
+      "error.unsafe_network_target":
+        "Video này định kết nối tới một máy trong mạng nhà hay mạng công ty. HighVi đã chặn lại.",
+      "error.insecure_media_url":
+        "Một phần video dùng http:// không an toàn. HighVi chỉ tải qua https://.",
       "error.network_lookup_failed":
         "HighVi không tìm thấy trang web này. Kiểm tra lại chính tả và kết nối mạng nhé.",
       "error.discovery_timeout": "Tìm video lâu quá (hơn 60 giây). Thử lại nhé.",
       "error.extractor_output_too_large":
         "Trang web gửi về quá nhiều thông tin, HighVi không xử lý an toàn được.",
       "error.invalid_extractor_output": "yt-dlp gửi về thứ mà HighVi không đọc được.",
-      "error.hls_not_found": "Không tìm thấy playlist nào trên trang này.",
+      "error.hls_not_found": "Không tìm thấy video nào HighVi tải được trên trang này.",
+      "error.live_not_supported": "Đây là phát trực tiếp. HighVi chỉ tải video đã phát xong.",
       "error.drm_not_supported": "Video này bị khóa bằng DRM. HighVi sẽ không mở khóa.",
       "error.authentication_required":
         "Phải đăng nhập mới xem được video này. HighVi không dùng tài khoản của bạn.",
@@ -179,22 +190,25 @@ const I18N = (() => {
       "error.network_timeout": "Trang web trả lời lâu quá. Thử lại sau nhé.",
       "error.yt_dlp_failed":
         "yt-dlp không xử lý được video này. Kiểm tra lại link và cập nhật yt-dlp nhé.",
-      "error.missing_dependency": "Chưa cài yt-dlp, hoặc HighVi không tìm thấy nó.",
-      "error.process_start_failed": "HighVi không khởi động được trình tải.",
+      "error.missing_dependency":
+        "Thiếu công cụ HighVi cần (yt-dlp hoặc FFmpeg), hoặc HighVi không tìm thấy nó.",
+      "error.process_start_failed": "HighVi không khởi động được một công cụ của nó.",
       "error.process_output_failed": "HighVi không theo dõi được tiến độ tải.",
+      "error.proxy_failed": "HighVi không bật được lớp bảo vệ mạng nên chưa tải gì cả.",
       "error.download_already_active": "Đang có một video khác tải dở. Chờ nó xong đã nhé.",
       "error.download_directory_unavailable": "HighVi không dùng được thư mục của nó trong Downloads.",
-      "error.output_exists": "Trong Downloads/HighVi đã có file trùng tên. Hãy đặt tên khác.",
-      "error.output_missing": "yt-dlp đã chạy xong nhưng không tạo ra file MP4.",
+      "error.output_missing": "Đã tải xong nhưng không thấy file video đâu.",
+      "error.unsupported_container":
+        "Video ở định dạng mà HighVi không chuyển sang MP4 một cách an toàn được.",
+      "error.mux_failed": "HighVi không ghép được hình và tiếng thành MP4, nên chưa lưu gì cả.",
       "error.output_publish_failed":
         "Video đã tải xong nhưng HighVi không chuyển được vào thư mục.",
-      "error.invalid_filename":
-        "Tên file dài 1–120 ký tự và không có các ký tự: / \\ : * ? \" < > | % $",
+      "error.open_folder_failed": "HighVi không mở được thư mục.",
     },
 
     ja: {
       "lang.label": "言語",
-      "hero.eyebrow": "HLS ダウンローダー · Ubuntu",
+      "hero.eyebrow": "動画ダウンローダー · Linux",
       "hero.subtitle": "リンクを入れるだけで、HighVi が動画をひとつの MP4 にまとめます。",
       notice:
         "自分の動画か、ダウンロードしてよい動画だけにしてください。HighVi はログインや DRM などのカギを、ぜったいにこわしません。",
@@ -202,37 +216,36 @@ const I18N = (() => {
       "mode.page": "動画ページのリンク",
       "mode.direct": "プレイリストのリンク（.m3u8）",
       "page.label": "動画ページのリンク",
-      "page.hint":
-        "yt-dlp が知っているサイトで使えます。JavaScript でプレーヤーを作っているサイトでは、うまくいかないことがあります。",
+      "page.hint": "yt-dlp が知っているサイトや、ふつうの動画プレーヤーがあるページで使えます。",
       "playlist.label": "プレイリストのリンク（.m3u8）",
       "referer.label": "プレイリストを見つけたページ",
       "direct.hint":
         "HighVi がサイトに伝えるのは「玄関の住所」（たとえば https://example.com/）だけです。ページのくわしい場所、クッキー、ログイン情報は送りません。",
-      "discover.button": "動画をさがす",
-      "discover.busy": "さがしています…",
-      "discover.hint":
-        "公開されている https:// のリンクだけ使えます。家や会社のネットワークの住所はブロックします。",
-      "result.eyebrow": "見つかりました",
-      "result.playlist": "プレイリスト",
-      "result.referer": "Referer（リファラー）",
-      "result.refererNone": "送りません",
-      "filename.label": "保存する名前",
       "download.button": "MP4 をダウンロード",
-      "download.busy": "ダウンロード中…",
+      "download.busy": "作業中…",
       "download.hint":
-        "ファイルは Downloads/HighVi に入ります。同じ名前のファイルがあっても上書きしません。",
+        "ファイルは Downloads/HighVi に入ります。同じ名前があるときは番号をつけます。上書きはしません。",
+      "network.hint":
+        "公開されている https:// のリンクだけ使えます。家や会社のネットワークの住所は、あとから動画がそこを指しても、いつもブロックします。",
+      "deps.title": "道具が足りません",
+      "deps.missing": "動画をダウンロードするには {tools} が必要です。入れてから、HighVi を開きなおしてください。",
+      "deps.hint": "Ubuntu では：sudo apt install yt-dlp ffmpeg",
+      "cancel.button": "キャンセル",
+      "cancel.busy": "止めています…",
       "progress.aria": "ダウンロードの進みぐあい",
-      "progress.preparing": "準備しています…",
       "progress.working": "作業中…",
-      "progress.recheck": "プレイリストをもう一度たしかめています…",
-      "progress.checking": "ページを見なおして、新しいプレイリストをもらっています…",
-      "progress.downloading": "かけらをダウンロードしています…",
-      "progress.processing": "かけらをつなげて MP4 にしています…",
-      "progress.finished": "できました！",
+      "progress.discovering": "動画をさがしています…",
+      "progress.downloadingVideo": "映像をダウンロードしています…",
+      "progress.downloadingAudio": "音声をダウンロードしています…",
+      "progress.merging": "MP4 にまとめています…",
+      "progress.saving": "保存しています…",
+      "progress.title": "見つかりました：{title}",
       "progress.speed": "速さ：{value}",
       "progress.eta": "あと：{value}",
+      "cancelled.title": "止めました。何も保存していません。",
       "error.title": "うまくいきませんでした",
       "success.title": "ダウンロードできました！",
+      "success.open": "フォルダーを開く",
       "error.unknown": "何かがうまくいきませんでしたが、原因がわかりません。",
       "error.invalid_page_url":
         "Web ページのリンクではないようです。ユーザー名やパスワードが入っていない、https:// から始まるリンクを使ってください。",
@@ -241,7 +254,9 @@ const I18N = (() => {
       "error.invalid_referer_url":
         "プレイリストそのものではなく、それを見つけた Web ページ（https:// のリンク）を入れてください。",
       "error.unsafe_network_target":
-        "HighVi は、家や会社のネットワークの中のコンピューターにはつなぎません。",
+        "この動画は、家や会社のネットワークの中のコンピューターにつなごうとしました。HighVi がブロックしました。",
+      "error.insecure_media_url":
+        "動画の一部が安全でない http:// を使っています。HighVi は https:// でしかダウンロードしません。",
       "error.network_lookup_failed":
         "そのサイトが見つかりませんでした。つづりとインターネットの接続をたしかめてください。",
       "error.discovery_timeout":
@@ -249,7 +264,8 @@ const I18N = (() => {
       "error.extractor_output_too_large":
         "ページから届いた情報が多すぎて、安全にあつかえません。",
       "error.invalid_extractor_output": "yt-dlp から、HighVi が読めない返事が届きました。",
-      "error.hls_not_found": "このページにはプレイリストが見つかりませんでした。",
+      "error.hls_not_found": "このページには、HighVi がダウンロードできる動画が見つかりませんでした。",
+      "error.live_not_supported": "これはライブ配信です。HighVi は配信が終わった動画だけダウンロードします。",
       "error.drm_not_supported":
         "この動画には DRM のカギがかかっています。HighVi はカギを開けません。",
       "error.authentication_required":
@@ -277,18 +293,20 @@ const I18N = (() => {
         "サイトの返事がおそすぎました。しばらくしてから、もう一度ためしてください。",
       "error.yt_dlp_failed":
         "yt-dlp がこの動画をあつかえませんでした。リンクをたしかめて、yt-dlp を新しくしてください。",
-      "error.missing_dependency": "yt-dlp が入っていないか、HighVi が見つけられません。",
-      "error.process_start_failed": "HighVi がダウンローダーを動かせませんでした。",
+      "error.missing_dependency":
+        "HighVi に必要な道具（yt-dlp か FFmpeg）が入っていないか、見つけられません。",
+      "error.process_start_failed": "HighVi が道具のひとつを動かせませんでした。",
       "error.process_output_failed": "HighVi がダウンロードの進みぐあいを読めなくなりました。",
+      "error.proxy_failed": "HighVi がネットワークの見はりを始められなかったので、何もダウンロードしていません。",
       "error.download_already_active":
         "ほかのダウンロードがまだ動いています。終わるまで待ってください。",
       "error.download_directory_unavailable": "HighVi が Downloads の中のフォルダーを使えません。",
-      "error.output_exists":
-        "Downloads/HighVi に同じ名前のファイルがもうあります。べつの名前にしてください。",
-      "error.output_missing": "yt-dlp は終わりましたが、MP4 ファイルができませんでした。",
+      "error.output_missing": "ダウンロードは終わりましたが、動画ファイルが見つかりませんでした。",
+      "error.unsupported_container":
+        "この動画は、HighVi が安全に MP4 にできない形式でした。",
+      "error.mux_failed": "映像と音声を MP4 にまとめられなかったので、何も保存していません。",
       "error.output_publish_failed": "動画はできましたが、HighVi がフォルダーに移せませんでした。",
-      "error.invalid_filename":
-        "名前は 1〜120 文字にして、次の文字は使わないでください：/ \\ : * ? \" < > | % $",
+      "error.open_folder_failed": "フォルダーを開けませんでした。",
     },
   };
 
@@ -356,6 +374,8 @@ const I18N = (() => {
     has,
     apply,
     set,
+    // For the catalogue parity check (scripts/check-ui.mjs).
+    catalog: messages,
     get language() {
       return language;
     },

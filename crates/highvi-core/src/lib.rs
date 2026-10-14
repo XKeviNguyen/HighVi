@@ -1,23 +1,32 @@
+//! HighVi's core: URL validation, the network boundary, and the download job.
+
+#[cfg(not(target_os = "linux"))]
+compile_error!("HighVi currently supports Linux only (renameat2, process groups).");
+
 mod classify;
-mod discovery;
+mod egress;
 mod error;
 mod filesystem;
+mod formats;
+mod job;
+mod mux;
+mod netpolicy;
+mod process;
 mod process_output;
-mod process_policy;
 mod source;
 mod validation;
-mod ytdlp_args;
+mod ytdlp;
+
+#[cfg(test)]
+mod e2e;
 
 pub use classify::{ToolSignals, classify_tool_failure};
-pub use discovery::{Discovery, extract_hls_from_json};
 pub use error::PublicError;
-#[cfg(target_os = "linux")]
-pub use filesystem::rename_without_replacement;
+pub use filesystem::prepare_output_dir;
+pub use job::{JobEnvironment, JobOutcome, JobUpdate, Stage, find_executable, run_job};
+pub use process::{CancelHandle, CancelToken, cancel_pair};
 pub use process_output::{CappedOutput, read_capped};
-pub use process_policy::{YT_DLP_ENV_PASSTHROUGH, YT_DLP_FIXED_ENV, YT_DLP_HERMETIC_ARGS};
 pub use source::{SourceKind, SourceRequest, ValidatedSource, referer_origin, validate_source};
 pub use validation::{
-    ensure_public_network_target, redact_url_for_display, suggested_filename,
-    validate_output_filename, validate_page_url, validate_playlist_url, validate_referer_page_url,
+    suggested_filename, validate_page_url, validate_playlist_url, validate_referer_page_url,
 };
-pub use ytdlp_args::{discovery_args, download_args};
