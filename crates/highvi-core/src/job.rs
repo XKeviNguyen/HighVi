@@ -190,10 +190,17 @@ pub async fn run_job(
         .to_string();
     let completed = job.path().join(OUTPUT_FILE);
     let directory = env.output_dir.clone();
-    let published =
-        tokio::task::spawn_blocking(move || publish_unique(&completed, &directory, &stem))
-            .await
-            .map_err(|_| output_dir_error())?;
+    let token = cancel.clone();
+    let published = tokio::task::spawn_blocking(move || {
+        publish_unique(&completed, &directory, &stem, &|| token.is_cancelled())
+    })
+    .await
+    .map_err(|_| output_dir_error())?;
+    if let Err(error) = &published
+        && error.kind() == std::io::ErrorKind::Interrupted
+    {
+        return Err(cancelled_error());
+    }
     match published {
         Ok(saved_to) => Ok(JobOutcome {
             saved_to,

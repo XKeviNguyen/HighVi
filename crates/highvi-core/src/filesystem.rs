@@ -50,8 +50,18 @@ pub fn rename_without_replacement(source: &Path, destination: &Path) -> std::io:
 
 /// Publishes `source` as `<stem>.mp4` in `directory`, or `<stem> (2).mp4`,
 /// `<stem> (3).mp4`… when the name is taken. Never replaces a file.
-pub fn publish_unique(source: &Path, directory: &Path, stem: &str) -> std::io::Result<PathBuf> {
+/// `cancelled` is checked immediately before each rename; when it returns
+/// true nothing is published and the error kind is `Interrupted`.
+pub fn publish_unique(
+    source: &Path,
+    directory: &Path,
+    stem: &str,
+    cancelled: &dyn Fn() -> bool,
+) -> std::io::Result<PathBuf> {
     for attempt in 1..=MAX_NAME_ATTEMPTS {
+        if cancelled() {
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
         let name = if attempt == 1 {
             format!("{stem}.mp4")
         } else {
@@ -258,11 +268,23 @@ mod tests {
         let source = directory.join("new.mp4");
         fs::write(&source, b"third").unwrap();
 
-        let published = publish_unique(&source, &directory, "Clip").unwrap();
+        let published = publish_unique(&source, &directory, "Clip", &|| false).unwrap();
         assert_eq!(published, directory.join("Clip (3).mp4"));
         assert_eq!(fs::read(directory.join("Clip.mp4")).unwrap(), b"first");
         assert_eq!(fs::read(directory.join("Clip (2).mp4")).unwrap(), b"second");
         assert_eq!(fs::read(&published).unwrap(), b"third");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn a_cancel_before_the_rename_publishes_nothing() {
+        let directory = temp_directory("cancelled");
+        let source = directory.join("new.mp4");
+        fs::write(&source, b"data").unwrap();
+        let error = publish_unique(&source, &directory, "Clip", &|| true).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert!(source.exists());
+        assert!(!directory.join("Clip.mp4").exists());
         fs::remove_dir_all(directory).unwrap();
     }
 
