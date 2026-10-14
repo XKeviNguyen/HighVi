@@ -6,7 +6,8 @@
     "tauri": "tauri",
     "dev": "tauri dev",
     "build": "tauri build",
-    "test:core": "cargo test -p highvi-core"
+    "test:core": "cargo test -p highvi-core",
+    "check:ui": "node scripts/check-ui.mjs"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.0.0"

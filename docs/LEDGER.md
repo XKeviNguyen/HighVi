@@ -4,13 +4,34 @@ Compact, resumable record of the V1 mission. Newest state first.
 
 ## Current state
 
-- Phase: 2 (browser discovery) + 5 (packaging) in progress; PR A in final review
-- PR A: #2 `feature/egress-boundary` — head 2d7416f, CI green on b2c92a6, Codex r4 pending
-- PR B: `feature/browser-discovery` (stacked on PR A) — local gate green (91 tests), native
-  smoke passed; not yet pushed
+- Phase: 6 — release verification. PR #2 merged (de648d3), PR #3 merged (8a1c9bd).
+- Active branch: `feature/v1-docs-packaging` (docs, screenshots, CI audit + .deb job)
 - Failed gates: —
-- Next action: merge PR A when Codex r4 clean + CI green on its head; rebase/push PR B,
-  Codex + CI; packaging verification (.deb/AppImage) + docs PR
+- Next action: Codex + CI on this PR, merge, verify main CI, final report.
+
+## Review log (PR B, #3)
+
+- Codex r1 (2d44559): P1 clear variant of a DRM master kept → fixed + test; P2 "title query
+  unbounded" → already 3 s; added overall discovery deadline anyway (3957282).
+- Opus security breaker (2d44559): High — `--force-webrtc-ip-handling-policy` does not exist,
+  WebRTC STUN reached LAN/public UDP around the proxy (reproduced: 5 packets); Medium — URL
+  flood memory; Low — page downloads, Google background traffic, DRM-variant master → fixed in
+  7c79019 (correct switch + profile preference, e2e STUN test failing before/passing after,
+  URL/backlog/channel bounds, downloads denied, docs). Re-check: all closed (0 UDP packets;
+  peak RSS 203→88 MB under flood).
+- Codex r2 (7c79019): no actionable defects. CI green on 7c79019 (Chrome 154, sandbox on).
+
+## Packaging / performance evidence
+
+- Release bundles: `.deb` 3.3 MiB (Depends yt-dlp, ffmpeg, libwebkit2gtk-4.1-0, libgtk-3-0;
+  desktop entry, icon), AppImage 88 MiB. AppImage and the binary extracted from the .deb run
+  in Xvfb with a fresh HOME; blocked-URL path verified through real IPC. `apt install` itself
+  not run (needs sudo).
+- Idle CPU (release, Xvfb software rendering, 15 s window): 52% → 0% of one core after the
+  20 s intro (39% during intro). RSS ≈ 420–430 MiB (WebKitGTK). No Chrome process while idle
+  or while downloading.
+- `cargo audit`: 0 vulnerabilities; 2 warnings in Tauri's GTK stack (unmaintained
+  proc-macro-error, unsound glib VariantStrIter — not used by HighVi).
 
 ## Review log (PR A)
 

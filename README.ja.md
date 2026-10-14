@@ -26,7 +26,7 @@ HighVi はその地図を読んで、かけらをぜんぶ集め、**ひとつ�
 <div align="center">
   <img src="docs/assets/screenshot-ja.png" alt="みどりのマトリックス風デザインの HighVi の画面" width="720" />
   <br />
-  <sub>HighVi の画面（表示しているのは例のデータです）</sub>
+  <sub>HighVi の画面（Ubuntu で実際に動かした画面）</sub>
 </div>
 
 ## 🕹️ 2つの使い方
@@ -87,6 +87,21 @@ npm run dev     # HighVi を開く
 npm run build   # .deb と AppImage を作る
 ```
 
+## 📦 インストール
+
+まだ公開されたリリースはありません。自分でパッケージを作って（**はじめかた** を見てください）から：
+
+```bash
+# .deb（Ubuntu/Debian）：yt-dlp と FFmpeg もいっしょに入ります
+sudo apt install ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+
+# または AppImage（yt-dlp と FFmpeg が PATH にあること）
+chmod +x target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
+./target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
+```
+
+AppImage が FUSE のエラーを出すときは `APPIMAGE_EXTRACT_AND_RUN=1` をつけて動かしてください。JavaScript でプレーヤーを作るページのために、Google Chrome か Chromium も入れてください。
+
 ## 🧯 うまくいかないときは
 
 | エラーコード | どういうこと？ | ためしてみよう |
@@ -104,7 +119,21 @@ npm run build   # .deb と AppImage を作る
 | `live_not_supported` | ライブ配信です。 | HighVi は配信が終わった動画だけダウンロードします。 |
 | `missing_dependency` | `yt-dlp` か FFmpeg が入っていません。 | 入れてから、もう一度ためしましょう。 |
 
+## 🚧 いまの制限
+
+- **HLS とふつうの MP4 だけ。** DASH だけのサイト、ライブ配信、DRM つきの動画は、わざとことわります。
+- **ログインもクッキーも使いません。** ログインが必要な動画や、ページがプレーヤー用にセットするクッキーが必要な動画はダウンロードできません。HighVi はあなたのブラウザーのログインを借りません。
+- **ブラウザーでさがすには Google Chrome か Chromium が必要です。** HighVi はブラウザーを同梱していません。snap 版 Chromium は未テストです。
+- **特別なボタンが必要なプレーヤー**（独自の再生ボタン、年齢確認、同意画面）はおしません。HighVi が動かすのはふつうの `<video>` だけです。
+- **システムや会社のプロキシは使いません。** HighVi の見はり番だけが外への出口です。直接つなげないネットワークではダウンロードできません。
+- **`http://` の動画はことわります。** ページが `https://` でも同じです。
+- **Linux だけ**（Ubuntu 26.04、Google Chrome 153/154、yt-dlp 2026.03.17、FFmpeg 8 でテスト）。
+- **一度にひとつ。** まだ順番待ちはありません。
+- **ブラウザーで見つけた、とても長い（8 KiB をこえる）動画の URL は無視します。**
+
 ## 🧠 開発する人へ
+
+しくみ・流れ・上限は [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) にあります。
 
 ```bash
 HIGHVI_REQUIRE_E2E=1 cargo test --workspace --offline
