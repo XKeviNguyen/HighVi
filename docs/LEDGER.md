@@ -4,12 +4,27 @@ Compact, resumable record of the V1 mission. Newest state first.
 
 ## Current state
 
-- Phase: 1+3+4 (network boundary, job pipeline, one-click UI) — PR A in review
-- Active branch: `feature/egress-boundary`
-- PR: (opening)
-- Last tested SHA: working tree before first commit (local gate green)
+- Phase: 2 (browser discovery) + 5 (packaging) in progress; PR A in final review
+- PR A: #2 `feature/egress-boundary` — head 2d7416f, CI green on b2c92a6, Codex r4 pending
+- PR B: `feature/browser-discovery` (stacked on PR A) — local gate green (91 tests), native
+  smoke passed; not yet pushed
 - Failed gates: —
-- Next action: push PR A, Codex review + read-only security review, CI; then PR B (browser discovery)
+- Next action: merge PR A when Codex r4 clean + CI green on its head; rebase/push PR B,
+  Codex + CI; packaging verification (.deb/AppImage) + docs PR
+
+## Review log (PR A)
+
+- Codex r1 (53f6cb3, gpt-5.6-terra; configured gpt-6.1-sol unsupported on this account):
+  4×P2 — filename bytes, late cancel, live-job cleanup, info.json retention → all fixed
+  (afc73bf) with regression tests proven failing first.
+- Opus security breaker (53f6cb3): High — format-ID selector keywords (`all`, `b`…) let
+  yt-dlp select rejected formats incl. unproxied mms:// via mpv; Medium — `Ytdl-Request-Proxy`
+  header overrides --proxy → fixed (d37ed29): keyword rejection, info.json reduced to chosen
+  formats, yt-dlp control headers dropped; also own-interface addresses refused, per-run
+  refusal deltas, kept-dir marker, accept back-off. Re-check: both repros closed; 2 Low
+  (duplicate IDs, IPv4-mapped own address) → fixed (b2c92a6).
+- Codex r2 (d37ed29): claimed 192.0.0.0/24 partly reachable → rejected with test evidence.
+- Codex r3 (b2c92a6): cancel between Saving check and rename → fixed (2d7416f).
 
 ## Baseline (main @ bb9fc64, 2026-10-14)
 
@@ -74,6 +89,18 @@ Compact, resumable record of the V1 mission. Newest state first.
   stack overflow (8 KiB stack buffers); missing XDG Downloads → fallback `~/Downloads`; status
   off-screen → scroll into view; SIGTERM left job dir → signals routed to app exit; deps banner
   styling.
+
+## Evidence (PR B, local, 2026-10-14)
+
+- 91 tests (`HIGHVI_REQUIRE_E2E=1`), incl. 7 browser e2e with real Chrome 153 against the
+  HTTPS fixture: JS-built URL, delayed iframe player vs advert, MIME-only and content-sniffed
+  playlists, click-to-play, Referer-enforcing hosts (403 otherwise), blocked private
+  destinations from iframe/img/fetch/WebSocket/plain HTTP (zero canary hits), DRM, no media
+  (~13 s), crashing/missing browser, cancellation, zero surviving Chrome processes.
+- Fixture bug found: no CORS header (real CDNs send it). Product bug found: Chrome returns HLS
+  bodies base64-encoded → decoder added.
+- Native: hls.js public demo page (JS player, Mux test stream) → "hls.js demo.mp4",
+  1920×1080 H.264/AAC, 634.6 s, 488 MB, full decode exit 0, no Chrome left.
 
 ## Log
 

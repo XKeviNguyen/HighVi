@@ -33,7 +33,7 @@ HighVi reads the treasure map, collects every piece, and glues them back togethe
 
 | Mode | You paste | Good for |
 | --- | --- | --- |
-| **Video page link** | The link to the video page | Sites that `yt-dlp` already knows |
+| **Video page link** | The link to the video page | Almost everything: sites `yt-dlp` knows, and pages whose player is built with JavaScript |
 | **Playlist link (.m3u8)** | The playlist link **and** the page you found it on | When you already have the `.m3u8` link |
 
 HighVi speaks **English, Tiếng Việt, and 日本語**. Pick one with the buttons in the top corner, and HighVi will remember it.
@@ -41,13 +41,13 @@ HighVi speaks **English, Tiếng Việt, and 日本語**. Pick one with the butt
 **Why does “Playlist link” ask for the page too?**
 Some websites only hand out the treasure map if you say where you came from, like showing a ticket at the door. That note is called the **Referer**. HighVi only tells them the website's front-door address (for example `https://example.com/`). It never sends the rest of the page link, your cookies, or your logins.
 
-**Where do I find a playlist link?** In your browser, press <kbd>F12</kbd>, open the **Network** tab, play the video, and type `m3u8` in the filter box. Only do this for videos you're allowed to download.
+**Do I need DevTools or F12?** No. Paste the page link. If `yt-dlp` doesn't know the site, HighVi opens the page in a private, throw-away Chrome (no your profile, no cookies, every request through the network guard), lets the page's own player load, and picks the main video, not the adverts. The **Playlist link** mode is only an advanced fallback for when you already have the `.m3u8` link.
 
 ## ✅ What HighVi does
 
 1. You paste a link and press **Download MP4**.
 2. HighVi checks that it's an `https://` link, then starts a private **network guard**: every request `yt-dlp` makes (the page, redirects, playlists, pieces, keys) must go to a public internet address. Computers inside your home or office network are always blocked.
-3. `yt-dlp` finds the treasure map, and HighVi picks the best picture (and the sound, if it's separate).
+3. `yt-dlp` looks for the treasure map. If it finds nothing, HighVi watches the page's own player in a private browser to see which playlist it loads. Either way, HighVi picks the best picture (and the sound, if it's separate).
 4. The pieces are downloaded and glued into one MP4 on your computer. You see progress, speed, and time left, and you can press **Cancel** at any time.
 5. The finished video lands in **`~/Downloads/HighVi`**, named after the video. If the name is taken, HighVi adds ` (2)`. It never writes over a file. Press **Open folder** to see it.
 
@@ -63,7 +63,7 @@ Some websites only hand out the treasure map if you say where you came from, lik
 
 ## 🚀 Get started
 
-You need **Ubuntu**, **Rust**, **Node.js**, **`yt-dlp`**, and **FFmpeg**.
+You need **Ubuntu**, **Rust**, **Node.js**, **`yt-dlp`**, and **FFmpeg**. **Google Chrome or Chromium** is optional: without it, pages whose player is built with JavaScript can't be searched.
 
 Install the system libraries Tauri needs:
 
@@ -92,7 +92,9 @@ npm run build   # make a .deb and an AppImage
 | Message code | What it means | What to try |
 | --- | --- | --- |
 | `access_denied` / `host_firewall_block` | The website said **no** (HTTP 403). | If you pasted a `.m3u8` link as a page, switch to **Playlist link** and add the page you found it on. Check it's the right page, or copy a fresh playlist link. If the site needs you logged in through a browser, HighVi can't help. |
-| `unsupported_page` | `yt-dlp` doesn't know this website, or the video player is built with JavaScript. | Use **Playlist link** if you have the playlist link. |
+| `unsupported_page` | `yt-dlp` doesn't know this website, and no browser is installed to look further. | Install Google Chrome or Chromium, or use **Playlist link**. |
+| `no_media_found` | The private browser opened the page, but no video loaded. | The player may need a sign-in or a special button. HighVi won't work around those. |
+| `browser_failed` | The private browser stopped unexpectedly. | Try again. |
 | `unsupported_playlist` | The link isn't a playlist HighVi can read. | Make sure it's the `.m3u8` link itself. |
 | `media_not_found` | The video is gone (HTTP 404/410). | The link may have expired. Copy a fresh one. |
 | `drm_not_supported` | The video is locked with DRM. | HighVi won't unlock it. |

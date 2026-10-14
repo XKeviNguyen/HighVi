@@ -33,7 +33,7 @@ HighVi đọc tấm bản đồ đó, đi gom từng mảnh rồi ghép lại th
 
 | Chế độ | Bạn dán vào | Dùng khi |
 | --- | --- | --- |
-| **Link trang video** | Link của trang có video | Trang web mà `yt-dlp` đã biết |
+| **Link trang video** | Link của trang có video | Gần như mọi trang: trang `yt-dlp` biết, và trang có trình phát dựng bằng JavaScript |
 | **Link playlist (.m3u8)** | Link playlist **và** trang bạn tìm thấy nó | Bạn đã có sẵn link `.m3u8` |
 
 HighVi nói được **English, Tiếng Việt và 日本語**. Bấm nút ở góc trên để chọn, HighVi sẽ nhớ lựa chọn của bạn.
@@ -41,13 +41,13 @@ HighVi nói được **English, Tiếng Việt và 日本語**. Bấm nút ở g
 **Sao chế độ “Link playlist” lại hỏi thêm trang web?**
 Có những trang chỉ đưa bản đồ kho báu khi bạn nói mình đến từ đâu, giống như phải trình vé ở cửa. Lời nhắn đó gọi là **Referer**. HighVi chỉ nói địa chỉ "cổng chính" của trang (ví dụ `https://example.com/`). HighVi không bao giờ gửi phần còn lại của link, cookie hay tài khoản đăng nhập của bạn.
 
-**Tìm link playlist ở đâu?** Trên trình duyệt, bấm <kbd>F12</kbd>, mở tab **Network**, bật video lên rồi gõ `m3u8` vào ô lọc. Chỉ làm vậy với video bạn được phép tải nhé.
+**Có cần DevTools hay F12 không?** Không. Chỉ cần dán link trang. Nếu `yt-dlp` không biết trang đó, HighVi mở trang trong một Chrome riêng, dùng xong là bỏ (không dùng hồ sơ, không cookie của bạn, mọi request đều qua lớp bảo vệ mạng), để trình phát của chính trang tự tải, rồi chọn video chính chứ không phải quảng cáo. Chế độ **Link playlist** chỉ là đường lui nâng cao khi bạn đã có sẵn link `.m3u8`.
 
 ## ✅ HighVi làm gì
 
 1. Bạn dán link rồi bấm **Tải MP4**.
 2. HighVi kiểm tra đó là link `https://`, rồi bật một **lớp bảo vệ mạng** riêng: mọi request mà `yt-dlp` gửi đi (trang, redirect, playlist, từng mảnh, khóa) đều phải tới địa chỉ internet công khai. Máy trong mạng nhà hay mạng công ty luôn bị chặn.
-3. `yt-dlp` tìm tấm bản đồ kho báu, HighVi chọn hình đẹp nhất (và phần tiếng nếu tách riêng).
+3. `yt-dlp` tìm tấm bản đồ kho báu. Nếu không thấy, HighVi xem trình phát của chính trang trong một trình duyệt riêng để biết nó tải playlist nào. Sau đó HighVi chọn hình đẹp nhất (và phần tiếng nếu tách riêng).
 4. Các mảnh được tải về và ghép thành một file MP4 ngay trên máy bạn. Bạn thấy tiến độ, tốc độ, thời gian còn lại, và có thể bấm **Hủy** bất cứ lúc nào.
 5. Video xong nằm trong **`~/Downloads/HighVi`**, đặt theo tên video. Nếu trùng tên, HighVi thêm ` (2)`. Không bao giờ ghi đè. Bấm **Mở thư mục** để xem.
 
@@ -63,7 +63,7 @@ Có những trang chỉ đưa bản đồ kho báu khi bạn nói mình đến t
 
 ## 🚀 Bắt đầu
 
-Bạn cần **Ubuntu**, **Rust**, **Node.js**, **`yt-dlp`** và **FFmpeg**.
+Bạn cần **Ubuntu**, **Rust**, **Node.js**, **`yt-dlp`** và **FFmpeg**. **Google Chrome hoặc Chromium** là tuỳ chọn: thiếu nó thì không tìm được video trên trang có trình phát dựng bằng JavaScript.
 
 Cài các thư viện hệ thống mà Tauri cần:
 
@@ -92,7 +92,9 @@ npm run build   # đóng gói .deb và AppImage
 | Mã lỗi | Nghĩa là gì | Thử làm gì |
 | --- | --- | --- |
 | `access_denied` / `host_firewall_block` | Trang web **từ chối** (HTTP 403). | Nếu bạn dán link `.m3u8` vào ô link trang video, hãy chuyển sang **Link playlist** và thêm trang chứa nó. Xem lại trang đã đúng chưa, hoặc lấy link playlist mới. Nếu trang bắt đăng nhập bằng trình duyệt thì HighVi đành chịu. |
-| `unsupported_page` | `yt-dlp` không biết trang này, hoặc trình phát video được dựng bằng JavaScript. | Chọn **Link playlist** nếu bạn có link playlist. |
+| `unsupported_page` | `yt-dlp` không biết trang này, và máy chưa có trình duyệt để tìm tiếp. | Cài Google Chrome hoặc Chromium, hoặc dùng **Link playlist**. |
+| `no_media_found` | Trình duyệt riêng đã mở trang nhưng không thấy video nào tải về. | Có thể trình phát cần đăng nhập hay một nút đặc biệt. HighVi không lách qua những thứ đó. |
+| `browser_failed` | Trình duyệt riêng bị dừng bất ngờ. | Thử lại nhé. |
 | `unsupported_playlist` | Link này không phải playlist mà HighVi đọc được. | Kiểm tra đó đúng là link `.m3u8`. |
 | `media_not_found` | Video không còn nữa (HTTP 404/410). | Link có thể đã hết hạn, hãy lấy link mới. |
 | `drm_not_supported` | Video bị khóa bằng DRM. | HighVi sẽ không mở khóa. |

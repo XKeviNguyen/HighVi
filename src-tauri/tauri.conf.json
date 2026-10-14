@@ -26,7 +26,27 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "appimage"],
-    "icon": ["icons/icon.png"]
+    "targets": [
+      "deb",
+      "appimage"
+    ],
+    "icon": [
+      "icons/icon.png"
+    ],
+    "category": "Video",
+    "publisher": "HighVi contributors",
+    "license": "MIT",
+    "homepage": "https://github.com/XKeviNguyen/HighVi",
+    "shortDescription": "Paste a video page link and get one playable MP4.",
+    "longDescription": "HighVi finds the HLS stream a web page plays (with yt-dlp, or by watching the page's own player in an isolated headless Chrome), downloads it through a network guard that only allows public HTTPS destinations, and saves one MP4. It never bypasses DRM, logins or paywalls.",
+    "linux": {
+      "deb": {
+        "depends": [
+          "yt-dlp",
+          "ffmpeg"
+        ],
+        "section": "video"
+      }
+    }
   }
 }
