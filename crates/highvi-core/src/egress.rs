@@ -8,7 +8,7 @@
 //! checked, and DNS rebinding has no window between check and connect.
 //! Plain-HTTP proxying is refused: HighVi fetches media over HTTPS only.
 
-use crate::netpolicy::is_public_ip;
+use crate::netpolicy::{is_public_ip, local_addresses};
 use std::{
     io,
     net::SocketAddr,
@@ -44,7 +44,34 @@ pub struct EgressStats {
     tunnels: AtomicU64,
 }
 
+/// A point-in-time copy of the refusal counters, so a caller can tell which
+/// refusals happened during its own tool run.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RefusalCounts {
+    pub address: u64,
+    pub plain_http: u64,
+    pub unresolvable: u64,
+}
+
+impl RefusalCounts {
+    pub fn since(self, earlier: Self) -> Self {
+        Self {
+            address: self.address.saturating_sub(earlier.address),
+            plain_http: self.plain_http.saturating_sub(earlier.plain_http),
+            unresolvable: self.unresolvable.saturating_sub(earlier.unresolvable),
+        }
+    }
+}
+
 impl EgressStats {
+    pub fn counts(&self) -> RefusalCounts {
+        RefusalCounts {
+            address: self.blocked_address(),
+            plain_http: self.blocked_plain_http(),
+            unresolvable: self.unresolvable(),
+        }
+    }
+
     /// Requests refused because the destination is local, private or reserved.
     pub fn blocked_address(&self) -> u64 {
         self.blocked_address.load(Ordering::Relaxed)
@@ -133,6 +160,8 @@ async fn accept_loop(listener: TcpListener, resolver: Resolver, stats: Arc<Egres
             return;
         };
         let Ok((client, _)) = listener.accept().await else {
+            // e.g. out of descriptors: back off instead of spinning.
+            tokio::time::sleep(Duration::from_millis(50)).await;
             continue;
         };
         let resolver = resolver.clone();
@@ -308,7 +337,11 @@ async fn resolve_checked(
     }
     // One private answer taints the whole name: a client must not be able to
     // pick which of a mixed answer set it reaches.
-    if addresses.iter().any(|address| !is_public_ip(address.ip())) {
+    let local = local_addresses().ok_or(Refusal::Address)?;
+    if addresses
+        .iter()
+        .any(|address| !is_public_ip(address.ip()) || local.contains(&address.ip()))
+    {
         return Err(Refusal::Address);
     }
     Ok(addresses)

@@ -3,6 +3,44 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+/// Addresses of this machine's own interfaces. A public address assigned to
+/// this host still leads to its local services, so the proxy refuses them
+/// too. `None` when the interfaces cannot be listed; callers fail closed.
+pub fn local_addresses() -> Option<Vec<IpAddr>> {
+    let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs fills `list` with a linked list we free below.
+    if unsafe { libc::getifaddrs(&mut list) } != 0 {
+        return None;
+    }
+    let mut addresses = Vec::new();
+    let mut current = list;
+    while !current.is_null() {
+        // SAFETY: `current` is a node of the list getifaddrs returned.
+        let entry = unsafe { &*current };
+        if !entry.ifa_addr.is_null() {
+            // SAFETY: `ifa_addr` points to a sockaddr whose family tells
+            // which concrete type it is.
+            match i32::from(unsafe { (*entry.ifa_addr).sa_family }) {
+                libc::AF_INET => {
+                    let address = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in) };
+                    addresses.push(IpAddr::V4(Ipv4Addr::from(u32::from_be(
+                        address.sin_addr.s_addr,
+                    ))));
+                }
+                libc::AF_INET6 => {
+                    let address = unsafe { &*(entry.ifa_addr as *const libc::sockaddr_in6) };
+                    addresses.push(IpAddr::V6(Ipv6Addr::from(address.sin6_addr.s6_addr)));
+                }
+                _ => {}
+            }
+        }
+        current = entry.ifa_next;
+    }
+    // SAFETY: frees the list returned by getifaddrs exactly once.
+    unsafe { libc::freeifaddrs(list) };
+    Some(addresses)
+}
+
 pub fn is_public_ip(address: IpAddr) -> bool {
     match address {
         IpAddr::V4(address) => is_public_ipv4(address),
@@ -56,6 +94,15 @@ fn is_public_ipv6(address: Ipv6Addr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_interfaces_include_loopback() {
+        let local = local_addresses().unwrap();
+        assert!(
+            local.contains(&IpAddr::V4(Ipv4Addr::LOCALHOST)),
+            "{local:?}"
+        );
+    }
 
     fn public(raw: &str) -> bool {
         is_public_ip(raw.parse().unwrap())

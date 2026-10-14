@@ -16,6 +16,8 @@ use std::{
 
 const JOB_PREFIX: &str = ".highvi-job-";
 const JOB_MARKER: &str = ".highvi-owned-job";
+/// Present in a job directory kept for recovery; cleanup never removes it.
+const KEEP_MARKER: &str = ".highvi-kept";
 const STALE_JOB_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_NAME_ATTEMPTS: u32 = 1_000;
 static JOB_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -145,6 +147,7 @@ impl JobDir {
 
     pub fn keep(&mut self) {
         self.keep = true;
+        let _ = std::fs::write(self.path.join(KEEP_MARKER), b"");
     }
 }
 
@@ -204,7 +207,8 @@ pub async fn cleanup_stale_jobs(parent: &Path) {
         let Ok(marker) = marker else { continue };
         let is_file = marker.metadata().is_ok_and(|metadata| metadata.is_file());
         // Held until the directory is gone, so no new job can claim it.
-        if is_file && try_lock(&marker) {
+        let kept = std::fs::symlink_metadata(path.join(KEEP_MARKER)).is_ok();
+        if is_file && !kept && try_lock(&marker) {
             let _ = tokio::fs::remove_dir_all(path).await;
         }
     }
@@ -277,6 +281,10 @@ mod tests {
         kept.keep();
         let kept_path = kept.path().to_path_buf();
         drop(kept);
+        assert!(kept_path.exists());
+        // A recovery directory survives cleanup even once it is old.
+        age(&kept_path);
+        cleanup_stale_jobs(&parent).await;
         assert!(kept_path.exists());
         fs::remove_dir_all(parent).unwrap();
     }

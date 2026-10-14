@@ -113,6 +113,28 @@ fn is_safe_format_id(id: &str) -> bool {
         && id
             .chars()
             .all(|character| character.is_alphanumeric() || matches!(character, '-' | '_' | '.'))
+        && !is_selector_keyword(id)
+}
+
+/// Words yt-dlp's `--format` treats as selectors before it looks for a
+/// matching ID: `all`, `mergeall`, and `(best|worst|b|w)(video|audio|v|a)?`
+/// with an optional `*` or `.N` (YoutubeDL.py, `_build_selector_function`).
+fn is_selector_keyword(id: &str) -> bool {
+    let lower = id.to_ascii_lowercase();
+    if matches!(lower.as_str(), "all" | "mergeall") {
+        return true;
+    }
+    let base = match lower.split_once('.') {
+        Some((base, index)) if !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()) => {
+            base
+        }
+        Some(_) => return false,
+        None => lower.as_str(),
+    };
+    let rest = ["best", "worst", "b", "w"]
+        .into_iter()
+        .find_map(|prefix| base.strip_prefix(prefix));
+    matches!(rest, Some("" | "video" | "audio" | "v" | "a"))
 }
 
 pub fn select_media(raw_json: &[u8]) -> Result<MediaInfo, PublicError> {
@@ -163,7 +185,8 @@ pub fn select_media(raw_json: &[u8]) -> Result<MediaInfo, PublicError> {
         .take(MAX_TITLE_CHARS)
         .collect();
     let mut entry = entry;
-    origin_only_referers(&mut entry);
+    keep_only_selected(&mut entry, &selection);
+    sanitize_http_headers(&mut entry);
     let info_json = serde_json::to_vec(&entry).map_err(|_| unreadable())?;
     Ok(MediaInfo {
         title,
@@ -173,20 +196,63 @@ pub fn select_media(raw_json: &[u8]) -> Result<MediaInfo, PublicError> {
     })
 }
 
-/// Extractors may record the full page URL as a format's `Referer`, and
-/// yt-dlp replays those headers on download. Reduce every Referer to its
-/// origin (as browsers do cross-origin), or drop it when it is not HTTPS, so
-/// page paths and tokens never reach media hosts.
-fn origin_only_referers(value: &mut Value) {
+/// Leaves only the chosen formats in the info JSON handed back to yt-dlp,
+/// so no selector, however yt-dlp interprets it, can reach a format HighVi
+/// rejected. Top-level media fields are removed for the same reason.
+fn keep_only_selected(entry: &mut Value, selection: &Selection) {
+    let chosen = |format: &Value| {
+        let id = format.get("format_id").and_then(Value::as_str);
+        id == Some(selection.video.as_str()) || id.is_some() && id == selection.audio.as_deref()
+    };
+    if let Some(Value::Array(formats)) = entry.get_mut("formats") {
+        formats.retain(chosen);
+    }
+    if let Value::Object(map) = entry {
+        for key in [
+            "url",
+            "manifest_url",
+            "protocol",
+            "format_id",
+            "requested_formats",
+            "requested_downloads",
+            "entries",
+        ] {
+            map.remove(key);
+        }
+    }
+}
+
+/// yt-dlp replays recorded `http_headers` on download. Two kinds are unsafe:
+/// - `Ytdl-*`/`Youtubedl-*` headers are instructions to yt-dlp itself (for
+///   example `Ytdl-Request-Proxy` replaces `--proxy`), as are proxy and
+///   hop-by-hop headers; they are dropped, as is any value with CR or LF.
+/// - Extractors may record the full page URL as `Referer`; it is reduced to
+///   the origin (as browsers do cross-origin) or dropped when not HTTPS, so
+///   page paths and tokens never reach media hosts.
+fn sanitize_http_headers(value: &mut Value) {
     match value {
         Value::Object(map) => {
             if let Some(Value::Object(headers)) = map.get_mut("http_headers") {
-                let keys: Vec<String> = headers
+                headers.retain(|name, value| {
+                    let lower = name.to_ascii_lowercase();
+                    let control = lower.starts_with("ytdl-")
+                        || lower.starts_with("youtubedl-")
+                        || lower.starts_with("proxy-")
+                        || matches!(
+                            lower.as_str(),
+                            "host" | "connection" | "transfer-encoding" | "content-length" | "te"
+                        );
+                    let clean = value
+                        .as_str()
+                        .is_some_and(|text| !text.contains(['\r', '\n', '\0']));
+                    !control && clean && !name.contains(['\r', '\n', ':'])
+                });
+                let referers: Vec<String> = headers
                     .keys()
                     .filter(|key| key.eq_ignore_ascii_case("referer"))
                     .cloned()
                     .collect();
-                for key in keys {
+                for key in referers {
                     let origin = headers
                         .get(&key)
                         .and_then(Value::as_str)
@@ -203,9 +269,9 @@ fn origin_only_referers(value: &mut Value) {
                     }
                 }
             }
-            map.values_mut().for_each(origin_only_referers);
+            map.values_mut().for_each(sanitize_http_headers);
         }
-        Value::Array(items) => items.iter_mut().for_each(origin_only_referers),
+        Value::Array(items) => items.iter_mut().for_each(sanitize_http_headers),
         _ => {}
     }
 }
@@ -405,7 +471,7 @@ mod tests {
     fn replayed_referers_are_reduced_to_their_origin() {
         let media = select_media(
             br#"{"http_headers":{"Referer":"https://site.example/watch/1?session=s"},
-              "formats":[{"format_id":"h","protocol":"m3u8_native","url":"https://c.example/p.m3u8",
+              "formats":[{"format_id":"h","protocol":"m3u8_native","url":"https://c.example/p.m3u8","height":720,
                 "http_headers":{"referer":"https://site.example/a/b?token=t","User-Agent":"UA"}},
                 {"format_id":"x","protocol":"m3u8_native","url":"https://c.example/x.m3u8",
                 "http_headers":{"Referer":"http://site.example/plain"}}]}"#,
@@ -421,6 +487,45 @@ mod tests {
         assert!(entry["formats"][1]["http_headers"].get("Referer").is_none());
         let text = String::from_utf8(media.info_json).unwrap();
         assert!(!text.contains("session") && !text.contains("token=t"));
+    }
+
+    #[test]
+    fn info_json_holds_only_the_chosen_formats_and_no_control_headers() {
+        let media = select_media(
+            br#"{"url":"mms://192.168.1.1/x","http_headers":{"Ytdl-Request-Proxy":"__noproxy__","YouTubeDL-No-Compression":"1","X-Ok":"1"},
+              "formats":[
+                {"format_id":"all","protocol":"https","url":"https://c.example/v.mp4","ext":"mp4","height":2160},
+                {"format_id":"lan","protocol":"mms","url":"mms://192.168.1.1:8080/admin/reboot","height":4320},
+                {"format_id":"hls-720","protocol":"m3u8_native","url":"https://c.example/p.m3u8","height":720,
+                 "http_headers":{"ytdl-socks-proxy":"socks5://10.0.0.1","Proxy-Authorization":"x","Bad":"a\r\nX-Injected: 1","User-Agent":"UA"}}
+              ]}"#,
+        )
+        .unwrap();
+        assert_eq!(media.selection.video, "hls-720");
+        let entry: Value = serde_json::from_slice(&media.info_json).unwrap();
+        let ids: Vec<&str> = entry["formats"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|format| format["format_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["hls-720"]);
+        assert!(entry.get("url").is_none());
+        let text = String::from_utf8(media.info_json)
+            .unwrap()
+            .to_ascii_lowercase();
+        for leaked in [
+            "ytdl-",
+            "youtubedl-",
+            "proxy-authorization",
+            "x-injected",
+            "mms://",
+            "192.168",
+        ] {
+            assert!(!text.contains(leaked), "{leaked} survived");
+        }
+        assert_eq!(entry["formats"][0]["http_headers"]["User-Agent"], "UA");
+        assert_eq!(entry["http_headers"]["X-Ok"], "1");
     }
 
     #[test]

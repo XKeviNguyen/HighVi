@@ -6,7 +6,7 @@
 
 use crate::{
     PublicError, SourceKind, ToolSignals, ValidatedSource, classify_tool_failure,
-    egress::{EgressProxy, EgressStats, Resolver},
+    egress::{EgressProxy, EgressStats, RefusalCounts, Resolver},
     filesystem::{
         JobDir, cleanup_stale_jobs, output_dir_error, prepare_output_dir, publish_unique,
     },
@@ -220,6 +220,7 @@ async fn discover(
     stats: &EgressStats,
     cancel: &mut CancelToken,
 ) -> Result<MediaInfo, PublicError> {
+    let before = stats.counts();
     let mut command = tool_command(
         &env.yt_dlp,
         policy.discovery_args(source.discovery_target()),
@@ -238,9 +239,8 @@ async fn discover(
 
     if !captured.success {
         let output = String::from_utf8_lossy(&captured.stderr.bytes);
-        return Err(
-            network_refusal(stats).unwrap_or_else(|| classify_tool_failure(&output, source.kind()))
-        );
+        return Err(network_refusal(stats.counts().since(before))
+            .unwrap_or_else(|| classify_tool_failure(&output, source.kind())));
     }
     // Oversized stderr is only truncated diagnostics; oversized metadata is unsafe.
     if captured.stdout.overflowed {
@@ -266,6 +266,7 @@ async fn download_track(
     report: &(dyn Fn(JobUpdate) + Send + Sync),
 ) -> Result<(), PublicError> {
     report(JobUpdate::stage(stage));
+    let before = stats.counts();
     let mut command = tool_command(
         &env.yt_dlp,
         policy.download_args(format_id, stem),
@@ -282,7 +283,9 @@ async fn download_track(
     .await
     .map_err(|error| run_error(error, "yt-dlp", "network_timeout"))?;
     if !success {
-        return Err(network_refusal(stats).unwrap_or_else(|| signals.classify(kind)));
+        return Err(
+            network_refusal(stats.counts().since(before)).unwrap_or_else(|| signals.classify(kind))
+        );
     }
     Ok(())
 }
@@ -396,19 +399,20 @@ fn mux_error() -> PublicError {
     )
 }
 
-/// When the proxy refused a request, that refusal is why the tool failed.
-fn network_refusal(stats: &EgressStats) -> Option<PublicError> {
-    if stats.blocked_address() > 0 {
+/// When the proxy refused a request during a tool's run, that refusal is why
+/// the tool failed.
+fn network_refusal(refused: RefusalCounts) -> Option<PublicError> {
+    if refused.address > 0 {
         Some(PublicError::new(
             "unsafe_network_target",
             "The media tried to reach a local, private or reserved network address. HighVi blocked it.",
         ))
-    } else if stats.blocked_plain_http() > 0 {
+    } else if refused.plain_http > 0 {
         Some(PublicError::new(
             "insecure_media_url",
             "Part of this media is served over plain HTTP. HighVi only downloads over HTTPS.",
         ))
-    } else if stats.unresolvable() > 0 {
+    } else if refused.unresolvable > 0 {
         Some(PublicError::new(
             "network_lookup_failed",
             "A host name used by this media could not be resolved. Check the address and your connection.",
