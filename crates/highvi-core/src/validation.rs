@@ -57,6 +57,10 @@ fn validate_https_url(raw: &str, max_bytes: usize, kind: &str) -> Result<Url, Pu
     Ok(url)
 }
 
+/// Linux allows 255 bytes per name; keep room for " (999).mp4".
+const MAX_STEM_BYTES: usize = 240;
+const MAX_STEM_CHARS: usize = 80;
+
 pub fn suggested_filename(title: Option<&str>, id: Option<&str>) -> String {
     let source = title
         .filter(|value| !value.trim().is_empty())
@@ -76,6 +80,10 @@ pub fn suggested_filename(title: Option<&str>, id: Option<&str>) -> String {
             character
         };
 
+        let next = if mapped.is_whitespace() { ' ' } else { mapped };
+        if stem.chars().count() >= MAX_STEM_CHARS || stem.len() + next.len_utf8() > MAX_STEM_BYTES {
+            break;
+        }
         if mapped.is_whitespace() {
             if !previous_was_space && !stem.is_empty() {
                 stem.push(' ');
@@ -84,10 +92,6 @@ pub fn suggested_filename(title: Option<&str>, id: Option<&str>) -> String {
         } else {
             stem.push(mapped);
             previous_was_space = false;
-        }
-
-        if stem.chars().count() >= 80 {
-            break;
         }
     }
 
@@ -141,5 +145,23 @@ mod tests {
         }
         let long = "a".repeat(200);
         assert_eq!(suggested_filename(Some(&long), None).chars().count(), 84);
+    }
+
+    #[test]
+    fn suggested_filename_fits_a_linux_name_with_a_collision_suffix() {
+        for title in [
+            "🎬".repeat(80),
+            "日本語".repeat(40),
+            "Tiếng Việt ".repeat(20),
+        ] {
+            let name = suggested_filename(Some(&title), None);
+            let stem = name.strip_suffix(".mp4").unwrap();
+            assert!(
+                format!("{stem} (999).mp4").len() <= 255,
+                "{} bytes",
+                name.len()
+            );
+            assert!(!stem.is_empty());
+        }
     }
 }

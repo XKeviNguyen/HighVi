@@ -468,6 +468,9 @@ impl Fixture {
                 && update.stage == stage
                 && !armed.swap(true, std::sync::atomic::Ordering::SeqCst)
             {
+                if delay.is_zero() {
+                    handle.cancel();
+                }
                 let handle = Arc::clone(&handle);
                 tokio::spawn(async move {
                     tokio::time::sleep(delay).await;
@@ -936,6 +939,64 @@ async fn cancellation_stops_the_download_and_cleans_up() {
     );
     assert!(fixture.saved_files().is_empty());
     fixture.assert_no_job_dirs();
+}
+
+#[tokio::test]
+async fn cancelling_while_saving_publishes_nothing() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let (result, _) = fixture
+        .run_with(
+            &fixture.environment(),
+            direct("https://media.test/muxed/master.m3u8"),
+            Some((Stage::Saving, Duration::ZERO)),
+        )
+        .await;
+    assert_code(&result, "cancelled");
+    assert!(fixture.saved_files().is_empty());
+    fixture.assert_no_job_dirs();
+}
+
+/// Signed media URLs live in the job's info JSON; it must be gone before
+/// anything in the job directory can be kept for recovery.
+#[tokio::test]
+async fn signed_urls_do_not_outlive_the_download() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let output_dir = fixture.output_dir.clone();
+    let probe = Arc::clone(&seen);
+    let source = validate_source(&direct("https://media.test/muxed/master.m3u8")).unwrap();
+    let (_handle, token) = cancel_pair();
+    let report = move |update: JobUpdate| {
+        if update.stage == Stage::Merging {
+            for entry in std::fs::read_dir(&output_dir).unwrap().flatten() {
+                if entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".highvi-job-")
+                {
+                    let names: Vec<String> = std::fs::read_dir(entry.path())
+                        .unwrap()
+                        .flatten()
+                        .map(|file| file.file_name().to_string_lossy().into_owned())
+                        .collect();
+                    probe.lock().unwrap().extend(names);
+                }
+            }
+        }
+    };
+    run_job(&fixture.environment(), &source, token, &report)
+        .await
+        .unwrap();
+    let names = seen.lock().unwrap().clone();
+    assert!(!names.is_empty(), "the job directory was not inspected");
+    assert!(
+        !names.iter().any(|name| name.ends_with(".json")),
+        "{names:?}"
+    );
 }
 
 #[tokio::test]

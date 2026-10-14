@@ -171,11 +171,18 @@ pub async fn run_job(
         .await?;
     }
     drop(proxy);
+    // The info JSON holds the media URLs, which may be signed; nothing after
+    // this point needs it, and a kept recovery directory must not hold it.
+    let _ = tokio::fs::remove_file(job.path().join(INFO_JSON)).await;
 
     report(JobUpdate::stage(Stage::Merging));
     Box::pin(mux(env, &job, media.selection.audio.is_some(), &mut cancel)).await?;
 
     report(JobUpdate::stage(Stage::Saving));
+    // Publishing is one atomic rename; a cancel that arrives before it wins.
+    if cancel.is_cancelled() {
+        return Err(cancelled_error());
+    }
     let stem = media
         .suggested_filename
         .strip_suffix(".mp4")
@@ -327,6 +334,12 @@ async fn mux(
     if !captured.success || !written {
         return Err(mux_error());
     }
+    for path in [Some(&video_path), audio_path.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        let _ = tokio::fs::remove_file(path).await;
+    }
     Ok(())
 }
 
@@ -372,6 +385,10 @@ async fn sniff_file(path: &Path) -> Result<crate::mux::Container, PublicError> {
     })
 }
 
+fn cancelled_error() -> PublicError {
+    PublicError::new("cancelled", "The download was cancelled.")
+}
+
 fn mux_error() -> PublicError {
     PublicError::new(
         "mux_failed",
@@ -403,7 +420,7 @@ fn network_refusal(stats: &EgressStats) -> Option<PublicError> {
 
 fn run_error(error: RunError, tool: &str, timeout_code: &str) -> PublicError {
     match error {
-        RunError::Cancelled => PublicError::new("cancelled", "The download was cancelled."),
+        RunError::Cancelled => cancelled_error(),
         RunError::Spawn(error) if error.kind() == std::io::ErrorKind::NotFound => PublicError::new(
             "missing_dependency",
             format!("{tool} is not installed or is not available in PATH."),

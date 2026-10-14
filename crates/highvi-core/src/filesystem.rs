@@ -4,7 +4,11 @@
 use crate::PublicError;
 use std::{
     ffi::CString,
-    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
+    fs::File,
+    os::{
+        fd::AsRawFd,
+        unix::{ffi::OsStrExt, fs::OpenOptionsExt, fs::PermissionsExt},
+    },
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -84,10 +88,21 @@ pub fn output_dir_error() -> PublicError {
 
 /// A private working directory for one job. It is removed when dropped,
 /// unless [`JobDir::keep`] was called to leave a file for recovery.
+///
+/// While it exists, the job holds an exclusive `flock` on its marker file,
+/// so another HighVi process can tell a running job from a crashed one.
 #[derive(Debug)]
 pub struct JobDir {
     path: PathBuf,
     keep: bool,
+    _lock: File,
+}
+
+/// Takes an exclusive lock without waiting. The kernel drops it when the
+/// file is closed, including when the process dies.
+fn try_lock(file: &File) -> bool {
+    // SAFETY: plain syscall on a descriptor owned by `file`.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 
 impl JobDir {
@@ -104,17 +119,18 @@ impl JobDir {
             ));
             match tokio::fs::create_dir(&path).await {
                 Ok(()) => {
-                    let job = Self { path, keep: false };
-                    tokio::fs::set_permissions(&job.path, std::fs::Permissions::from_mode(0o700))
-                        .await
-                        .map_err(|_| output_dir_error())?;
-                    tokio::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(job.path.join(JOB_MARKER))
-                        .await
-                        .map_err(|_| output_dir_error())?;
-                    return Ok(job);
+                    let created = create_marker(&path);
+                    return match created {
+                        Some(lock) => Ok(Self {
+                            path,
+                            keep: false,
+                            _lock: lock,
+                        }),
+                        None => {
+                            let _ = std::fs::remove_dir_all(&path);
+                            Err(output_dir_error())
+                        }
+                    };
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(_) => return Err(output_dir_error()),
@@ -132,6 +148,18 @@ impl JobDir {
     }
 }
 
+/// Makes `directory` private and creates its locked marker file.
+fn create_marker(directory: &Path) -> Option<File> {
+    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700)).ok()?;
+    let marker = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(directory.join(JOB_MARKER))
+        .ok()?;
+    try_lock(&marker).then_some(marker)
+}
+
 impl Drop for JobDir {
     fn drop(&mut self) {
         if !self.keep {
@@ -141,8 +169,8 @@ impl Drop for JobDir {
 }
 
 /// Removes job directories left by a crash. Only directories with the job
-/// prefix and a regular marker file, untouched for a day, are removed, and
-/// symlinks are never followed.
+/// prefix and a regular marker file that no live process holds locked,
+/// untouched for a day, are removed, and symlinks are never followed.
 pub async fn cleanup_stale_jobs(parent: &Path) {
     let Ok(mut entries) = tokio::fs::read_dir(parent).await else {
         return;
@@ -169,10 +197,14 @@ pub async fn cleanup_stale_jobs(parent: &Path) {
         if now.duration_since(modified).unwrap_or_default() < STALE_JOB_AGE {
             continue;
         }
-        let Ok(marker) = tokio::fs::symlink_metadata(path.join(JOB_MARKER)).await else {
-            continue;
-        };
-        if marker.is_file() && !marker.file_type().is_symlink() {
+        let marker = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(path.join(JOB_MARKER));
+        let Ok(marker) = marker else { continue };
+        let is_file = marker.metadata().is_ok_and(|metadata| metadata.is_file());
+        // Held until the directory is gone, so no new job can claim it.
+        if is_file && try_lock(&marker) {
             let _ = tokio::fs::remove_dir_all(path).await;
         }
     }
@@ -261,6 +293,38 @@ mod tests {
             "download_directory_unavailable"
         );
         assert!(prepare_output_dir(&parent.join("fresh")).await.is_ok());
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    fn age(path: &Path) {
+        let old = SystemTime::now() - Duration::from_secs(3 * 24 * 60 * 60);
+        fs::File::open(path).unwrap().set_modified(old).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_cleanup_never_removes_a_running_job() {
+        let parent = temp_directory("live");
+        let running = JobDir::create(&parent).await.unwrap();
+        age(running.path());
+        cleanup_stale_jobs(&parent).await;
+        assert!(
+            running.path().exists(),
+            "an active job directory was deleted"
+        );
+        drop(running);
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_cleanup_removes_crashed_jobs() {
+        let parent = temp_directory("crashed");
+        let crashed = parent.join(format!("{JOB_PREFIX}1-2-3"));
+        fs::create_dir(&crashed).unwrap();
+        fs::write(crashed.join(JOB_MARKER), b"").unwrap();
+        fs::write(crashed.join("video.mp4.part"), b"partial").unwrap();
+        age(&crashed);
+        cleanup_stale_jobs(&parent).await;
+        assert!(!crashed.exists());
         fs::remove_dir_all(parent).unwrap();
     }
 
