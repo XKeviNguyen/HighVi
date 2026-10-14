@@ -144,8 +144,14 @@ pub async fn discover_in_browser(
         }
     })?;
 
+    // Every CDP wait inside is bounded too; this is the backstop for a
+    // browser that stops answering altogether.
+    let bounded = timeout(
+        STARTUP_TIMEOUT + PAGE_BUDGET + Duration::from_secs(10),
+        observe(&mut cdp, run.page),
+    );
     let result = tokio::select! {
-        result = observe(&mut cdp, run.page) => result,
+        result = bounded => result.unwrap_or_else(|_| Err(browser_failed())),
         () = cancel.cancelled() => Err(PublicError::new("cancelled", "The download was cancelled.")),
     };
     drop(cdp);
@@ -763,7 +769,17 @@ fn rank(playlists: &[(Url, Option<String>, Option<String>)]) -> (Vec<Candidate>,
             PlaylistKind::Master { .. } => None,
         })
         .collect();
-    let mut children: HashSet<String> = HashSet::new();
+    // Variants of every master, including DRM-signalling ones: a clear
+    // media playlist that belongs to a DRM master must not stand alone.
+    let children: HashSet<String> = inspected
+        .iter()
+        .filter_map(|(_, _, info)| match &info.as_ref()?.kind {
+            PlaylistKind::Master { variants } => Some(variants),
+            PlaylistKind::Media { .. } => None,
+        })
+        .flatten()
+        .map(|variant| variant.as_str().to_string())
+        .collect();
     let mut scored = Vec::new();
     for (order, (url, referer, info)) in inspected.iter().enumerate() {
         if info.as_ref().is_some_and(|info| info.drm) {
@@ -773,10 +789,7 @@ fn rank(playlists: &[(Url, Option<String>, Option<String>)]) -> (Vec<Candidate>,
             Some(PlaylistKind::Master { variants }) => {
                 let longest = variants
                     .iter()
-                    .filter_map(|variant| {
-                        children.insert(variant.as_str().to_string());
-                        durations.get(variant.as_str()).copied()
-                    })
+                    .filter_map(|variant| durations.get(variant.as_str()).copied())
                     .fold(0.0, f64::max);
                 (3, longest)
             }
@@ -925,6 +938,20 @@ mod tests {
         }
         let message = json!({"id": 1, "result": {"body": "I0VYVE0zVQo=", "base64Encoded": true}});
         assert_eq!(response_body(&message).as_deref(), Some("#EXTM3U\n"));
+    }
+
+    #[test]
+    fn clear_variants_of_a_drm_master_are_not_candidates() {
+        let (ranked, drm_only) = rank(&[
+            (
+                url("https://c.example/master.m3u8"),
+                None,
+                Some("#EXTM3U\n#EXT-X-SESSION-KEY:METHOD=SAMPLE-AES,URI=\"skd://k\",KEYFORMAT=\"com.apple.streamingkeydelivery\"\n#EXT-X-STREAM-INF:BANDWIDTH=1\nv.m3u8\n".into()),
+            ),
+            (url("https://c.example/v.m3u8"), None, Some(media(&[600.0], true))),
+        ]);
+        assert!(ranked.is_empty(), "{ranked:?}");
+        assert!(drm_only);
     }
 
     #[test]
