@@ -308,9 +308,18 @@ fn pick_entry(value: Value) -> Result<Value, PublicError> {
 }
 
 fn choose_formats(formats: &[Format]) -> Result<Selection, PublicError> {
+    // The chosen formats are later picked out of the info JSON by ID, so an
+    // ID shared with another (possibly rejected) format is never eligible.
+    let mut id_counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for format in formats {
+        *id_counts
+            .entry(format.format_id.as_deref().unwrap_or_default())
+            .or_default() += 1;
+    }
     let supported: Vec<&Format> = formats
         .iter()
         .filter(|format| format.is_supported())
+        .filter(|format| id_counts.get(format.format_id.as_deref().unwrap_or_default()) == Some(&1))
         .collect();
     let usable: Vec<&Format> = supported.iter().copied().filter(|f| !f.is_drm()).collect();
 
@@ -526,6 +535,21 @@ mod tests {
         }
         assert_eq!(entry["formats"][0]["http_headers"]["User-Agent"], "UA");
         assert_eq!(entry["http_headers"]["X-Ok"], "1");
+    }
+
+    #[test]
+    fn formats_sharing_an_id_are_never_chosen() {
+        let media = select_media(
+            br#"{"formats":[
+              {"format_id":"x-0","protocol":"mms","url":"mms://192.168.1.1/a","height":4320},
+              {"format_id":"x-0","protocol":"https","url":"https://c.example/v.mp4","ext":"mp4","height":2160},
+              {"format_id":"y","protocol":"https","url":"https://c.example/y.mp4","ext":"mp4","height":360}
+            ]}"#,
+        )
+        .unwrap();
+        assert_eq!(media.selection.video, "y");
+        let text = String::from_utf8(media.info_json).unwrap();
+        assert!(!text.contains("mms://") && !text.contains("x-0"), "{text}");
     }
 
     #[test]

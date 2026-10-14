@@ -340,11 +340,18 @@ async fn resolve_checked(
     let local = local_addresses().ok_or(Refusal::Address)?;
     if addresses
         .iter()
-        .any(|address| !is_public_ip(address.ip()) || local.contains(&address.ip()))
+        .any(|address| !allowed(address.ip(), &local))
     {
         return Err(Refusal::Address);
     }
     Ok(addresses)
+}
+
+/// Public, and not one of this machine's own addresses. Canonical forms are
+/// compared, so `::ffff:a.b.c.d` counts as the IPv4 host it maps to.
+fn allowed(ip: std::net::IpAddr, local: &[std::net::IpAddr]) -> bool {
+    let ip = ip.to_canonical();
+    is_public_ip(ip) && !local.iter().any(|own| own.to_canonical() == ip)
 }
 
 /// Copies one direction of a tunnel until EOF, an error, or `IDLE_TIMEOUT`
@@ -422,6 +429,15 @@ mod tests {
                 "{raw}"
             );
         }
+    }
+
+    #[test]
+    fn this_hosts_own_public_addresses_are_refused_in_every_form() {
+        let local = ["8.8.8.8".parse().unwrap(), "2606:4700::1".parse().unwrap()];
+        for own in ["8.8.8.8", "::ffff:8.8.8.8", "2606:4700::1"] {
+            assert!(!allowed(own.parse().unwrap(), &local), "{own}");
+        }
+        assert!(allowed("1.1.1.1".parse().unwrap(), &local));
     }
 
     #[tokio::test]
