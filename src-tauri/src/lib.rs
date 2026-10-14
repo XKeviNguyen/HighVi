@@ -1,5 +1,5 @@
 use highvi_core::{
-    CancelHandle, JobEnvironment, JobUpdate, PublicError, SourceRequest, cancel_pair,
+    CancelHandle, JobEnvironment, JobUpdate, PublicError, SourceRequest, cancel_pair, find_browser,
     find_executable, prepare_output_dir, run_job, validate_source,
 };
 use serde::Serialize;
@@ -60,6 +60,8 @@ struct JobEvent {
 struct DependencyStatus {
     yt_dlp: bool,
     ffmpeg: bool,
+    /// Optional: only pages whose player is built by JavaScript need it.
+    browser: bool,
 }
 
 /// Discovers and downloads `source`. Resolves when the job ends. The webview
@@ -140,6 +142,7 @@ fn dependency_status() -> DependencyStatus {
     DependencyStatus {
         yt_dlp: find_executable("yt-dlp").is_some(),
         ffmpeg: find_executable("ffmpeg").is_some(),
+        browser: find_browser().is_some(),
     }
 }
 
@@ -201,6 +204,7 @@ fn job_environment(app: &AppHandle) -> Result<JobEnvironment, PublicError> {
     Ok(JobEnvironment::new(
         find_executable("yt-dlp").ok_or_else(|| missing("yt-dlp"))?,
         find_executable("ffmpeg").ok_or_else(|| missing("FFmpeg"))?,
+        find_browser(),
         output_dir(app)?,
     ))
 }

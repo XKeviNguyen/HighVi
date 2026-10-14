@@ -3,11 +3,13 @@
 #[cfg(not(target_os = "linux"))]
 compile_error!("HighVi currently supports Linux only (renameat2, process groups).");
 
+mod browser;
 mod classify;
 mod egress;
 mod error;
 mod filesystem;
 mod formats;
+mod hls;
 mod job;
 mod mux;
 mod netpolicy;
@@ -20,6 +22,7 @@ mod ytdlp;
 #[cfg(test)]
 mod e2e;
 
+pub use browser::find_browser;
 pub use classify::{ToolSignals, classify_tool_failure};
 pub use error::PublicError;
 pub use filesystem::prepare_output_dir;
