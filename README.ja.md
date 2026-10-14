@@ -45,12 +45,11 @@ HighVi は **English・Tiếng Việt・日本語** が使えます。右上の�
 
 ## ✅ HighVi がすること
 
-1. リンクを入れます。
-2. HighVi が、安全な `https://` のリンクか、家や会社のネットワークの中のパソコンではないかを調べます。
-3. `yt-dlp` が宝の地図をさがします。
-4. HighVi が動画のタイトル、**短くした** プレイリストのリンク（ひみつの部分はかくします）、送る Referer を見せます。
-5. 名前を決めて **MP4 をダウンロード** をおします。
-6. できた動画は **`~/Downloads/HighVi`** に入ります。同じ名前のファイルがあっても、上書きはしません。
+1. リンクを入れて **MP4 をダウンロード** をおします。
+2. HighVi が `https://` のリンクかを調べてから、専用の **ネットワークの見はり番** を動かします。`yt-dlp` の通信（ページ、リダイレクト、プレイリスト、かけら、カギ）は、ぜんぶ公開されたインターネットの住所にしか行けません。家や会社のネットワークの中のパソコンには、いつもつながりません。
+3. `yt-dlp` が宝の地図を見つけて、HighVi がいちばんきれいな映像（音声が別なら音声も）をえらびます。
+4. かけらをダウンロードして、あなたのパソコンの中でひとつの MP4 にまとめます。進みぐあい、速さ、のこり時間が見えて、いつでも **キャンセル** できます。
+5. できた動画は **`~/Downloads/HighVi`** に、動画のタイトルの名前で入ります。同じ名前があれば ` (2)` をつけます。上書きはしません。**フォルダーを開く** で見られます。
 
 ## 🛑 HighVi が ぜったいに しないこと
 
@@ -99,26 +98,29 @@ npm run build   # .deb と AppImage を作る
 | `drm_not_supported` | 動画に DRM のカギがかかっています。 | HighVi はカギを開けません。 |
 | `authentication_required` | ログインしないと見られません。 | HighVi はあなたのログインを使いません。 |
 | `network_timeout` | サイトの返事がおそすぎました。 | しばらくしてから、もう一度ためしましょう。 |
-| `output_exists` | 同じ名前のファイルがもうあります。 | べつの名前にしましょう。 |
+| `unsafe_network_target` | 動画が家や会社のネットワークの中のパソコンにつなごうとしました。 | HighVi がわざとブロックしています。 |
+| `live_not_supported` | ライブ配信です。 | HighVi は配信が終わった動画だけダウンロードします。 |
 | `missing_dependency` | `yt-dlp` か FFmpeg が入っていません。 | 入れてから、もう一度ためしましょう。 |
 
 ## 🧠 開発する人へ
 
 ```bash
-cargo test --workspace --offline
+HIGHVI_REQUIRE_E2E=1 cargo test --workspace --offline
 cargo clippy --workspace --all-targets --offline -- -D warnings
 cargo fmt --all -- --check
 node --check ui/app.js && node --check ui/i18n.js && node --check ui/rain.js
+node scripts/check-ui.mjs   # translation parity
 ```
 
 ```text
-crates/highvi-core/   URL のチェック、Referer のルール、yt-dlp の引数、エラーメッセージ（ぜんぶテストつき）
-src-tauri/            Tauri のコマンド：yt-dlp を動かす、進みぐあいを知らせる、ファイルを安全に保存する
+crates/highvi-core/   ネットワークの見はり番（egress proxy）、動画さがし、形式えらび、ダウンロード、MP4 づくり、安全な保存
+                      （ユニットテスト＋本物の yt-dlp/FFmpeg とローカル HTTPS サーバーでの end-to-end テスト）
+src-tauri/            Tauri のコマンド：ジョブの開始・キャンセル、進みぐあい、フォルダーを開く
 ui/                   みどりの画面：index.html、styles.css、app.js、i18n.js（English・Tiếng Việt・日本語）、rain.js
 docs/assets/          README のバナーとスクリーンショット
 ```
 
-HighVi の安全のしくみと、いまの限界は [SECURITY.md](SECURITY.md) に書いてあります。かんたんに言うと、HighVi はあなたが入れたリンクはチェックしますが、動画のかけらは `yt-dlp` が自分でダウンロードするので、そのあとの通信をひとつずつチェックすることは、まだできていません。
+HighVi の安全のしくみと、いまの限界は [SECURITY.md](SECURITY.md) に書いてあります。かんたんに言うと、HighVi の道具の通信はぜんぶ、公開された HTTPS の住所だけを通す見はり番を通ります。FFmpeg はネットワークを使いません。
 
 ## 📜 ライセンス
 

@@ -1,49 +1,65 @@
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
+const { t } = I18N;
 
 const elements = {
-  discoverForm: document.querySelector("#discover-form"),
-  discoverButton: document.querySelector("#discover-button"),
+  form: document.querySelector("#job-form"),
   pageFields: document.querySelector("#page-fields"),
   pageUrl: document.querySelector("#page-url"),
   directFields: document.querySelector("#direct-fields"),
   playlistInput: document.querySelector("#playlist-input"),
   refererInput: document.querySelector("#referer-input"),
-  resultCard: document.querySelector("#result-card"),
-  resultHeading: document.querySelector("#result-heading"),
-  playlistUrl: document.querySelector("#playlist-url"),
-  refererUrl: document.querySelector("#referer-url"),
-  downloadForm: document.querySelector("#download-form"),
   downloadButton: document.querySelector("#download-button"),
-  filename: document.querySelector("#filename"),
+  depsCard: document.querySelector("#deps-card"),
+  depsMessage: document.querySelector("#deps-message"),
   statusCard: document.querySelector("#status-card"),
+  statusTitle: document.querySelector("#status-title"),
   statusMessage: document.querySelector("#status-message"),
   statusPercent: document.querySelector("#status-percent"),
   statusSpeed: document.querySelector("#status-speed"),
   statusEta: document.querySelector("#status-eta"),
   progressTrack: document.querySelector("#progress-track"),
   progressBar: document.querySelector("#progress-bar"),
+  cancelButton: document.querySelector("#cancel-button"),
   errorCard: document.querySelector("#error-card"),
   errorMessage: document.querySelector("#error-message"),
+  cancelledCard: document.querySelector("#cancelled-card"),
   successCard: document.querySelector("#success-card"),
   savedPath: document.querySelector("#saved-path"),
+  openFolderButton: document.querySelector("#open-folder-button"),
 };
 
-// The source of the last successful discovery. Rust re-validates it and
-// rediscovers before downloading, so this is not a security boundary.
-let currentSource = null;
-// Incremented whenever the inputs change, so a discovery that finishes
-// afterwards cannot show results or errors for a source the user has edited.
-let discoveryGeneration = 0;
+// The running job's ID. Progress events carry it, so a late event from an
+// earlier job can never change what the current one shows.
+let currentJob = null;
+// Kept so visible text can be re-rendered when the language changes.
+let lastError = null;
+let lastUpdate = null;
+let lastTitle = null;
+let missingTools = [];
 
-function invalidateDiscovery() {
-  discoveryGeneration += 1;
-  currentSource = null;
-  setHidden(elements.resultCard, true);
+const stageKeys = {
+  discovering: "progress.discovering",
+  downloadingVideo: "progress.downloadingVideo",
+  downloadingAudio: "progress.downloadingAudio",
+  merging: "progress.merging",
+  saving: "progress.saving",
+};
+
+function setHidden(element, hidden) {
+  element.classList.toggle("hidden", hidden);
+}
+
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+// Status and results appear below the form; at small sizes or high zoom
+// they would otherwise be off screen.
+function reveal(element) {
+  element.scrollIntoView({ block: "nearest", behavior: reducedMotion.matches ? "auto" : "smooth" });
 }
 
 function selectedMode() {
-  return elements.discoverForm.querySelector('input[name="mode"]:checked').value;
+  return elements.form.querySelector('input[name="mode"]:checked').value;
 }
 
 function applyMode() {
@@ -53,7 +69,6 @@ function applyMode() {
   elements.pageUrl.required = !direct;
   elements.playlistInput.required = direct;
   elements.refererInput.required = direct;
-  invalidateDiscovery();
 }
 
 function readSource() {
@@ -67,22 +82,6 @@ function readSource() {
   return { mode: "page", pageUrl: elements.pageUrl.value.trim() };
 }
 
-function setHidden(element, hidden) {
-  element.classList.toggle("hidden", hidden);
-}
-
-function clearMessages() {
-  setHidden(elements.errorCard, true);
-  setHidden(elements.successCard, true);
-}
-
-const { t } = I18N;
-
-// Kept so the visible error and progress text can be re-rendered when the
-// user switches language.
-let lastError = null;
-let lastProgress = null;
-
 // Which advice fits a 403 depends on how the user gave us the source.
 function sourceKind(source) {
   if (source?.mode === "directHls") {
@@ -93,7 +92,7 @@ function sourceKind(source) {
       return "bare";
     }
   } catch {
-    // Not a URL; Rust has already rejected it.
+    // Not a URL; Rust rejects it.
   }
   return "page";
 }
@@ -110,40 +109,46 @@ function errorText({ error, kind }) {
   if (code && I18N.has(`error.${code}`)) {
     return t(`error.${code}`);
   }
-  return error?.message || t("error.unknown");
+  return typeof error?.message === "string" && error.message ? error.message : t("error.unknown");
 }
 
-function showError(error, source = null) {
+function clearMessages() {
+  for (const card of [elements.errorCard, elements.successCard, elements.cancelledCard]) {
+    setHidden(card, true);
+  }
+  lastError = null;
+}
+
+function showError(error, source) {
   lastError = { error, kind: sourceKind(source) };
   elements.errorMessage.textContent = errorText(lastError);
   setHidden(elements.errorCard, false);
 }
 
-function setBusy(button, busy, busyKey) {
-  button.disabled = busy;
-  button.textContent = t(busy ? busyKey : button.dataset.i18n);
-  button.dataset.busyKey = busy ? busyKey : "";
+function setRunning(running) {
+  elements.downloadButton.disabled = running;
+  elements.downloadButton.textContent = t(running ? "download.busy" : "download.button");
+  elements.cancelButton.disabled = false;
+  elements.cancelButton.textContent = t("cancel.button");
+  for (const input of elements.form.querySelectorAll("input")) {
+    input.disabled = running;
+  }
+  setHidden(elements.statusCard, !running);
 }
 
-const progressKeys = {
-  recheck: "progress.recheck",
-  checking: "progress.checking",
-  downloading: "progress.downloading",
-  processing: "progress.processing",
-  finished: "progress.finished",
-};
+function renderUpdate(update) {
+  lastUpdate = update;
+  if (update.title) {
+    lastTitle = update.title;
+  }
+  setHidden(elements.statusTitle, !lastTitle);
+  elements.statusTitle.textContent = lastTitle ? t("progress.title", { title: lastTitle }) : "";
+  elements.statusMessage.textContent = t(stageKeys[update.stage] ?? "progress.working");
+  elements.statusPercent.textContent = update.percent || "";
+  elements.statusSpeed.textContent = update.speed ? t("progress.speed", { value: update.speed }) : "";
+  elements.statusEta.textContent = update.eta ? t("progress.eta", { value: update.eta }) : "";
 
-function updateProgress(progress) {
-  lastProgress = progress;
-  setHidden(elements.statusCard, false);
-  elements.statusMessage.textContent = t(progressKeys[progress.stage] ?? "progress.working");
-  elements.statusPercent.textContent = progress.percent || "";
-  elements.statusSpeed.textContent = progress.speed
-    ? t("progress.speed", { value: progress.speed })
-    : "";
-  elements.statusEta.textContent = progress.eta ? t("progress.eta", { value: progress.eta }) : "";
-
-  const parsed = Number.parseFloat(progress.percent || "");
+  const parsed = Number.parseFloat(update.percent || "");
   if (Number.isFinite(parsed)) {
     const bounded = Math.min(100, Math.max(0, parsed));
     elements.progressBar.style.width = `${bounded}%`;
@@ -156,93 +161,100 @@ function updateProgress(progress) {
   }
 }
 
-listen("download-progress", ({ payload }) => updateProgress(payload)).catch((error) =>
-  showError(error),
-);
+function renderMissingTools() {
+  setHidden(elements.depsCard, missingTools.length === 0);
+  elements.depsMessage.textContent = missingTools.length
+    ? t("deps.missing", { tools: missingTools.join(", ") })
+    : "";
+}
+
+listen("job-update", ({ payload }) => {
+  if (payload?.jobId && payload.jobId === currentJob) {
+    renderUpdate(payload);
+  }
+}).catch((error) => showError(error, null));
 
 for (const button of document.querySelectorAll("[data-lang]")) {
   button.addEventListener("click", () => I18N.set(button.dataset.lang));
 }
 
 document.addEventListener("highvi:language", () => {
-  for (const button of [elements.discoverButton, elements.downloadButton]) {
-    if (button.dataset.busyKey) {
-      button.textContent = t(button.dataset.busyKey);
-    }
-  }
-  if (lastError && !elements.errorCard.classList.contains("hidden")) {
+  elements.downloadButton.textContent = t(currentJob ? "download.busy" : "download.button");
+  elements.cancelButton.textContent = t(elements.cancelButton.disabled ? "cancel.busy" : "cancel.button");
+  if (lastError) {
     elements.errorMessage.textContent = errorText(lastError);
   }
-  if (lastProgress && !elements.statusCard.classList.contains("hidden")) {
-    updateProgress(lastProgress);
+  if (lastUpdate && currentJob) {
+    renderUpdate(lastUpdate);
   }
-  if (currentSource && !elements.resultCard.classList.contains("hidden")) {
-    elements.refererUrl.textContent = elements.refererUrl.dataset.value || t("result.refererNone");
-  }
+  renderMissingTools();
 });
 I18N.apply();
 
-for (const radio of elements.discoverForm.querySelectorAll('input[name="mode"]')) {
+for (const radio of elements.form.querySelectorAll('input[name="mode"]')) {
   radio.addEventListener("change", () => {
     clearMessages();
     applyMode();
   });
 }
-for (const input of [elements.pageUrl, elements.playlistInput, elements.refererInput]) {
-  input.addEventListener("input", invalidateDiscovery);
-}
 applyMode();
 
-elements.discoverForm.addEventListener("submit", async (event) => {
+elements.form.addEventListener("submit", async (event) => {
   event.preventDefault();
-  clearMessages();
-  invalidateDiscovery();
-  const generation = discoveryGeneration;
-  setHidden(elements.statusCard, true);
-  setBusy(elements.discoverButton, true, "discover.busy");
-  const source = readSource();
-
-  try {
-    const result = await invoke("discover_video", { source });
-    if (generation !== discoveryGeneration) {
-      return;
-    }
-    currentSource = source;
-    elements.resultHeading.textContent = result.title;
-    elements.playlistUrl.textContent = result.playlistDisplay;
-    elements.refererUrl.dataset.value = result.refererDisplay || "";
-    elements.refererUrl.textContent = result.refererDisplay || t("result.refererNone");
-    elements.filename.value = result.suggestedFilename;
-    setHidden(elements.resultCard, false);
-    elements.filename.focus();
-  } catch (error) {
-    if (generation === discoveryGeneration) {
-      showError(error, source);
-    }
-  } finally {
-    setBusy(elements.discoverButton, false, "");
+  if (currentJob) {
+    return;
   }
-});
-elements.downloadForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
+  const jobId = crypto.randomUUID();
+  const source = readSource();
+  currentJob = jobId;
+  lastUpdate = null;
+  lastTitle = null;
   clearMessages();
-  setBusy(elements.downloadButton, true, "download.busy");
-  updateProgress({ stage: "recheck" });
-  const source = currentSource;
+  setRunning(true);
+  renderUpdate({ stage: "discovering" });
+  reveal(elements.statusCard);
 
   try {
-    const result = await invoke("download_video", {
-      request: {
-        source,
-        filename: elements.filename.value,
-      },
-    });
+    const result = await invoke("start_job", { jobId, source });
     elements.savedPath.textContent = result.savedTo;
     setHidden(elements.successCard, false);
+    reveal(elements.successCard);
+    elements.openFolderButton.focus({ preventScroll: true });
   } catch (error) {
-    setHidden(elements.statusCard, true);
-    showError(error, source);
+    if (error?.code === "cancelled") {
+      setHidden(elements.cancelledCard, false);
+      reveal(elements.cancelledCard);
+    } else {
+      showError(error, source);
+      reveal(elements.errorCard);
+    }
   } finally {
-    setBusy(elements.downloadButton, false, "");
+    currentJob = null;
+    setRunning(false);
   }
 });
+
+elements.cancelButton.addEventListener("click", () => {
+  if (!currentJob) {
+    return;
+  }
+  elements.cancelButton.disabled = true;
+  elements.cancelButton.textContent = t("cancel.busy");
+  invoke("cancel_job").catch((error) => showError(error, null));
+});
+
+elements.openFolderButton.addEventListener("click", () => {
+  invoke("open_output_folder").catch((error) => showError(error, null));
+});
+
+invoke("dependency_status")
+  .then((status) => {
+    missingTools = [
+      ...(status.ytDlp ? [] : ["yt-dlp"]),
+      ...(status.ffmpeg ? [] : ["FFmpeg"]),
+    ];
+    renderMissingTools();
+  })
+  .catch(() => {
+    // Not fatal: a job reports missing tools itself.
+  });
