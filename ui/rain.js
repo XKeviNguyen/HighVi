@@ -1,6 +1,8 @@
 // Decorative "digital rain" behind the UI. It draws only local glyphs, makes
-// no network requests, pauses with the window, and stays still when the user
-// prefers reduced motion.
+// no network requests, and stays still when the user prefers reduced motion.
+// To keep an idle window near zero CPU it only moves for a short while after
+// opening and while a download runs (app.js sends "highvi:busy"); otherwise
+// the last frame stays on screen.
 (() => {
   const canvas = document.querySelector("#matrix-rain");
   const context = canvas?.getContext("2d");
@@ -11,13 +13,15 @@
   const glyphs =
     "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワン0123456789HLS:/.<>=+*";
   const fontSize = 16;
-  const frameInterval = 1000 / 24;
+  const frameInterval = 1000 / 12;
+  const introDuration = 20_000;
   const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
   let drops = [];
   let width = 0;
   let height = 0;
-  let animation = 0;
-  let lastFrame = 0;
+  let timer = 0;
+  let busy = false;
+  let introUntil = 0;
 
   function randomGlyph() {
     return glyphs[Math.floor(Math.random() * glyphs.length)];
@@ -63,25 +67,34 @@
     }
   }
 
-  function loop(time) {
-    if (time - lastFrame >= frameInterval) {
-      lastFrame = time;
-      draw();
+  function moving() {
+    return !reducedMotion.matches && !document.hidden && (busy || performance.now() < introUntil);
+  }
+
+  function loop() {
+    timer = 0;
+    if (!moving()) {
+      return;
     }
-    animation = window.requestAnimationFrame(loop);
+    draw();
+    timer = window.setTimeout(loop, frameInterval);
+  }
+
+  function resume() {
+    if (!timer && moving()) {
+      timer = window.setTimeout(loop, frameInterval);
+    }
   }
 
   function start() {
-    window.cancelAnimationFrame(animation);
+    window.clearTimeout(timer);
+    timer = 0;
     resize();
-    if (reducedMotion.matches) {
-      // One still frame of rain instead of motion.
-      for (let step = 0; step < 60; step += 1) {
-        draw();
-      }
-      return;
+    // A filled frame, so the rain is visible even when it does not move.
+    for (let step = 0; step < 60; step += 1) {
+      draw();
     }
-    animation = window.requestAnimationFrame(loop);
+    resume();
   }
 
   let resizeTimer = 0;
@@ -90,5 +103,11 @@
     resizeTimer = window.setTimeout(start, 150);
   });
   reducedMotion.addEventListener("change", start);
+  document.addEventListener("visibilitychange", resume);
+  document.addEventListener("highvi:busy", (event) => {
+    busy = Boolean(event.detail);
+    resume();
+  });
+  introUntil = performance.now() + introDuration;
   start();
 })();

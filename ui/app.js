@@ -129,6 +129,7 @@ function showError(error, source) {
 }
 
 function setRunning(running) {
+  document.dispatchEvent(new CustomEvent("highvi:busy", { detail: running }));
   elements.downloadButton.disabled = running;
   elements.downloadButton.textContent = t(running ? "download.busy" : "download.button");
   elements.cancelButton.disabled = false;

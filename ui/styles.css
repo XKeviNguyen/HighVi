@@ -138,7 +138,8 @@ input {
   height: 3px;
   content: "";
   background: var(--green);
-  animation: blink 1.1s steps(1) infinite;
+  /* A few blinks, then still: endless animations cost CPU while idle. */
+  animation: blink 1.1s steps(1) 6;
 }
 
 h1,
@@ -156,7 +157,7 @@ h1 {
   letter-spacing: 0.08em;
   line-height: 1;
   text-shadow: var(--glow);
-  animation: flicker 6s infinite;
+  animation: flicker 6s 2;
 }
 
 h1::before {
