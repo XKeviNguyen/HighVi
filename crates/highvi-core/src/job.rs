@@ -361,7 +361,16 @@ async fn fetch(
 ) -> Result<(MediaInfo, Reservation), PublicError> {
     let proxy_url = proxy.url();
     let discovered = Box::pin(discover(env, job, proxy, source, cancel, report, recorder)).await?;
-    let media = discovered.media;
+    let mut media = discovered.media;
+    // A playlist link gives yt-dlp only a file name, often "master" or
+    // "index"; the folder it sits in usually names the video.
+    if source.kind() != SourceKind::Page
+        && is_generic_playlist_name(&media.title)
+        && let Some(name) = playlist_folder_name(source.discovery_target())
+    {
+        media.suggested_filename = crate::suggested_filename(Some(&name), None);
+        media.title = name;
+    }
     record(recorder, |diagnostics| {
         diagnostics.media(media.extractor.as_deref(), media.summary.clone());
     });
@@ -974,6 +983,52 @@ fn clean_progress_value(value: Option<&str>) -> Option<String> {
     }
 }
 
+/// File names players give every playlist, which say nothing about the
+/// video.
+fn is_generic_playlist_name(title: &str) -> bool {
+    let name = title.trim().trim_matches('.').to_ascii_lowercase();
+    let name = name.strip_suffix(".m3u8").unwrap_or(&name);
+    matches!(
+        name,
+        "" | "m3u8"
+            | "index"
+            | "master"
+            | "playlist"
+            | "prog_index"
+            | "main"
+            | "stream"
+            | "video"
+            | "chunklist"
+            | "manifest"
+    )
+}
+
+/// The nearest folder of the playlist URL that looks like a name: letters,
+/// digits, `-`, `_`, `.` only, so query-like or token-like segments
+/// (`exp=…`, long hex) never become a file name.
+fn playlist_folder_name(playlist: &url::Url) -> Option<String> {
+    let segments: Vec<&str> = playlist.path_segments()?.collect();
+    segments
+        .iter()
+        .rev()
+        .skip(1)
+        .filter_map(|segment| {
+            let stem = segment.rsplit_once('.').map_or(*segment, |(stem, _)| stem);
+            let named = (3..=48).contains(&stem.len())
+                && stem.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+                })
+                && stem
+                    .chars()
+                    .any(|character| character.is_ascii_alphabetic())
+                && !stem
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit() || character == '-');
+            named.then(|| stem.to_string())
+        })
+        .find(|stem| !is_generic_playlist_name(stem))
+}
+
 /// Paths to the tools a job needs, found on `PATH`.
 pub fn find_executable(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
@@ -998,6 +1053,34 @@ mod tests {
         let inputs = 1_000 * MIB;
         assert!(mux_space_needed(inputs) >= inputs + inputs / 20);
         assert_eq!(mux_space_needed(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn generic_playlist_names_fall_back_to_their_folder() {
+        let folder = |raw: &str| playlist_folder_name(&url::Url::parse(raw).unwrap());
+        for generic in [".m3u8", "master", "index", "Playlist", "prog_index.m3u8"] {
+            assert!(is_generic_playlist_name(generic), "{generic}");
+        }
+        assert!(!is_generic_playlist_name("x36xhzz"));
+        assert_eq!(
+            folder("https://demo.example/k8s/video/tears-of-steel/tears-of-steel.ism/.m3u8")
+                .as_deref(),
+            Some("tears-of-steel")
+        );
+        assert_eq!(
+            folder("https://cdn.example/examples/img_bipbop_adv_example_ts/master.m3u8").as_deref(),
+            Some("img_bipbop_adv_example_ts")
+        );
+        // Token-like and hash-like folders are never used.
+        assert_eq!(
+            folder("https://cdn.example/exp=1~hmac=ab12/master.m3u8"),
+            None
+        );
+        assert_eq!(
+            folder("https://cdn.example/3f2a9c1b-77d4-4e0a-9b1e-0c2d5e6f7a8b/index.m3u8"),
+            None
+        );
+        assert_eq!(folder("https://cdn.example/master.m3u8"), None);
     }
 
     #[test]

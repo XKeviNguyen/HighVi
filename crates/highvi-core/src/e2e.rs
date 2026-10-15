@@ -2236,3 +2236,123 @@ fn chrome_browser_processes(fixture: &Fixture) -> usize {
         .filter(|cmdline| cmdline.contains("--remote-debugging-pipe"))
         .count()
 }
+
+/// Measurement, not a pass/fail check: HighVi's own cost at each target
+/// from 1 to 4 (8 jobs of ~6 MB each from the local fixture), and how long
+/// Cancel All takes with four transfers in flight. Run alone:
+/// `cargo test -p highvi-core queue_concurrency_profile -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "measurement; run alone"]
+async fn queue_concurrency_profile() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let segments: Vec<String> = (0..60)
+        .map(|_| "https://media.test/muxed/s0.ts".to_string())
+        .collect();
+    let refs: Vec<&str> = segments.iter().map(String::as_str).collect();
+    for index in 0..8 {
+        fixture.server.route(
+            &format!("media.test/profile/{index}.m3u8"),
+            Route::playlist(&media_playlist(&refs, "")),
+        );
+    }
+    let children = || {
+        let me = std::process::id().to_string();
+        let mut count = 0;
+        for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+            if let Ok(stat) = std::fs::read_to_string(entry.path().join("stat"))
+                && let Some(rest) = stat.rsplit(')').next()
+                && rest.split_whitespace().nth(1) == Some(me.as_str())
+            {
+                count += 1;
+            }
+        }
+        count
+    };
+    let status_value = |key: &str| -> u64 {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap_or_default()
+            .lines()
+            .find(|line| line.starts_with(key))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0)
+    };
+    eprintln!("target | wall s | peak active | peak threads | peak fds | peak children | RSS KiB");
+    for target in 1..=4 {
+        let (scheduler, _) = real_scheduler(&fixture);
+        scheduler.set_concurrency(target).unwrap();
+        let sources = (0..8)
+            .map(|index| SourceRequest::DirectHls {
+                playlist_url: format!("https://media.test/profile/{index}.m3u8?run={target}"),
+                referer_page_url: "https://page.test/".into(),
+            })
+            .collect();
+        assert_eq!(scheduler.add(sources).added.len(), 8);
+        let started = Instant::now();
+        scheduler.start();
+        let (mut active, mut threads, mut fds, mut kids) = (0, 0, 0, 0);
+        loop {
+            let snapshot = scheduler.snapshot();
+            active = active.max(snapshot.active);
+            threads = threads.max(status_value("Threads:"));
+            fds = fds.max(std::fs::read_dir("/proc/self/fd").map_or(0, |dir| dir.count()));
+            kids = kids.max(children());
+            if snapshot.counts.completed + snapshot.counts.failed == 8 {
+                assert_eq!(snapshot.counts.completed, 8, "{snapshot:?}");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        eprintln!(
+            "{target} | {:.1} | {active} | {threads} | {fds} | {kids} | {}",
+            started.elapsed().as_secs_f64(),
+            status_value("VmRSS:")
+        );
+        for name in fixture.saved_files() {
+            let _ = std::fs::remove_file(fixture.output_dir.join(name));
+        }
+    }
+    // Cancel All with four slow transfers in flight.
+    let slow: Vec<String> = (0..4)
+        .map(|index| format!("https://media.test/slowp/{index}.ts"))
+        .collect();
+    for (index, url) in slow.iter().enumerate() {
+        let segment = std::fs::read(media(&fixture.tools.ffmpeg).join("muxed/s0.ts")).unwrap();
+        fixture.server.route(
+            &format!("media.test/slowp/{index}.ts"),
+            Route::ok("video/mp2t", segment).trickled(1024, Duration::from_millis(200)),
+        );
+        fixture.server.route(
+            &format!("media.test/slowp/{index}.m3u8"),
+            Route::playlist(&media_playlist(&[url.as_str()], "")),
+        );
+    }
+    let (scheduler, _) = real_scheduler(&fixture);
+    scheduler.set_concurrency(4).unwrap();
+    scheduler.add(
+        (0..4)
+            .map(|index| direct(&format!("https://media.test/slowp/{index}.m3u8")))
+            .collect(),
+    );
+    scheduler.start();
+    for index in 0..4 {
+        fixture
+            .server
+            .hits_log
+            .wait_for(&format!("/slowp/{index}.ts"))
+            .await;
+    }
+    let cancelled = Instant::now();
+    scheduler.cancel_all();
+    while scheduler.snapshot().active > 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    eprintln!(
+        "cancel all (4 in flight) -> all slots free: {} ms; children left: {}",
+        cancelled.elapsed().as_millis(),
+        children()
+    );
+    fixture.assert_no_job_dirs();
+}
