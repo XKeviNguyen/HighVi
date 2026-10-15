@@ -69,6 +69,32 @@ impl Default for JobLimits {
     }
 }
 
+/// At most this many isolated browsers run at once, whatever the number of
+/// jobs: Chrome is the heaviest process HighVi starts.
+pub const MAX_BROWSERS: usize = 1;
+/// FFmpeg muxes are short and disk-bound; two keep the disk busy without
+/// competing for it.
+pub const MAX_MUXES: usize = 2;
+
+/// Limits shared by every job of one HighVi process. A job holds at most one
+/// of these permits at a time, so waiting for one cannot deadlock.
+#[derive(Debug)]
+pub struct SharedResources {
+    pub disk: Arc<DiskBudget>,
+    pub browsers: tokio::sync::Semaphore,
+    pub muxers: tokio::sync::Semaphore,
+}
+
+impl Default for SharedResources {
+    fn default() -> Self {
+        Self {
+            disk: Arc::default(),
+            browsers: tokio::sync::Semaphore::new(MAX_BROWSERS),
+            muxers: tokio::sync::Semaphore::new(MAX_MUXES),
+        }
+    }
+}
+
 /// What a job needs from the machine it runs on.
 pub struct JobEnvironment {
     pub yt_dlp: PathBuf,
@@ -81,8 +107,8 @@ pub struct JobEnvironment {
     /// The fixed output directory, e.g. `~/Downloads/HighVi`.
     pub output_dir: PathBuf,
     pub limits: JobLimits,
-    /// Shared by every job that writes to `output_dir`.
-    pub disk: Arc<DiskBudget>,
+    /// Shared by every job of the process.
+    pub shared: Arc<SharedResources>,
     #[cfg(test)]
     pub(crate) fixture: Option<Resolver>,
     #[cfg(test)]
@@ -103,7 +129,7 @@ impl JobEnvironment {
             python: find_executable("python3"),
             output_dir,
             limits: JobLimits::default(),
-            disk: Arc::default(),
+            shared: Arc::default(),
             #[cfg(test)]
             fixture: None,
             #[cfg(test)]
@@ -276,6 +302,10 @@ async fn run(
     let _ = tokio::fs::remove_file(job.path().join(INFO_JSON)).await;
 
     report(JobUpdate::stage(Stage::Merging));
+    let _muxer = tokio::select! {
+        permit = env.shared.muxers.acquire() => permit.map_err(|_| mux_error())?,
+        () = cancel.cancelled() => return Err(cancelled_error()),
+    };
     Box::pin(mux(env, &job, media.selection.audio.is_some(), &mut cancel)).await?;
 
     report(JobUpdate::stage(Stage::Saving));
@@ -347,6 +377,7 @@ async fn fetch(
         .map_or(0, |bytes| bytes.saturating_mul(2));
     let free = env.free_space().unwrap_or(u64::MAX);
     let reservation = env
+        .shared
         .disk
         .reserve(free, needed, env.limits.disk_floor)
         .ok_or_else(|| no_space_error(Some(needed), free))?;
@@ -433,6 +464,10 @@ async fn discover(
     }
 
     report(JobUpdate::stage(Stage::Browsing));
+    let browser_permit = tokio::select! {
+        permit = env.shared.browsers.acquire() => permit.map_err(|_| crate::browser::browser_failed())?,
+        () = cancel.cancelled() => return Err(cancelled_error()),
+    };
     let finding = discover_in_browser(
         BrowserRun {
             chrome,
@@ -447,6 +482,8 @@ async fn discover(
     .await;
     // The profile holds whatever the page stored; it is not needed again.
     let _ = tokio::fs::remove_dir_all(job.path().join("chrome-profile")).await;
+    // Chrome has exited (it is killed before discovery returns).
+    drop(browser_permit);
     let finding = match finding {
         Ok(finding) => finding,
         // No browser installed: the original explanation is the useful one.

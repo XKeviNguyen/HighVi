@@ -2056,3 +2056,183 @@ async fn flood_peak_memory() {
     );
     eprintln!("{}", fixture.last_report.lock().unwrap());
 }
+
+// ------------------------------------------------------ bulk queue (V1.1 C)
+
+/// Records queue events; the e2e tests only need the last snapshot.
+#[derive(Default)]
+struct QueueLog(Mutex<Option<crate::QueueSnapshot>>);
+
+impl crate::QueueEvents for QueueLog {
+    fn changed(&self, snapshot: crate::QueueSnapshot) {
+        *self.0.lock().unwrap() = Some(snapshot);
+    }
+    fn progress(&self, _: crate::ProgressEvent) {}
+}
+
+/// A scheduler running real jobs against the fixture, sharing one set of
+/// limits, as the app does.
+fn real_scheduler(fixture: &Fixture) -> (crate::Scheduler, Arc<QueueLog>) {
+    let template = fixture.environment();
+    let shared = Arc::new(crate::SharedResources::default());
+    let environment = Arc::new(JobEnvironment {
+        shared,
+        fixture: template.fixture.clone(),
+        ..JobEnvironment::new(
+            template.yt_dlp.clone(),
+            template.ffmpeg.clone(),
+            template.chrome.clone(),
+            template.output_dir.clone(),
+        )
+    });
+    let runner: crate::Runner = Arc::new(move |source, cancel, report| {
+        let environment = Arc::clone(&environment);
+        Box::pin(async move {
+            let (result, diagnostics) =
+                run_job(&environment, &source, cancel, &|update| report(update)).await;
+            let rendered = result.is_err().then(|| diagnostics.render());
+            (result, rendered)
+        })
+    });
+    let log = Arc::new(QueueLog::default());
+    let scheduler = crate::Scheduler::new(
+        tokio::runtime::Handle::current(),
+        runner,
+        Arc::clone(&log) as Arc<dyn crate::QueueEvents>,
+    );
+    (scheduler, log)
+}
+
+/// Four real jobs at once whose videos share a title: each is published
+/// under its own name and nothing is overwritten.
+#[tokio::test]
+async fn four_concurrent_jobs_with_one_title_publish_four_files() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    for index in 0..5 {
+        fixture.server.route(
+            &format!("page.test/same/{index}"),
+            Route::html(
+                "<!doctype html><title>Same title</title>\
+                 <video src=\"https://media.test/muxed/master.m3u8\" type=\"application/x-mpegURL\"></video>",
+            ),
+        );
+    }
+    std::fs::create_dir_all(&fixture.output_dir).unwrap();
+    // An existing file with the name the first job wants.
+    std::fs::write(fixture.output_dir.join("Same title (1).mp4"), b"keep me").unwrap();
+    let (scheduler, _) = real_scheduler(&fixture);
+    scheduler.set_concurrency(4).unwrap();
+    let report = scheduler.add(
+        (0..5)
+            .map(|index| page(&format!("https://page.test/same/{index}")))
+            .collect(),
+    );
+    assert_eq!(report.added.len(), 5);
+    scheduler.start();
+    let mut peak = 0;
+    let started = Instant::now();
+    loop {
+        let snapshot = scheduler.snapshot();
+        peak = peak.max(snapshot.active);
+        assert!(snapshot.active <= 4);
+        if snapshot.counts.completed == 5 {
+            break;
+        }
+        assert!(snapshot.counts.failed == 0, "{snapshot:?}");
+        assert!(started.elapsed() < Duration::from_secs(90), "{snapshot:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(peak, 4, "four jobs never ran together");
+    let files = fixture.saved_files();
+    assert_eq!(files.len(), 6, "{files:?}");
+    assert_eq!(
+        std::fs::read(fixture.output_dir.join("Same title (1).mp4")).unwrap(),
+        b"keep me"
+    );
+    for name in files
+        .iter()
+        .filter(|name| name.as_str() != "Same title (1).mp4")
+    {
+        let (streams, _, clean) = fixture.inspect(&fixture.output_dir.join(name));
+        assert_eq!(streams, ["video", "audio"], "{name}");
+        assert!(clean, "{name}");
+    }
+    fixture.assert_no_job_dirs();
+}
+
+/// Browser discovery is limited to one Chrome at a time, whatever the
+/// number of jobs; a job waiting for the browser can still be cancelled.
+#[tokio::test]
+async fn jobs_share_one_browser_at_a_time() {
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    for index in 0..3 {
+        fixture.server.route(
+            &format!("page.test/js/{index}"),
+            Route::html(&format!(
+                "<!doctype html><title>JS {index}</title><script>\
+                 setTimeout(() => fetch('https://media.test/js{index}/master.m3u8'), 1500);\
+                 </script>"
+            )),
+        );
+        fixture.server.route(
+            &format!("media.test/js{index}/master.m3u8"),
+            Route::playlist(SPLIT_MASTER_ABSOLUTE),
+        );
+    }
+    let (scheduler, _) = real_scheduler(&fixture);
+    scheduler.set_concurrency(4).unwrap();
+    let ids = scheduler
+        .add(
+            (0..3)
+                .map(|index| page(&format!("https://page.test/js/{index}")))
+                .collect(),
+        )
+        .added;
+    scheduler.start();
+    // Sample the number of browser processes while the jobs run.
+    let mut most = 0;
+    let started = Instant::now();
+    let mut cancelled_waiting = false;
+    loop {
+        let browsers = chrome_browser_processes(&fixture);
+        most = most.max(browsers);
+        let snapshot = scheduler.snapshot();
+        // Once one job is browsing, cancel the last one, which is waiting.
+        if !cancelled_waiting
+            && snapshot
+                .items
+                .iter()
+                .filter(|item| item.stage == Some(Stage::Browsing))
+                .count()
+                >= 2
+        {
+            scheduler.cancel(ids[2]);
+            cancelled_waiting = true;
+        }
+        let done = snapshot.counts.completed + snapshot.counts.failed + snapshot.counts.cancelled;
+        if done == 3 && snapshot.active == 0 {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(120), "{snapshot:?}");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let snapshot = scheduler.snapshot();
+    assert_eq!(most, 1, "more than one browser ran at once");
+    assert_eq!(snapshot.counts.completed, 2, "{snapshot:?}");
+    assert_eq!(snapshot.counts.cancelled, 1, "{snapshot:?}");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// Chrome's top-level browser processes (not its renderers or helpers) with
+/// a profile under this fixture.
+fn chrome_browser_processes(fixture: &Fixture) -> usize {
+    chrome_survivors(fixture)
+        .iter()
+        .filter(|cmdline| cmdline.contains("--remote-debugging-pipe"))
+        .count()
+}

@@ -252,7 +252,7 @@ async fn write_profile_preferences(profile: &Path) -> io::Result<()> {
     tokio::fs::write(default.join("Preferences"), preferences.to_string()).await
 }
 
-fn browser_failed() -> PublicError {
+pub(crate) fn browser_failed() -> PublicError {
     PublicError::new(
         "browser_failed",
         "The isolated browser HighVi uses to find videos stopped unexpectedly.",

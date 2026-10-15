@@ -201,8 +201,7 @@ h2 {
 
 .notice,
 .card,
-.error-card,
-.success-card {
+.error-card {
   position: relative;
   border: 1px solid var(--line);
   background: var(--panel);
@@ -282,7 +281,8 @@ dt {
 
 /* ---------- mode switch ---------- */
 
-.mode-switch {
+.mode-switch,
+.concurrency {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
@@ -291,7 +291,8 @@ dt {
   border: 0;
 }
 
-.mode-switch legend {
+.mode-switch legend,
+.concurrency legend {
   width: 100%;
   margin-bottom: 10px;
   padding: 0;
@@ -301,7 +302,8 @@ dt {
   text-transform: uppercase;
 }
 
-.mode-switch label {
+.mode-switch label,
+.concurrency label {
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -316,33 +318,38 @@ dt {
   transition: border-color 0.15s, color 0.15s, box-shadow 0.15s;
 }
 
-.mode-switch label:hover {
+.mode-switch label:hover,
+.concurrency label:hover {
   border-color: var(--green-mid);
   color: var(--text);
 }
 
-.mode-switch label:has(input:checked) {
+.mode-switch label:has(input:checked),
+.concurrency label:has(input:checked) {
   border-color: var(--green);
   background: rgba(0, 255, 65, 0.1);
   box-shadow: var(--glow);
   color: var(--green);
 }
 
-.mode-switch input {
+.mode-switch input,
+.concurrency input {
   width: auto;
   margin: 0;
   padding: 0;
   accent-color: var(--green);
 }
 
-.mode-switch input:focus-visible {
+.mode-switch input:focus-visible,
+.concurrency input:focus-visible {
   outline: 2px solid var(--green);
   outline-offset: 2px;
 }
 
 /* ---------- inputs and buttons ---------- */
 
-input {
+input,
+textarea {
   width: 100%;
   min-width: 0;
   padding: 13px 14px;
@@ -355,11 +362,20 @@ input {
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 
-input::placeholder {
+textarea {
+  min-height: 7em;
+  resize: vertical;
+  font: inherit;
+  line-height: 1.5;
+}
+
+input::placeholder,
+textarea::placeholder {
   color: rgba(111, 191, 131, 0.45);
 }
 
-input:focus {
+input:focus,
+textarea:focus {
   border-color: var(--green);
   box-shadow: var(--glow);
 }
@@ -396,8 +412,8 @@ button:focus-visible {
 
 button:disabled {
   border-style: dashed;
-  cursor: wait;
-  opacity: 0.6;
+  cursor: default;
+  opacity: 0.5;
 }
 
 .actions {
@@ -416,48 +432,7 @@ button:disabled {
   opacity: 0.85;
 }
 
-/* ---------- status ---------- */
-
-.status-line,
-.metrics {
-  display: flex;
-  align-items: center;
-}
-
-.status-title {
-  margin: 0 0 12px;
-  color: var(--green-bright);
-  font-size: 13px;
-  line-height: 1.5;
-  overflow-wrap: anywhere;
-}
-
 /* ---------- progress ---------- */
-
-.status-line {
-  gap: 10px;
-  min-width: 0;
-}
-
-#status-message {
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-
-.status-dot {
-  width: 9px;
-  height: 9px;
-  background: var(--green);
-  box-shadow: var(--glow);
-  animation: pulse 1.4s ease-in-out infinite;
-}
-
-.percent {
-  margin-left: auto;
-  color: var(--green);
-  font-variant-numeric: tabular-nums;
-  text-shadow: var(--glow);
-}
 
 .progress-track {
   position: relative;
@@ -480,23 +455,11 @@ button:disabled {
   animation: scan 1.2s linear infinite;
 }
 
-.metrics {
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 12px;
-  color: var(--muted);
-  font-size: 11px;
-}
-
 /* ---------- messages ---------- */
 
-.error-card,
-.success-card {
+.error-card {
   margin-bottom: 18px;
   padding: 15px 18px;
-}
-
-.error-card {
   border-color: rgba(255, 59, 92, 0.55);
   background: var(--danger-soft);
   color: #ffb3c0;
@@ -513,25 +476,7 @@ button:disabled {
   content: "[ERR] ";
 }
 
-.success-card {
-  border-color: var(--green);
-  background: rgba(0, 255, 65, 0.08);
-  box-shadow: var(--glow);
-  color: var(--green-bright);
-}
-
-.success-card strong {
-  color: var(--green);
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-.success-card strong::before {
-  content: "[OK] ";
-}
-
-.error-card p,
-.success-card p {
+.error-card p {
   margin: 7px 0 0;
   white-space: pre-line;
   font-size: 12.5px;
@@ -573,6 +518,179 @@ button:disabled {
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* ---------- queue ---------- */
+
+.add-result {
+  margin: 12px 0 0;
+  color: var(--green-bright);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.add-result.bad {
+  color: #ffb3c0;
+}
+
+.queue-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 6px 16px;
+}
+
+.queue-head h2 {
+  margin: 0;
+  color: var(--green);
+  font-size: 15px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+}
+
+.queue-status,
+.queue-counts {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.queue-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 14px 22px;
+  margin: 16px 0 10px;
+}
+
+.concurrency {
+  margin: 0;
+}
+
+.concurrency legend {
+  margin-bottom: 6px;
+}
+
+.concurrency label {
+  min-width: 44px;
+  min-height: 44px;
+  justify-content: center;
+  padding: 0 12px;
+}
+
+.queue-counts {
+  margin-bottom: 12px;
+}
+
+.job-list {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.job {
+  padding: 12px 14px;
+  border: 1px solid var(--line-soft);
+  background: rgba(0, 0, 0, 0.55);
+}
+
+.job.running,
+.job.cancelling {
+  border-color: var(--line);
+}
+
+.job.completed {
+  border-color: rgba(0, 255, 65, 0.45);
+}
+
+.job.failed {
+  border-color: rgba(255, 59, 92, 0.55);
+}
+
+.job-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.job-dot {
+  flex: 0 0 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green-dim);
+}
+
+.job.running .job-dot {
+  background: var(--green);
+  box-shadow: var(--glow);
+}
+
+.job.failed .job-dot {
+  background: var(--danger);
+}
+
+.job-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--green-bright);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.job-percent {
+  flex: 0 0 auto;
+  color: var(--green);
+  font-size: 12px;
+}
+
+.job p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+}
+
+.job-status {
+  color: var(--muted);
+}
+
+.job.failed .job-status {
+  color: #ffb3c0;
+}
+
+.job-hint {
+  color: #dfeea0;
+}
+
+.job-saved {
+  color: var(--green-mid);
+}
+
+.job .progress-track {
+  margin-top: 8px;
+}
+
+.job-actions {
+  margin-top: 10px;
+}
+
+.job-actions button,
+.diagnostics button {
+  min-height: 36px;
+  padding: 0 14px;
+  font-size: 11px;
+}
+
+.queue-actions {
+  margin-top: 18px;
 }
 
 .hidden {
@@ -635,6 +753,11 @@ button:disabled {
 
   .actions button {
     width: 100%;
+  }
+
+  .job-actions button {
+    width: auto;
+    flex: 1 1 auto;
   }
 }
 

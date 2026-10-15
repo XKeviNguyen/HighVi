@@ -1,79 +1,18 @@
 use highvi_core::{
-    CancelHandle, JobEnvironment, JobUpdate, PublicError, RECOMMENDED_YT_DLP, SourceRequest,
-    YtDlpVersion, cancel_pair, find_browser, find_executable, prepare_output_dir, resolve_python,
-    run_job, validate_source, yt_dlp_version,
+    AddReport, JobEnvironment, ProgressEvent, PublicError, QueueEvents, QueueSnapshot,
+    RECOMMENDED_YT_DLP, Report, Runner, Scheduler, SharedResources, SourceRequest, YtDlpVersion,
+    find_browser, find_executable, prepare_output_dir, resolve_python, run_job, yt_dlp_version,
 };
 use serde::Serialize;
-use std::{path::PathBuf, sync::Mutex, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
-use tokio::sync::watch;
 
-const MAX_JOB_ID_CHARS: usize = 64;
 const EXIT_GRACE: Duration = Duration::from_secs(5);
 
-/// The single job that may run at a time.
-#[derive(Default)]
+/// The queue owns every job. The webview only sends sources and item IDs;
+/// it is told about progress through events and never sees a media URL.
 struct AppState {
-    active: Mutex<Option<ActiveJob>>,
-}
-
-struct ActiveJob {
-    cancel: CancelHandle,
-    finished: watch::Receiver<bool>,
-}
-
-/// Frees the job slot when the job's command ends, however it ends.
-struct SlotGuard<'a> {
-    state: &'a AppState,
-    finished: watch::Sender<bool>,
-}
-
-impl Drop for SlotGuard<'_> {
-    fn drop(&mut self) {
-        self.state
-            .active
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take();
-        self.finished.send_replace(true);
-    }
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct JobResult {
-    saved_to: String,
-    title: String,
-}
-
-/// A failed job: the error, plus a report the user can copy into a bug
-/// report (no URLs, cookies or tokens; see `highvi_core::Diagnostics`).
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct JobError {
-    #[serde(flatten)]
-    error: PublicError,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    diagnostics: Option<String>,
-}
-
-impl From<PublicError> for JobError {
-    fn from(error: PublicError) -> Self {
-        Self {
-            error,
-            diagnostics: None,
-        }
-    }
-}
-
-/// A progress event. `job_id` lets the UI ignore events from an older job
-/// that arrive late.
-#[derive(Clone, Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct JobEvent {
-    job_id: String,
-    #[serde(flatten)]
-    update: JobUpdate,
+    queue: Scheduler,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,82 +27,82 @@ struct DependencyStatus {
     yt_dlp_recommended: Option<String>,
 }
 
-/// Discovers and downloads `source`. Resolves when the job ends. The webview
-/// is untrusted: the source is validated here, and the job ID is only a
-/// correlation tag for progress events.
-#[tauri::command]
-async fn start_job(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    job_id: String,
-    source: SourceRequest,
-) -> Result<JobResult, JobError> {
-    if job_id.is_empty()
-        || job_id.len() > MAX_JOB_ID_CHARS
-        || !job_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    {
-        return Err(PublicError::new("invalid_job_id", "Invalid job identifier.").into());
-    }
-    let source = validate_source(&source)?;
+/// Forwards queue changes to the webview. Emitting only queues a message
+/// for the webview; it never calls back into the queue.
+struct WebviewEvents(AppHandle);
 
-    let (cancel, token) = cancel_pair();
-    let (finished_sender, finished) = watch::channel(false);
-    {
-        let mut active = state
-            .active
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if active.is_some() {
-            return Err(PublicError::new(
-                "download_already_active",
-                "Another download is already running. Wait for it to finish.",
-            )
-            .into());
-        }
-        *active = Some(ActiveJob { cancel, finished });
+impl QueueEvents for WebviewEvents {
+    fn changed(&self, snapshot: QueueSnapshot) {
+        let _ = self.0.emit("queue-changed", snapshot);
     }
-    let _slot = SlotGuard {
-        state: &state,
-        finished: finished_sender,
-    };
 
-    let environment = job_environment(&app)?;
-    let report = |update: JobUpdate| {
-        let _ = app.emit(
-            "job-update",
-            JobEvent {
-                job_id: job_id.clone(),
-                update,
-            },
-        );
-    };
-    let (outcome, diagnostics) = run_job(&environment, &source, token, &report).await;
-    match outcome {
-        Ok(outcome) => Ok(JobResult {
-            saved_to: outcome.saved_to.to_string_lossy().into_owned(),
-            title: outcome.title,
-        }),
-        Err(error) if error.code == "cancelled" => Err(error.into()),
-        Err(error) => Err(JobError {
-            error,
-            diagnostics: Some(diagnostics.render()),
-        }),
+    fn progress(&self, progress: ProgressEvent) {
+        let _ = self.0.emit("queue-progress", progress);
     }
 }
 
-/// Cancels the running job, if any. Idempotent.
+/// Adds sources to the queue. Each is validated in Rust; the webview is
+/// untrusted.
 #[tauri::command]
-fn cancel_job(state: State<'_, AppState>) {
-    if let Some(active) = state
-        .active
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .as_ref()
-    {
-        active.cancel.cancel();
-    }
+fn queue_add(state: State<'_, AppState>, sources: Vec<SourceRequest>) -> AddReport {
+    state.queue.add(sources)
+}
+
+#[tauri::command]
+fn queue_start(state: State<'_, AppState>) {
+    state.queue.start();
+}
+
+#[tauri::command]
+fn queue_pause(state: State<'_, AppState>) {
+    state.queue.pause();
+}
+
+#[tauri::command]
+fn queue_set_concurrency(state: State<'_, AppState>, desired: usize) -> Result<(), PublicError> {
+    state.queue.set_concurrency(desired)
+}
+
+#[tauri::command]
+fn queue_cancel(state: State<'_, AppState>, id: u64) {
+    state.queue.cancel(id);
+}
+
+#[tauri::command]
+fn queue_cancel_all(state: State<'_, AppState>) {
+    state.queue.cancel_all();
+}
+
+#[tauri::command]
+fn queue_retry(state: State<'_, AppState>, id: u64) {
+    state.queue.retry(id);
+}
+
+#[tauri::command]
+fn queue_retry_failed(state: State<'_, AppState>) {
+    state.queue.retry_failed();
+}
+
+#[tauri::command]
+fn queue_remove(state: State<'_, AppState>, id: u64) {
+    state.queue.remove(id);
+}
+
+#[tauri::command]
+fn queue_clear_completed(state: State<'_, AppState>) {
+    state.queue.clear_completed();
+}
+
+#[tauri::command]
+fn queue_snapshot(state: State<'_, AppState>) -> QueueSnapshot {
+    state.queue.snapshot()
+}
+
+/// The diagnostic report of a failed item (no URLs, cookies or tokens; see
+/// `highvi_core::Diagnostics`).
+#[tauri::command]
+fn queue_diagnostics(state: State<'_, AppState>, id: u64) -> Option<String> {
+    state.queue.diagnostics(id)
 }
 
 #[tauri::command]
@@ -241,39 +180,59 @@ fn output_dir(app: &AppHandle) -> Result<PathBuf, PublicError> {
     Ok(downloads.join("HighVi"))
 }
 
-fn job_environment(app: &AppHandle) -> Result<JobEnvironment, PublicError> {
+/// Tools are looked up for each job, so installing one while HighVi runs
+/// works without a restart. The shared limits are the same for all jobs.
+fn job_environment(
+    app: &AppHandle,
+    shared: &Arc<SharedResources>,
+) -> Result<JobEnvironment, PublicError> {
     let missing = |tool: &str| {
         PublicError::new(
             "missing_dependency",
             format!("{tool} is not installed or is not available in PATH."),
         )
     };
-    Ok(JobEnvironment::new(
-        find_executable("yt-dlp").ok_or_else(|| missing("yt-dlp"))?,
-        find_executable("ffmpeg").ok_or_else(|| missing("FFmpeg"))?,
-        find_browser(),
-        output_dir(app)?,
-    ))
+    Ok(JobEnvironment {
+        shared: Arc::clone(shared),
+        ..JobEnvironment::new(
+            find_executable("yt-dlp").ok_or_else(|| missing("yt-dlp"))?,
+            find_executable("ffmpeg").ok_or_else(|| missing("FFmpeg"))?,
+            find_browser(),
+            output_dir(app)?,
+        )
+    })
 }
 
-/// On exit, cancel the running job and give it a moment to kill its tools
-/// and remove its working files.
-fn finish_active_job(app: &AppHandle) {
-    let finished = app
-        .state::<AppState>()
-        .active
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .as_ref()
-        .map(|active| {
-            active.cancel.cancel();
-            active.finished.clone()
-        });
-    if let Some(mut finished) = finished {
-        tauri::async_runtime::block_on(async {
-            let _ = tokio::time::timeout(EXIT_GRACE, finished.wait_for(|done| *done)).await;
-        });
-    }
+/// Runs one queued source with the real downloader.
+fn job_runner(app: AppHandle) -> Runner {
+    let shared = Arc::new(SharedResources::default());
+    Arc::new(move |source, cancel, report: Report| {
+        let app = app.clone();
+        let shared = Arc::clone(&shared);
+        Box::pin(async move {
+            let environment = match job_environment(&app, &shared) {
+                Ok(environment) => environment,
+                Err(error) => return (Err(error), None),
+            };
+            let (result, diagnostics) =
+                run_job(&environment, &source, cancel, &|update| report(update)).await;
+            let report = match &result {
+                Err(error) if error.code != "cancelled" => Some(diagnostics.render()),
+                _ => None,
+            };
+            (result, report)
+        })
+    })
+}
+
+/// On exit: accept nothing, start nothing, cancel everything, and give the
+/// jobs a moment to kill their tools and remove their working files.
+/// Completed files are never touched.
+fn finish_jobs(app: &AppHandle) {
+    let queue = app.state::<AppState>().queue.clone();
+    tauri::async_runtime::block_on(async {
+        let _ = tokio::time::timeout(EXIT_GRACE, queue.shutdown()).await;
+    });
 }
 
 /// Logout and `kill` send SIGTERM/SIGHUP, which would end the process without
@@ -300,14 +259,31 @@ fn exit_on_termination_signals(app: AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(AppState::default())
         .setup(|app| {
-            exit_on_termination_signals(app.handle().clone());
+            let handle = app.handle().clone();
+            let runtime = tauri::async_runtime::handle().inner().clone();
+            let queue = Scheduler::new(
+                runtime,
+                job_runner(handle.clone()),
+                Arc::new(WebviewEvents(handle.clone())),
+            );
+            app.manage(AppState { queue });
+            exit_on_termination_signals(handle);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            start_job,
-            cancel_job,
+            queue_add,
+            queue_start,
+            queue_pause,
+            queue_set_concurrency,
+            queue_cancel,
+            queue_cancel_all,
+            queue_retry,
+            queue_retry_failed,
+            queue_remove,
+            queue_clear_completed,
+            queue_snapshot,
+            queue_diagnostics,
             dependency_status,
             open_output_folder
         ])
@@ -315,7 +291,7 @@ pub fn run() {
         .expect("error while building HighVi")
         .run(|app, event| {
             if let RunEvent::Exit = event {
-                finish_active_job(app);
+                finish_jobs(app);
             }
         });
 }
