@@ -53,9 +53,13 @@ const SETTLE: Duration = Duration::from_secs(2);
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 /// Events the page causes; larger ones are skipped without being parsed.
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
-/// Parsed messages waiting in the channel and the backlog together.
-const MAX_QUEUED_BYTES: usize = 32 * 1024 * 1024;
-const MAX_BACKLOG_BYTES: usize = 8 * 1024 * 1024;
+/// Parsed messages waiting in the channel and the backlog together, by
+/// weight: a reply (one long string) weighs its length; an event weighs
+/// [`EVENT_WEIGHT`] times its length, because parsed JSON with many small
+/// values takes several times its text size.
+const MAX_QUEUED_WEIGHT: usize = 64 * 1024 * 1024;
+const MAX_BACKLOG_WEIGHT: usize = 16 * 1024 * 1024;
+const EVENT_WEIGHT: usize = 8;
 /// Request URLs held for tracking, in total.
 const MAX_TRACKED_URL_TOTAL: usize = 8 * 1024 * 1024;
 const MAX_SESSIONS: usize = 48;
@@ -144,8 +148,10 @@ pub struct PageReport {
     pub playlists: usize,
     /// Playlist requests (by name or type) the server answered with 4xx.
     pub refused_playlists: usize,
-    /// Events skipped for size or because the queue was full.
+    /// Events that did not fit HighVi's queue (the page flooded it).
     pub events_dropped: u64,
+    /// Events too large to read (one huge request is not a flood).
+    pub events_oversized: u64,
     /// Requests not tracked because the tracking limits were reached.
     pub untracked_requests: usize,
     pub ended: Ended,
@@ -375,7 +381,7 @@ fn raise(fd: OwnedFd) -> io::Result<OwnedFd> {
 /// the message is dropped.
 struct Queued {
     value: Value,
-    bytes: usize,
+    weight: usize,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -383,15 +389,16 @@ struct Queued {
 ///
 /// Memory is bounded by bytes, not only message counts, because a hostile
 /// page decides how large events are: events over [`MAX_EVENT_BYTES`] are
-/// skipped unparsed, everything queued (channel and backlog) shares
-/// [`MAX_QUEUED_BYTES`], and the backlog keeps at most
-/// [`MAX_BACKLOG_BYTES`]. Whatever is skipped is counted in `dropped`.
+/// skipped unparsed (counted in `oversized`), everything queued (channel and
+/// backlog) shares [`MAX_QUEUED_WEIGHT`], and the backlog keeps at most
+/// [`MAX_BACKLOG_WEIGHT`]; events that do not fit are counted in `dropped`.
 struct Cdp {
     writer: pipe::Sender,
     incoming: mpsc::Receiver<Queued>,
     backlog: VecDeque<Queued>,
-    backlog_bytes: usize,
-    dropped: Arc<AtomicU64>,
+    backlog_weight: usize,
+    dropped: AtomicU64,
+    oversized: Arc<AtomicU64>,
     next_id: u64,
     reader: tokio::task::JoinHandle<()>,
 }
@@ -406,26 +413,33 @@ impl Cdp {
     fn new(writer: pipe::Sender, receiver: pipe::Receiver) -> Self {
         // Small: Chrome then buffers in its own process, not in HighVi.
         let (sender, incoming) = mpsc::channel(64);
-        let dropped = Arc::new(AtomicU64::new(0));
+        let oversized = Arc::new(AtomicU64::new(0));
         let reader = tokio::spawn(read_messages(
             receiver,
             sender,
-            Arc::new(Semaphore::new(MAX_QUEUED_BYTES)),
-            Arc::clone(&dropped),
+            Arc::new(Semaphore::new(MAX_QUEUED_WEIGHT)),
+            Arc::clone(&oversized),
         ));
         Self {
             writer,
             incoming,
             backlog: VecDeque::new(),
-            backlog_bytes: 0,
-            dropped,
+            backlog_weight: 0,
+            dropped: AtomicU64::new(0),
+            oversized,
             next_id: 1,
             reader,
         }
     }
 
+    /// Events that did not fit the queue.
     fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// Events too large to read at all.
+    fn oversized(&self) -> u64 {
+        self.oversized.load(Ordering::Relaxed)
     }
 
     async fn send(
@@ -457,9 +471,9 @@ impl Cdp {
             }
             // Events that arrive while waiting are kept, within bounds.
             if self.backlog.len() < MAX_BACKLOG
-                && self.backlog_bytes + message.bytes <= MAX_BACKLOG_BYTES
+                && self.backlog_weight + message.weight <= MAX_BACKLOG_WEIGHT
             {
-                self.backlog_bytes += message.bytes;
+                self.backlog_weight += message.weight;
                 self.backlog.push_back(message);
             } else {
                 self.dropped.fetch_add(1, Ordering::Relaxed);
@@ -470,7 +484,7 @@ impl Cdp {
     async fn next(&mut self) -> Option<Value> {
         let message = match self.backlog.pop_front() {
             Some(message) => {
-                self.backlog_bytes -= message.bytes;
+                self.backlog_weight -= message.weight;
                 message
             }
             None => self.incoming.recv().await?,
@@ -486,7 +500,7 @@ async fn read_messages(
     mut receiver: pipe::Receiver,
     sender: mpsc::Sender<Queued>,
     budget: Arc<Semaphore>,
-    dropped: Arc<AtomicU64>,
+    oversized: Arc<AtomicU64>,
 ) {
     let mut buffer: Vec<u8> = Vec::new();
     let mut skipping = false;
@@ -509,22 +523,27 @@ async fn read_messages(
                 break;
             };
             if skipping {
-                dropped.fetch_add(1, Ordering::Relaxed);
+                oversized.fetch_add(1, Ordering::Relaxed);
                 skipping = false;
             } else {
                 buffer.extend_from_slice(&data[..end]);
                 if buffer.len() > message_limit(&buffer) {
-                    dropped.fetch_add(1, Ordering::Relaxed);
+                    oversized.fetch_add(1, Ordering::Relaxed);
                 } else if let Ok(value) = serde_json::from_slice::<Value>(&buffer) {
-                    let bytes = buffer.len().max(1);
-                    let permits = u32::try_from(bytes).unwrap_or(u32::MAX);
+                    let weight = buffer.len().max(1)
+                        * if message_limit(&buffer) == MAX_RESPONSE_BYTES {
+                            1
+                        } else {
+                            EVENT_WEIGHT
+                        };
+                    let permits = u32::try_from(weight).unwrap_or(u32::MAX);
                     // Waits while the queue is full: Chrome then buffers.
                     let Ok(permit) = Arc::clone(&budget).acquire_many_owned(permits).await else {
                         return;
                     };
                     let queued = Queued {
                         value,
-                        bytes,
+                        weight,
                         _permit: permit,
                     };
                     if sender.send(queued).await.is_err() {
@@ -939,6 +958,7 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
     .filter(|title| !title.is_empty());
 
     report.events_dropped = cdp.dropped();
+    report.events_oversized = cdp.oversized();
     report.loaded = loaded_at.is_some();
     report.played = played_at.is_some();
     report.playlists = observation.playlists.len();
@@ -1301,7 +1321,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result["body"].as_str().unwrap().len(), 9 * 1024 * 1024);
-        assert_eq!(cdp.dropped(), 1);
+        assert_eq!((cdp.oversized(), cdp.dropped()), (1, 0));
         // The small event survived in the backlog.
         assert_eq!(cdp.next().await.unwrap()["method"], "Page.loadEventFired");
         drop(writer.await.unwrap());
@@ -1327,12 +1347,14 @@ mod tests {
         // 180 MiB of events arrive before the reply HighVi waits for.
         assert!(cdp.call(None, "Page.enable", json!({})).await.is_some());
         assert!(
-            cdp.backlog_bytes <= MAX_BACKLOG_BYTES,
+            cdp.backlog_weight <= MAX_BACKLOG_WEIGHT,
             "{}",
-            cdp.backlog_bytes
+            cdp.backlog_weight
         );
-        assert!(cdp.backlog.len() <= 10, "{}", cdp.backlog.len());
-        assert!(cdp.dropped() >= 190, "{}", cdp.dropped());
+        // 900 KiB events weigh 7.2 MiB each: two fit the backlog.
+        assert!(cdp.backlog.len() <= 2, "{}", cdp.backlog.len());
+        assert!(cdp.dropped() >= 198, "{}", cdp.dropped());
+        assert_eq!(cdp.oversized(), 0);
         drop(writer.await.unwrap());
     }
 

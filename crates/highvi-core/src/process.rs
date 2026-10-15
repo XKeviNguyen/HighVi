@@ -95,6 +95,11 @@ struct Meter {
     /// `(when, cumulative bytes)`, oldest first; at most one sample is older
     /// than the window (the baseline).
     samples: VecDeque<(Instant, u64)>,
+    /// The tool's last reported counter, and what earlier counters reached
+    /// before it restarted (yt-dlp restarts a transfer the server would not
+    /// resume): bytes moved again are still bytes moved.
+    reported: u64,
+    carried: u64,
 }
 
 impl Meter {
@@ -103,12 +108,19 @@ impl Meter {
             policy,
             started,
             samples: VecDeque::new(),
+            reported: 0,
+            carried: 0,
         }
     }
 
-    fn observe(&mut self, at: Instant, bytes: u64) {
+    fn observe(&mut self, at: Instant, reported: u64) {
+        if reported < self.reported {
+            self.carried = self.carried.saturating_add(self.reported);
+        }
+        self.reported = reported;
+        let bytes = self.carried.saturating_add(reported);
         match self.samples.back_mut() {
-            Some((last_at, last)) if bytes <= *last => return,
+            Some((_, last)) if bytes <= *last => return,
             Some((last_at, last)) if at.duration_since(*last_at) < MIN_SAMPLE_GAP => {
                 *last = bytes;
             }
@@ -217,7 +229,7 @@ pub async fn run_streaming(
     mut command: Command,
     watch: Watch<'_>,
     cancel: &mut CancelToken,
-    mut on_line: impl FnMut(&str) -> Option<u64>,
+    mut on_line: impl FnMut(&str, Stream) -> Option<u64>,
 ) -> Result<bool, RunError> {
     let mut child = command.spawn().map_err(RunError::Spawn)?;
     let stdout = child.stdout.take().ok_or(RunError::Io)?;
@@ -226,16 +238,16 @@ pub async fn run_streaming(
     let (progress_sender, progress) = watch::channel(0_u64);
 
     let outcome = {
-        let (sender, mut receiver) = mpsc::channel::<String>(256);
+        let (sender, mut receiver) = mpsc::channel::<(Stream, String)>(256);
         let readers = async {
             tokio::join!(
-                read_lines(stdout, sender.clone()),
-                read_lines(stderr, sender)
+                read_lines(stdout, Stream::Stdout, sender.clone()),
+                read_lines(stderr, Stream::Stderr, sender)
             )
         };
         let consumer = async {
-            while let Some(line) = receiver.recv().await {
-                if let Some(bytes) = on_line(&line) {
+            while let Some((stream, line)) = receiver.recv().await {
+                if let Some(bytes) = on_line(&line, stream) {
                     progress_sender.send_replace(bytes);
                 }
             }
@@ -304,7 +316,19 @@ async fn watchdog(
     }
 }
 
-async fn read_lines<R: AsyncRead + Unpin>(mut reader: R, sender: mpsc::Sender<String>) {
+/// Which output a line came from: progress is trusted only from stdout,
+/// where yt-dlp's progress template writes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Stream {
+    Stdout,
+    Stderr,
+}
+
+async fn read_lines<R: AsyncRead + Unpin>(
+    mut reader: R,
+    stream: Stream,
+    sender: mpsc::Sender<(Stream, String)>,
+) {
     let mut chunk = vec![0_u8; 8 * 1024];
     let mut line = Vec::with_capacity(512);
     let mut oversized = false;
@@ -315,7 +339,7 @@ async fn read_lines<R: AsyncRead + Unpin>(mut reader: R, sender: mpsc::Sender<St
         };
         for byte in &chunk[..read] {
             if *byte == b'\n' {
-                if !oversized && sender.send(decode(&line)).await.is_err() {
+                if !oversized && sender.send((stream, decode(&line))).await.is_err() {
                     return;
                 }
                 line.clear();
@@ -331,7 +355,7 @@ async fn read_lines<R: AsyncRead + Unpin>(mut reader: R, sender: mpsc::Sender<St
         }
     }
     if !line.is_empty() && !oversized {
-        let _ = sender.send(decode(&line)).await;
+        let _ = sender.send((stream, decode(&line))).await;
     }
 }
 
@@ -402,7 +426,7 @@ mod tests {
                 disk: None,
             },
             &mut token,
-            parse,
+            |line, _| parse(line),
         )
         .await;
         assert!(matches!(result, Err(RunError::Stalled)), "{result:?}");
@@ -431,7 +455,7 @@ mod tests {
                 disk: None,
             },
             &mut token,
-            parse,
+            |line, _| parse(line),
         )
         .await;
         assert!(matches!(result, Err(RunError::Stalled)), "{result:?}");
@@ -449,7 +473,7 @@ mod tests {
                 disk: None,
             },
             &mut token,
-            parse,
+            |line, _| parse(line),
         )
         .await
         .unwrap();
@@ -463,7 +487,25 @@ mod tests {
                 disk: None,
             },
             &mut token,
-            parse,
+            |line, _| parse(line),
+        )
+        .await;
+        assert!(matches!(result, Err(RunError::Stalled)), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn progress_on_stderr_does_not_count() {
+        let (_handle, mut token) = cancel_pair();
+        let script = format!("({}) 1>&2", progress_script("0.1", 100_000, 100));
+        let result = run_streaming(
+            sh(&script),
+            Watch {
+                deadline: Duration::from_secs(60),
+                stall: stall(1_500, 1),
+                disk: None,
+            },
+            &mut token,
+            |line, stream| (stream == Stream::Stdout).then(|| parse(line)).flatten(),
         )
         .await;
         assert!(matches!(result, Err(RunError::Stalled)), "{result:?}");
@@ -480,7 +522,7 @@ mod tests {
                 disk: None,
             },
             &mut token,
-            parse,
+            |line, _| parse(line),
         )
         .await;
         assert!(matches!(result, Err(RunError::TimedOut)), "{result:?}");
@@ -498,7 +540,7 @@ mod tests {
                 }),
             },
             &mut token,
-            |line| {
+            |line, _| {
                 let bytes = parse(line)?;
                 free.store(
                     10_000u64.saturating_sub(bytes),
@@ -530,9 +572,22 @@ mod tests {
         let now = start + Duration::from_millis(99_990);
         assert!(!meter.stalled(now));
         assert!(meter.stalled(now + Duration::from_secs(11)));
-        // Going backwards (a new track restarting its counter) is ignored.
-        meter.observe(now, 5);
-        assert!(!meter.stalled(now));
+        // A restarted counter (the transfer began again) keeps counting:
+        // new bytes after the restart are progress, not a stall.
+        let restarted = now + Duration::from_secs(11);
+        meter.observe(restarted, 5);
+        for step in 1..=50_u64 {
+            meter.observe(
+                restarted + Duration::from_millis(step * 300),
+                5 + step * 1_000,
+            );
+        }
+        let later = restarted + Duration::from_secs(15);
+        assert!(
+            !meter.stalled(later),
+            "transfer after a restart looked stalled"
+        );
+        assert!(meter.stalled(later + Duration::from_secs(11)));
     }
 
     fn sh(script: &str) -> Command {
@@ -551,7 +606,7 @@ mod tests {
             sh("echo one; echo two >&2; head -c 20000 /dev/zero | tr '\\0' x; echo; printf 'last\\r'"),
             limited(Duration::from_secs(10)),
             &mut token,
-            |line| {
+            |line, _| {
                 lines.push(line.to_string());
                 None
             },
@@ -577,7 +632,7 @@ mod tests {
             sh(&script),
             limited(Duration::from_secs(60)),
             &mut token,
-            |line| {
+            |line, _| {
                 if line == "started" {
                     handle.cancel();
                 }

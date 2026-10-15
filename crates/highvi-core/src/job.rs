@@ -17,7 +17,7 @@ use crate::{
     formats::{MediaInfo, select_media},
     mux::{MuxInput, SNIFF_BYTES, mux_args, sniff},
     process::{
-        CancelToken, DiskFloor, RunError, StallPolicy, Watch, run_captured, run_streaming,
+        CancelToken, DiskFloor, RunError, StallPolicy, Stream, Watch, run_captured, run_streaming,
         tool_command,
     },
     tools::{extractor_related, resolve_python, today, update_advice},
@@ -37,6 +37,8 @@ const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 const MUX_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const OUTPUT_FILE: &str = "output.mp4";
 const MIB: u64 = 1024 * 1024;
+/// 16 TiB: no single track is larger.
+const MAX_PROGRESS_BYTES: u64 = 16 * 1024 * 1024 * MIB;
 
 /// Limits on one job's transfers and disk use.
 #[derive(Clone, Copy, Debug)]
@@ -59,7 +61,9 @@ impl Default for JobLimits {
                 window: Duration::from_secs(120),
                 min_bytes: 64 * 1024,
             },
-            track_deadline: Duration::from_secs(6 * 60 * 60),
+            // The stall policy is what catches stuck transfers; this only
+            // bounds a job that keeps crawling (about 20 GB at 0.25 MB/s).
+            track_deadline: Duration::from_secs(24 * 60 * 60),
             disk_floor: 512 * MIB,
         }
     }
@@ -633,8 +637,10 @@ async fn download_track(
             floor: env.limits.disk_floor,
         }),
     };
-    let success = run_streaming(command, watch, cancel, |line| {
-        match parse_progress_line(line, stage) {
+    let success = run_streaming(command, watch, cancel, |line, stream| {
+        // The progress template writes to stdout; a look-alike on stderr
+        // (remote text in an error) must not move the stall meter.
+        match parse_progress_line(line, stage).filter(|_| stream == Stream::Stdout) {
             Some((update, bytes)) => {
                 report(update);
                 bytes
@@ -646,7 +652,17 @@ async fn download_track(
         }
     })
     .await
-    .map_err(|error| run_error(error, "yt-dlp", "download_timeout"))?;
+    .map_err(|error| match error {
+        RunError::Stalled => stalled_error(&env.limits),
+        RunError::TimedOut => PublicError::new(
+            "download_timeout",
+            format!(
+                "The download took longer than HighVi allows for one track ({} hours).",
+                env.limits.track_deadline.as_secs() / 3600
+            ),
+        ),
+        error => run_error(error, "yt-dlp", "download_timeout"),
+    })?;
     record(recorder, |diagnostics| {
         diagnostics.signals(signals.labels())
     });
@@ -704,19 +720,27 @@ async fn mux(
         env_vars,
     );
     command.current_dir(job.path());
-    let captured = run_captured(
-        command,
-        64 * 1024,
-        MAX_DIAGNOSTIC_BYTES,
-        MUX_TIMEOUT,
-        cancel,
-    )
-    .await
-    .map_err(|error| run_error(error, "FFmpeg", "mux_failed"))?;
+    // Watched like a download: the output can outgrow its inputs, and other
+    // programs use the disk too, so the floor is enforced while it writes.
+    let free = || env.free_space();
+    let watch = Watch {
+        deadline: MUX_TIMEOUT,
+        stall: None,
+        disk: Some(DiskFloor {
+            free: &free,
+            floor: env.limits.disk_floor,
+        }),
+    };
+    let success = run_streaming(command, watch, cancel, |_, _| None)
+        .await
+        .map_err(|error| match error {
+            RunError::NoSpace => no_space_error(None, u64::MAX),
+            error => run_error(error, "FFmpeg", "mux_failed"),
+        })?;
     let written = tokio::fs::symlink_metadata(&output)
         .await
         .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0);
-    if !captured.success || !written {
+    if !success || !written {
         return Err(match env.free_space() {
             Some(free) if free < env.limits.disk_floor => no_space_error(None, free),
             _ => mux_error(),
@@ -775,6 +799,17 @@ async fn sniff_file(path: &Path) -> Result<crate::mux::Container, PublicError> {
 
 fn cancelled_error() -> PublicError {
     PublicError::new("cancelled", "The download was cancelled.")
+}
+
+fn stalled_error(limits: &JobLimits) -> PublicError {
+    PublicError::new(
+        "download_stalled",
+        format!(
+            "The download stopped making progress (less than {} KiB in {} seconds), so HighVi stopped it.",
+            limits.stall.min_bytes / 1024,
+            limits.stall.window.as_secs()
+        ),
+    )
 }
 
 fn no_space_error(needed: Option<u64>, free: u64) -> PublicError {
@@ -851,10 +886,7 @@ fn run_error(error: RunError, tool: &str, timeout_code: &str) -> PublicError {
                 "The download took longer than HighVi allows for one track (6 hours).",
             ),
         },
-        RunError::Stalled => PublicError::new(
-            "download_stalled",
-            "The download stopped making progress (less than 64 KiB in 2 minutes), so HighVi stopped it.",
-        ),
+        RunError::Stalled => stalled_error(&JobLimits::default()),
         RunError::NoSpace => no_space_error(None, u64::MAX),
     }
 }
@@ -877,7 +909,9 @@ fn parse_progress_line(line: &str, stage: Stage) -> Option<(JobUpdate, Option<u6
         .next()
         .map(str::trim)
         .and_then(|value| value.split('.').next())
-        .and_then(|value| value.parse::<u64>().ok());
+        .and_then(|value| value.parse::<u64>().ok())
+        // Absurd values are ignored rather than trusted.
+        .filter(|bytes| *bytes <= MAX_PROGRESS_BYTES);
     Some((update, bytes))
 }
 

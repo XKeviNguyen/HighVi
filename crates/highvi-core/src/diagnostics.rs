@@ -203,7 +203,7 @@ impl Diagnostics {
         if let Some(page) = &self.page {
             let _ = writeln!(
                 text,
-                "browser: document {}{}{}, loaded {}, played {}, frames {}, workers {}, requests {}, media responses {}, playlists {} (refused {}), candidates checked {}, events dropped {}, untracked requests {}, ended {}",
+                "browser: document {}{}{}, loaded {}, played {}, frames {}, workers {}, requests {}, media responses {}, playlists {} (refused {}), candidates checked {}, events dropped {} (oversized {}), untracked requests {}, ended {}",
                 page.document_status
                     .map_or_else(|| "none".to_string(), |status| status.to_string()),
                 if page.bot_check {
@@ -226,6 +226,7 @@ impl Diagnostics {
                 page.refused_playlists,
                 self.candidates_checked,
                 page.events_dropped,
+                page.events_oversized,
                 page.untracked_requests,
                 page.ended.label(),
             );

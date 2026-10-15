@@ -113,7 +113,7 @@ const I18N = (() => {
       "error.open_folder_failed": "HighVi couldn't open the folder.",
       "error.download_stalled":
         "The download stopped moving (almost nothing arrived for 2 minutes), so HighVi stopped it. Try again later.",
-      "error.download_timeout": "The download took longer than HighVi allows (6 hours for one part), so it stopped.",
+      "error.download_timeout": "The download took longer than HighVi allows (24 hours for one part), so it stopped.",
       "error.insufficient_disk_space":
         "There isn't enough free space on the disk for this video. Free some space, then try again. HighVi always leaves a little space free.",
       "error.discovery_overloaded":
@@ -246,7 +246,7 @@ const I18N = (() => {
       "error.open_folder_failed": "HighVi không mở được thư mục.",
       "error.download_stalled":
         "Video tải mãi không nhích (gần như không nhận được gì trong 2 phút) nên HighVi đã dừng. Thử lại sau nhé.",
-      "error.download_timeout": "Tải lâu hơn mức HighVi cho phép (6 tiếng cho một phần) nên đã dừng.",
+      "error.download_timeout": "Tải lâu hơn mức HighVi cho phép (24 tiếng cho một phần) nên đã dừng.",
       "error.insufficient_disk_space":
         "Ổ đĩa không đủ chỗ trống cho video này. Hãy dọn bớt rồi thử lại. HighVi luôn chừa lại một ít chỗ trống.",
       "error.discovery_overloaded":
@@ -382,7 +382,7 @@ const I18N = (() => {
       "error.open_folder_failed": "フォルダーを開けませんでした。",
       "error.download_stalled":
         "ダウンロードが止まってしまったので（2 分間ほとんど何も届きませんでした）、HighVi が止めました。あとでもう一度ためしてください。",
-      "error.download_timeout": "ダウンロードが HighVi の上限（1 つの部分につき 6 時間）より長くかかったので、止めました。",
+      "error.download_timeout": "ダウンロードが HighVi の上限（1 つの部分につき 24 時間）より長くかかったので、止めました。",
       "error.insufficient_disk_space":
         "ディスクの空きが足りません。空きを作ってから、もう一度ためしてください。HighVi はいつも少し空きを残します。",
       "error.discovery_overloaded":
