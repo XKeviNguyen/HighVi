@@ -184,6 +184,10 @@ pub(crate) struct Route {
     pub delay: Duration,
     /// Answer 403 unless the request carries exactly this Referer.
     pub required_referer: Option<&'static str>,
+    pub headers: Vec<(&'static str, &'static str)>,
+    /// Answered instead when the client is headless Chrome, as bot checks
+    /// that single out automated browsers do.
+    pub for_headless: Option<Arc<Route>>,
 }
 
 impl Route {
@@ -195,6 +199,31 @@ impl Route {
             location: None,
             delay: Duration::ZERO,
             required_referer: None,
+            headers: Vec::new(),
+            for_headless: None,
+        }
+    }
+
+    pub fn status(status: u16, content_type: &'static str, body: &str) -> Self {
+        Self {
+            status,
+            ..Self::ok(content_type, body)
+        }
+    }
+
+    pub fn header(mut self, name: &'static str, value: &'static str) -> Self {
+        self.headers.push((name, value));
+        self
+    }
+
+    pub fn delayed(self, delay: Duration) -> Self {
+        Self { delay, ..self }
+    }
+
+    pub fn headless_gets(self, route: Route) -> Self {
+        Self {
+            for_headless: Some(Arc::new(route)),
+            ..self
         }
     }
 
@@ -229,10 +258,33 @@ pub(crate) struct Hit {
     pub referer: Option<String>,
 }
 
+/// Requests the fixture received, with a signal on every new one so tests
+/// can wait for a request instead of sleeping.
+#[derive(Default)]
+pub(crate) struct HitLog {
+    list: Mutex<Vec<Hit>>,
+    count: tokio::sync::watch::Sender<usize>,
+}
+
+impl HitLog {
+    fn push(&self, hit: Hit) {
+        self.list.lock().unwrap().push(hit);
+        self.count.send_modify(|count| *count += 1);
+    }
+
+    /// Resolves once a request for `path` has arrived.
+    pub async fn wait_for(&self, path: &str) {
+        let mut count = self.count.subscribe();
+        let _ = count
+            .wait_for(|_| self.list.lock().unwrap().iter().any(|hit| hit.path == path))
+            .await;
+    }
+}
+
 pub(crate) struct Server {
     pub address: SocketAddr,
     routes: Arc<Mutex<HashMap<String, Route>>>,
-    hits: Arc<Mutex<Vec<Hit>>>,
+    pub hits_log: Arc<HitLog>,
 }
 
 pub(crate) const FIXTURE_HOSTS: &[&str] = &[
@@ -264,7 +316,7 @@ impl Server {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let routes: Arc<Mutex<HashMap<String, Route>>> = Arc::default();
-        let hits: Arc<Mutex<Vec<Hit>>> = Arc::default();
+        let hits: Arc<HitLog> = Arc::default();
         let (task_routes, task_hits) = (Arc::clone(&routes), Arc::clone(&hits));
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
@@ -279,7 +331,7 @@ impl Server {
         Self {
             address,
             routes,
-            hits,
+            hits_log: hits,
         }
     }
 
@@ -306,7 +358,7 @@ impl Server {
     }
 
     pub fn hits(&self) -> Vec<Hit> {
-        self.hits.lock().unwrap().clone()
+        self.hits_log.list.lock().unwrap().clone()
     }
 
     /// Fixture hosts resolve to this server; `rebind.test` does too, but is
@@ -346,7 +398,7 @@ async fn serve(
     stream: TcpStream,
     acceptor: TlsAcceptor,
     routes: Arc<Mutex<HashMap<String, Route>>>,
-    hits: Arc<Mutex<Vec<Hit>>>,
+    hits: Arc<HitLog>,
 ) -> std::io::Result<()> {
     let mut tls = acceptor.accept(stream).await?;
     let mut head = Vec::new();
@@ -366,6 +418,7 @@ async fn serve(
     let path = target.split('?').next().unwrap_or_default().to_string();
     let mut host = String::new();
     let mut referer = None;
+    let mut headless = false;
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
             match name.trim().to_ascii_lowercase().as_str() {
@@ -378,11 +431,12 @@ async fn serve(
                         .to_string()
                 }
                 "referer" => referer = Some(value.trim().to_string()),
+                "user-agent" => headless = value.contains("HeadlessChrome"),
                 _ => {}
             }
         }
     }
-    hits.lock().unwrap().push(Hit {
+    hits.push(Hit {
         host: host.clone(),
         path: path.clone(),
         referer: referer.clone(),
@@ -403,6 +457,10 @@ async fn serve(
                 ..Route::ok("text/plain", "forbidden")
             }
         }
+        Some(Route {
+            for_headless: Some(variant),
+            ..
+        }) if headless => (*variant).clone(),
         Some(route) => route,
         None => Route {
             status: 404,
@@ -420,6 +478,9 @@ async fn serve(
     if let Some(location) = &route.location {
         response.push_str(&format!("Location: {location}\r\n"));
     }
+    for (name, value) in &route.headers {
+        response.push_str(&format!("{name}: {value}\r\n"));
+    }
     response.push_str("\r\n");
     tls.write_all(response.as_bytes()).await?;
     if method != "HEAD" {
@@ -434,6 +495,8 @@ pub(crate) struct Fixture {
     pub tools: Tools,
     pub server: Server,
     pub output_dir: PathBuf,
+    /// The diagnostic report of the last job run through this fixture.
+    pub last_report: Mutex<String>,
 }
 
 impl Fixture {
@@ -457,6 +520,7 @@ impl Fixture {
             tools,
             server,
             output_dir,
+            last_report: Mutex::default(),
         })
     }
 
@@ -506,7 +570,8 @@ impl Fixture {
             }
             updates.lock().unwrap().push(update);
         };
-        let result = run_job(environment, &source, token, &report).await;
+        let (result, diagnostics) = run_job(environment, &source, token, &report).await;
+        *self.last_report.lock().unwrap() = diagnostics.render();
         (result, updates.into_inner().unwrap())
     }
 
@@ -942,27 +1007,22 @@ async fn cancellation_stops_the_download_and_cleans_up() {
         "media.test/slow.m3u8",
         Route::playlist(&media_playlist(&["https://media.test/slow/s0.ts"], "")),
     );
-    let started = Instant::now();
-    let (result, _) = fixture
-        .run_with(
-            &fixture.environment(),
-            direct("https://media.test/slow.m3u8"),
-            Some((Stage::DownloadingVideo, Duration::from_secs(3))),
-        )
-        .await;
+    // Cancel while the segment request is in flight (its answer takes 30 s).
+    let source = validate_source(&direct("https://media.test/slow.m3u8")).unwrap();
+    let (handle, token) = cancel_pair();
+    let environment = fixture.environment();
+    let job = run_job(&environment, &source, token, &|_| {});
+    let trigger = async {
+        fixture.server.hits_log.wait_for("/slow/s0.ts").await;
+        handle.cancel();
+        Instant::now()
+    };
+    let ((result, _), cancelled_at) = tokio::join!(job, trigger);
     assert_code(&result, "cancelled");
-    // The segment request was in flight when the job was cancelled.
     assert!(
-        fixture
-            .server
-            .hits()
-            .iter()
-            .any(|hit| hit.path == "/slow/s0.ts")
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(20),
+        cancelled_at.elapsed() < Duration::from_secs(5),
         "{:?}",
-        started.elapsed()
+        cancelled_at.elapsed()
     );
     assert!(fixture.saved_files().is_empty());
     fixture.assert_no_job_dirs();
@@ -1017,6 +1077,7 @@ async fn signed_urls_do_not_outlive_the_download() {
     };
     run_job(&fixture.environment(), &source, token, &report)
         .await
+        .0
         .unwrap();
     let names = seen.lock().unwrap().clone();
     assert!(!names.is_empty(), "the job directory was not inspected");
@@ -1417,4 +1478,388 @@ async fn webrtc_cannot_send_udp_around_the_proxy() {
         );
     }
     assert_no_chrome_left(&fixture).await;
+}
+
+// ------------------------------------------- failure attribution (V1.1 A1/A2)
+
+/// The page as plain HTTP clients (yt-dlp) see it: no player in the HTML.
+const STATIC_PAGE: &str = "<!doctype html><title>Guarded</title><p>player loads later</p>";
+
+/// Incident A1: yt-dlp gets the page, but the site shows headless Chrome a
+/// bot check (Cloudflare: HTTP 403 + `cf-mitigated: challenge`). That is a
+/// refusal, not a page without video, and nothing must be fetched past it.
+#[tokio::test]
+async fn a_bot_check_in_the_browser_is_reported_as_a_refusal() {
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    let challenge = "<!doctype html><title>Just a moment...</title>\
+        <iframe src=\"https://ads.test/turnstile\"></iframe>\
+        <script>fetch('https://ads.test/challenge-platform', {method: 'POST'})</script>";
+    let cases = [
+        (
+            "page.test/bot",
+            Route::status(403, "text/html", challenge).header("cf-mitigated", "challenge"),
+            "host_firewall_block",
+            "document 403 (Cloudflare bot check)",
+        ),
+        (
+            "page.test/forbidden",
+            Route::status(403, "text/html", "<title>Forbidden</title>"),
+            "access_denied",
+            "document 403,",
+        ),
+        (
+            "page.test/busy",
+            Route::status(429, "text/html", "<title>Slow down</title>"),
+            "rate_limited",
+            "document 429,",
+        ),
+        (
+            "page.test/gone",
+            Route::status(404, "text/html", "<title>Not here</title>"),
+            "page_unavailable",
+            "document 404,",
+        ),
+    ];
+    for (key, headless, _, _) in &cases {
+        fixture.server.route(
+            key,
+            Route::html(STATIC_PAGE).headless_gets(headless.clone()),
+        );
+    }
+    let run = |index: usize| {
+        let (key, _, code, evidence) = &cases[index];
+        let fixture = &fixture;
+        async move {
+            let mut environment = fixture.environment();
+            environment.output_dir = fixture.output_dir.join(key.replace('/', "-"));
+            let source = validate_source(&page(&format!("https://{key}"))).unwrap();
+            let (_handle, token) = cancel_pair();
+            let (result, diagnostics) = run_job(&environment, &source, token, &|_| {}).await;
+            (result, diagnostics.render(), *code, *evidence)
+        }
+    };
+    for index in 0..cases.len() {
+        let (result, report, code, evidence) = run(index).await;
+        assert_code(&result, code);
+        assert!(report.contains(evidence), "{evidence} missing:\n{report}");
+        assert!(report.contains("during browsing"), "{report}");
+    }
+    assert!(
+        !fixture
+            .server
+            .hits()
+            .iter()
+            .any(|hit| hit.host == "media.test"),
+        "media was fetched past a refusal"
+    );
+    assert_no_chrome_left(&fixture).await;
+}
+
+/// The player asks for its playlist, but the media server refuses it
+/// (geo-block, expired token): not "no video on this page".
+#[tokio::test]
+async fn a_refused_player_playlist_is_reported_as_such() {
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/geo",
+        Route::html(
+            "<!doctype html><title>Geo</title><script>\
+             fetch('https://media.test/geo/master.m3u8').catch(() => {});\
+             </script>",
+        ),
+    );
+    fixture.server.route(
+        "media.test/geo/master.m3u8",
+        Route::status(403, "application/vnd.apple.mpegurl", "forbidden"),
+    );
+    let (result, _) = fixture.run(page("https://page.test/geo")).await;
+    assert_code(&result, "playlist_access_denied");
+    let report = fixture.last_report.lock().unwrap().clone();
+    assert!(report.contains("(refused 1)"), "{report}");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// The page never arrives in the browser within its budget: a timeout, not
+/// "no video".
+#[tokio::test]
+async fn a_page_that_never_loads_is_a_discovery_timeout() {
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/slow",
+        Route::html(STATIC_PAGE)
+            .headless_gets(Route::html(STATIC_PAGE).delayed(Duration::from_secs(45))),
+    );
+    let (result, _) = fixture.run(page("https://page.test/slow")).await;
+    assert_code(&result, "media_discovery_timeout");
+    let report = fixture.last_report.lock().unwrap().clone();
+    assert!(report.contains("document none"), "{report}");
+    assert_no_chrome_left(&fixture).await;
+}
+
+/// Incident A2: metadata succeeds, then the host refuses the media itself.
+/// The error names the media, not the page, and the report says where.
+#[tokio::test]
+async fn a_refused_media_file_is_attributed_to_the_download() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    // Progressive MP4 on a page (as YouTube serves it) and HLS segments.
+    fixture.server.route(
+        "page.test/progressive",
+        Route::html(
+            "<!doctype html><title>Progressive</title>\
+             <video src=\"https://media.test/locked/video.mp4\"></video>",
+        ),
+    );
+    fixture.server.route(
+        "media.test/locked/video.mp4",
+        Route::status(403, "video/mp4", "forbidden"),
+    );
+    fixture.server.route(
+        "media.test/locked/index.m3u8",
+        Route::playlist(&media_playlist(&["https://media.test/locked/s0.ts"], "")),
+    );
+    fixture.server.route(
+        "media.test/locked/s0.ts",
+        Route::status(403, "video/mp2t", "forbidden"),
+    );
+    for request in [
+        page("https://page.test/progressive"),
+        direct("https://media.test/locked/index.m3u8"),
+    ] {
+        let (result, updates) = fixture.run(request).await;
+        assert_code(&result, "media_access_denied");
+        assert!(
+            updates
+                .iter()
+                .any(|update| update.stage == Stage::DownloadingVideo)
+        );
+        let report = fixture.last_report.lock().unwrap().clone();
+        assert!(report.contains("during downloadingVideo"), "{report}");
+        assert!(report.contains("tool signals: http_403"), "{report}");
+        assert!(report.contains("tools: yt-dlp 20"), "{report}");
+        for secret in ["locked", "session=secret", "watch/1", "s0.ts"] {
+            assert!(!report.contains(secret), "{secret} leaked:\n{report}");
+        }
+        assert!(fixture.saved_files().is_empty());
+        fixture.assert_no_job_dirs();
+    }
+}
+
+#[tokio::test]
+async fn a_rate_limited_playlist_is_reported_as_such() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    fixture.server.route(
+        "media.test/busy.m3u8",
+        Route::status(429, "text/plain", "slow down"),
+    );
+    let (result, _) = fixture.run(direct("https://media.test/busy.m3u8")).await;
+    assert_code(&result, "rate_limited");
+    fixture.assert_no_job_dirs();
+}
+
+/// yt-dlp can start helpers it finds on `PATH` — `phantomjs` (which ignores
+/// the proxy), JavaScript runtimes, FFmpeg. With HighVi's environment it
+/// finds none, while extraction itself still works.
+#[tokio::test]
+async fn yt_dlp_cannot_see_helper_programs() {
+    let Some(tools) = tools() else {
+        return;
+    };
+    let job = temp_directory("helpers");
+    std::fs::create_dir_all(&job).unwrap();
+    crate::ytdlp::prepare_tool_path(&job, find_executable("python3").as_deref())
+        .await
+        .unwrap();
+    let output = Command::new(&tools.yt_dlp)
+        .env_clear()
+        .envs(crate::ytdlp::ytdlp_env(&job))
+        .current_dir(&job)
+        .args([
+            "-v",
+            "--ignore-config",
+            "--no-plugin-dirs",
+            // Nothing listens here; extraction fails without network use.
+            "--proxy",
+            "http://127.0.0.1:9",
+            "--simulate",
+            "--",
+            "https://example.invalid/",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("[debug] exe versions: none"), "{stderr}");
+    assert!(stderr.contains("JS runtimes: none"), "{stderr}");
+    // The wording depends on the HTTP backend; either way nothing was fetched.
+    assert!(stderr.contains("Unable to download webpage"), "{stderr}");
+    let _ = std::fs::remove_dir_all(&job);
+}
+
+/// The Python interpreter a script runs with: `#!/path/python`,
+/// `#!/usr/bin/env python3`, or pip's `#!/bin/sh` + `'''exec' python`
+/// wrapper for long paths.
+fn script_interpreter(head: &str) -> Option<PathBuf> {
+    let mut lines = head.lines();
+    let shebang = lines.next()?.strip_prefix("#!")?;
+    let mut parts = shebang.split_whitespace();
+    let program = parts.next()?;
+    if program.ends_with("/env") {
+        let name = parts.find(|part| !part.starts_with('-'))?;
+        return find_executable(name);
+    }
+    if program == "/bin/sh" {
+        let exec = lines.find_map(|line| line.strip_prefix("'''exec' "))?;
+        let quoted = exec.trim_start();
+        let path = match quoted.strip_prefix('"') {
+            Some(rest) => rest.split('"').next()?,
+            None => quoted.split_whitespace().next()?,
+        };
+        return Some(PathBuf::from(path));
+    }
+    Some(PathBuf::from(program))
+}
+
+#[test]
+fn script_interpreters_are_found_in_every_shebang_style() {
+    assert_eq!(
+        script_interpreter("#!/opt/pipx/venvs/yt-dlp/bin/python\nimport sys"),
+        Some(PathBuf::from("/opt/pipx/venvs/yt-dlp/bin/python"))
+    );
+    assert_eq!(
+        script_interpreter("#! /usr/bin/python3\n"),
+        Some(PathBuf::from("/usr/bin/python3"))
+    );
+    assert_eq!(
+        script_interpreter("#!/bin/sh\n'''exec' \"/very long/bin/python\" \"$0\" \"$@\"\n' '''"),
+        Some(PathBuf::from("/very long/bin/python"))
+    );
+    assert_eq!(
+        script_interpreter("#!/usr/bin/env python3\n"),
+        find_executable("python3")
+    );
+    assert_eq!(script_interpreter("no shebang"), None);
+}
+
+/// yt-dlp also looks for JavaScript runtimes next to its Python interpreter
+/// (`sysconfig` scripts: `/usr/local/bin`, a pipx venv's `bin`), not only on
+/// `PATH`. A fake `deno` placed there must not be found or run.
+#[tokio::test]
+async fn yt_dlp_ignores_js_runtimes_next_to_its_interpreter() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(tools) = tools() else {
+        return;
+    };
+    let Some(python) = find_executable("python3") else {
+        return;
+    };
+    let root = temp_directory("jsruntime");
+    std::fs::create_dir_all(&root).unwrap();
+    // Where the yt_dlp package is: an importable module, or a zipapp.
+    let located = Command::new(&python)
+        .args([
+            "-I",
+            "-c",
+            "import yt_dlp, os; print(os.path.dirname(os.path.dirname(yt_dlp.__file__)))",
+        ])
+        .output()
+        .unwrap();
+    let interpreter_of_tool = std::fs::read(&tools.yt_dlp).unwrap();
+    let package_path = if located.status.success() {
+        PathBuf::from(String::from_utf8_lossy(&located.stdout).trim())
+    } else if interpreter_of_tool
+        .windows(4)
+        .any(|window| window == b"PK\x03\x04")
+    {
+        tools.yt_dlp.clone()
+    } else {
+        // pipx and pip: ask the tool's own interpreter.
+        let head =
+            String::from_utf8_lossy(&interpreter_of_tool[..interpreter_of_tool.len().min(1024)])
+                .into_owned();
+        let interpreter = script_interpreter(&head)
+            .unwrap_or_else(|| panic!("cannot find the interpreter in: {head:?}"));
+        let output = Command::new(&interpreter)
+            .args([
+                "-I",
+                "-c",
+                "import yt_dlp, os; print(os.path.dirname(os.path.dirname(yt_dlp.__file__)))",
+            ])
+            .output()
+            .unwrap_or_else(|error| panic!("{interpreter:?} from {head:?}: {error}"));
+        assert!(output.status.success(), "cannot locate yt_dlp");
+        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+    };
+    let venv = root.join("venv");
+    let created = Command::new(&python)
+        .args(["-m", "venv", "--without-pip"])
+        .arg(&venv)
+        .status()
+        .unwrap();
+    assert!(created.success());
+    let marker = root.join("deno-ran");
+    let deno = venv.join("bin/deno");
+    std::fs::write(
+        &deno,
+        format!(
+            "#!/bin/sh\n/usr/bin/touch '{}'\necho 'deno 2.5.0'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&deno, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let job = root.join("job");
+    std::fs::create_dir_all(&job).unwrap();
+    crate::ytdlp::prepare_tool_path(&job, None).await.unwrap();
+
+    let run = |hermetic: bool| {
+        let mut command = Command::new(venv.join("bin/python3"));
+        command
+            .env_clear()
+            .envs(crate::ytdlp::ytdlp_env(&job))
+            .env("PYTHONPATH", &package_path)
+            .current_dir(&job)
+            .args(["-m", "yt_dlp", "-v"]);
+        if hermetic {
+            command.args(crate::ytdlp::YT_DLP_HERMETIC_ARGS);
+        } else {
+            command.args(["--ignore-config", "--no-plugin-dirs"]);
+        }
+        let output = command
+            .args([
+                "--proxy",
+                "http://127.0.0.1:9",
+                "--simulate",
+                "--",
+                "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+            ])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .find(|line| line.contains("JS runtimes"))
+            .unwrap_or_default()
+            .to_string()
+    };
+    // Control: without HighVi's arguments, yt-dlp does find the fake.
+    let control = run(false);
+    assert!(
+        control.contains("deno"),
+        "control did not find the fake runtime: {control}"
+    );
+    assert!(marker.exists(), "control did not run the fake runtime");
+    std::fs::remove_file(&marker).unwrap();
+    let hermetic = run(true);
+    assert!(hermetic.contains("JS runtimes: none"), "{hermetic}");
+    assert!(!marker.exists(), "the fake deno was run");
+    let _ = std::fs::remove_dir_all(&root);
 }

@@ -24,6 +24,13 @@ const elements = {
   cancelButton: document.querySelector("#cancel-button"),
   errorCard: document.querySelector("#error-card"),
   errorMessage: document.querySelector("#error-message"),
+  errorHint: document.querySelector("#error-hint"),
+  diagnostics: document.querySelector("#diagnostics"),
+  diagnosticsText: document.querySelector("#diagnostics-text"),
+  copyDiagnostics: document.querySelector("#copy-diagnostics"),
+  copyStatus: document.querySelector("#copy-status"),
+  outdatedNote: document.querySelector("#outdated-note"),
+  outdatedMessage: document.querySelector("#outdated-message"),
   cancelledCard: document.querySelector("#cancelled-card"),
   successCard: document.querySelector("#success-card"),
   savedPath: document.querySelector("#saved-path"),
@@ -39,6 +46,7 @@ let lastUpdate = null;
 let lastTitle = null;
 let missingTools = [];
 let browserMissing = false;
+let outdated = null;
 
 const stageKeys = {
   discovering: "progress.discovering",
@@ -115,6 +123,27 @@ function errorText({ error, kind }) {
   return typeof error?.message === "string" && error.message ? error.message : t("error.unknown");
 }
 
+// Rust sends the hint's values; they are short version strings.
+function hintText(hint) {
+  if (hint?.kind !== "updateYtDlp" || typeof hint.installed !== "string") {
+    return "";
+  }
+  return typeof hint.minimum === "string"
+    ? t("hint.updateYtDlp.minimum", { installed: hint.installed, minimum: hint.minimum })
+    : t("hint.updateYtDlp.stale", { installed: hint.installed });
+}
+
+function renderError() {
+  elements.errorMessage.textContent = errorText(lastError);
+  const hint = hintText(lastError.error?.hint);
+  elements.errorHint.textContent = hint;
+  setHidden(elements.errorHint, !hint);
+  const report = typeof lastError.error?.diagnostics === "string" ? lastError.error.diagnostics : "";
+  elements.diagnosticsText.textContent = report;
+  elements.copyStatus.textContent = "";
+  setHidden(elements.diagnostics, !report);
+}
+
 function clearMessages() {
   for (const card of [elements.errorCard, elements.successCard, elements.cancelledCard]) {
     setHidden(card, true);
@@ -124,7 +153,7 @@ function clearMessages() {
 
 function showError(error, source) {
   lastError = { error, kind: sourceKind(source) };
-  elements.errorMessage.textContent = errorText(lastError);
+  renderError();
   setHidden(elements.errorCard, false);
 }
 
@@ -171,6 +200,8 @@ function renderMissingTools() {
     ? t("deps.missing", { tools: missingTools.join(", ") })
     : "";
   setHidden(elements.browserNote, !browserMissing || missingTools.length > 0);
+  setHidden(elements.outdatedNote, !outdated);
+  elements.outdatedMessage.textContent = outdated ? t("deps.outdated", outdated) : "";
 }
 
 listen("job-update", ({ payload }) => {
@@ -187,7 +218,7 @@ document.addEventListener("highvi:language", () => {
   elements.downloadButton.textContent = t(currentJob ? "download.busy" : "download.button");
   elements.cancelButton.textContent = t(elements.cancelButton.disabled ? "cancel.busy" : "cancel.button");
   if (lastError) {
-    elements.errorMessage.textContent = errorText(lastError);
+    renderError();
   }
   if (lastUpdate && currentJob) {
     renderUpdate(lastUpdate);
@@ -248,6 +279,24 @@ elements.cancelButton.addEventListener("click", () => {
   invoke("cancel_job").catch((error) => showError(error, null));
 });
 
+// The report is plain text without URLs; the clipboard API needs the click
+// that triggered it, and a selection is the fallback if it is refused.
+elements.copyDiagnostics.addEventListener("click", async () => {
+  const text = elements.diagnosticsText.textContent;
+  try {
+    await navigator.clipboard.writeText(text);
+    elements.copyStatus.textContent = t("diagnostics.copied");
+  } catch {
+    elements.diagnosticsText.closest("details").open = true;
+    const range = document.createRange();
+    range.selectNodeContents(elements.diagnosticsText);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    elements.copyStatus.textContent = t("diagnostics.copyFailed");
+  }
+});
+
 elements.openFolderButton.addEventListener("click", () => {
   invoke("open_output_folder").catch((error) => showError(error, null));
 });
@@ -259,6 +308,10 @@ invoke("dependency_status")
       ...(status.ffmpeg ? [] : ["FFmpeg"]),
     ];
     browserMissing = !status.browser;
+    outdated =
+      typeof status.ytDlpRecommended === "string" && typeof status.ytDlpVersion === "string"
+        ? { installed: status.ytDlpVersion, recommended: status.ytDlpRecommended }
+        : null;
     renderMissingTools();
   })
   .catch(() => {

@@ -36,6 +36,11 @@
 
       <section id="browser-note" class="notice hidden" data-i18n="deps.browserMissing"></section>
 
+      <section id="outdated-note" class="notice hidden">
+        <p id="outdated-message"></p>
+        <p data-i18n="deps.updateHint"></p>
+      </section>
+
       <section class="notice" data-i18n="notice"></section>
 
       <form id="job-form" class="card">
@@ -123,6 +128,17 @@
       <section id="error-card" class="error-card hidden" role="alert">
         <strong data-i18n="error.title"></strong>
         <p id="error-message"></p>
+        <p id="error-hint" class="hidden"></p>
+        <div id="diagnostics" class="diagnostics hidden">
+          <div class="actions">
+            <button id="copy-diagnostics" type="button" data-i18n="diagnostics.copy"></button>
+            <span id="copy-status" class="hint" aria-live="polite"></span>
+          </div>
+          <details>
+            <summary data-i18n="diagnostics.show"></summary>
+            <pre id="diagnostics-text" tabindex="0"></pre>
+          </details>
+        </div>
       </section>
 
       <section id="cancelled-card" class="notice hidden" aria-live="polite" data-i18n="cancelled.title"></section>

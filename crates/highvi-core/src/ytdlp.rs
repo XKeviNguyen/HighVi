@@ -5,12 +5,21 @@
 //! FFmpeg: yt-dlp would otherwise hand some streams to FFmpeg, which fetches
 //! URLs itself and bypasses the proxy. Runs happen inside the job directory
 //! with relative paths, so no user path is ever parsed as an output template.
+//!
+//! yt-dlp's `PATH` is a private directory holding only a `python3` link, so
+//! it cannot start helper programs installed on the machine: extractors run
+//! `phantomjs` (with no proxy setting) on page JavaScript. JavaScript
+//! runtimes (`deno`, `node`, `bun`) are also searched for next to the Python
+//! interpreter, not only on `PATH`, so they are disabled explicitly with
+//! `--no-js-runtimes`.
 
 use std::{ffi::OsString, path::Path};
 use url::Url;
 
 /// File names inside the job directory.
 pub const INFO_JSON: &str = "info.json";
+/// The directory that is yt-dlp's entire `PATH`.
+pub const TOOL_BIN: &str = "bin";
 /// Never created. Pointing `--ffmpeg-location` here disables FFmpeg in yt-dlp.
 const NO_FFMPEG: &str = "no-ffmpeg";
 
@@ -19,8 +28,8 @@ const SOCKET_TIMEOUT_SECONDS: &str = "20";
 /// Environment variables passed through; everything else is cleared so
 /// ambient Python or yt-dlp settings cannot change its behaviour. Proxy
 /// variables are deliberately absent: the egress proxy is the only route.
+/// `PATH` is replaced by [`TOOL_BIN`].
 pub const YT_DLP_ENV_PASSTHROUGH: &[&str] = &[
-    "PATH",
     "LANG",
     "LC_ALL",
     "LC_CTYPE",
@@ -45,6 +54,7 @@ pub const YT_DLP_HERMETIC_ARGS: &[&str] = &[
     "--no-cookies",
     "--no-cookies-from-browser",
     "--no-cache-dir",
+    "--no-js-runtimes",
     "--color",
     "never",
 ];
@@ -135,6 +145,20 @@ fn push_all(args: &mut Vec<OsString>, values: &[&str]) {
     args.extend(values.iter().map(OsString::from));
 }
 
+/// Creates `<job_dir>/bin` with a link to `python3` and nothing else. The
+/// link serves yt-dlp builds started through `/usr/bin/env python3` (the
+/// upstream zipapp); packaged builds name their interpreter absolutely.
+/// `python` must be the real interpreter, not a shim script that needs
+/// other programs (see `tools::resolve_python`).
+pub async fn prepare_tool_path(job_dir: &Path, python: Option<&Path>) -> std::io::Result<()> {
+    let bin = job_dir.join(TOOL_BIN);
+    tokio::fs::create_dir(&bin).await?;
+    if let Some(python) = python {
+        tokio::fs::symlink(python, bin.join("python3")).await?;
+    }
+    Ok(())
+}
+
 /// The environment for a run in `job_dir`.
 pub fn ytdlp_env(job_dir: &Path) -> Vec<(&'static str, OsString)> {
     let mut env: Vec<(&'static str, OsString)> = YT_DLP_ENV_PASSTHROUGH
@@ -146,6 +170,7 @@ pub fn ytdlp_env(job_dir: &Path) -> Vec<(&'static str, OsString)> {
             .iter()
             .map(|(name, value)| (*name, OsString::from(value))),
     );
+    env.push(("PATH", job_dir.join(TOOL_BIN).into_os_string()));
     env.push(("HOME", job_dir.as_os_str().to_owned()));
     env
 }
@@ -250,11 +275,14 @@ mod tests {
             "no_proxy",
             "NO_PROXY",
             "HOME",
+            "PATH",
         ] {
             assert!(!YT_DLP_ENV_PASSTHROUGH.contains(&dropped), "{dropped}");
         }
         let env = ytdlp_env(Path::new("/job"));
         assert!(env.contains(&("HOME", OsString::from("/job"))));
+        let paths: Vec<_> = env.iter().filter(|(name, _)| *name == "PATH").collect();
+        assert_eq!(paths, [&("PATH", OsString::from("/job/bin"))]);
         assert!(env.contains(&("PYTHONNOUSERSITE", OsString::from("1"))));
     }
 }

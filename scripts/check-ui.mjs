@@ -50,7 +50,7 @@ for (const match of html.matchAll(/data-i18n(?:-aria-label)?="([^"]+)"/g)) {
   }
 }
 const app = readFileSync("ui/app.js", "utf8");
-const keyPattern = /"((?:progress|cancel|cancelled|download|success|deps|error|network)\.[A-Za-z_.]+)"/g;
+const keyPattern = /"((?:progress|cancel|cancelled|download|success|deps|error|network|hint|diagnostics)\.[A-Za-z_.]+)"/g;
 for (const match of app.matchAll(keyPattern)) {
   if (!(match[1] in english)) {
     fail(`app.js uses unknown key ${match[1]}`);

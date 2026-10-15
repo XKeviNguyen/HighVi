@@ -87,7 +87,6 @@ impl EgressStats {
         self.unresolvable.load(Ordering::Relaxed)
     }
 
-    #[cfg(test)]
     pub fn tunnels(&self) -> u64 {
         self.tunnels.load(Ordering::Relaxed)
     }

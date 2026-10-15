@@ -1,8 +1,49 @@
-# HighVi V1 execution ledger
+# HighVi execution ledger
 
-Compact, resumable record of the V1 mission. Newest state first.
+Compact, resumable record. Newest mission first.
+
+# V1.1 mission (started 2026-10-15)
 
 ## Current state
+
+- Base: main @ c990a01 (PRs #2, #3, #4 merged; V1 closed). Branch `feature/v1.1-compat-diagnostics`.
+- Plan (PRs, each: focused tests → Codex review → CI on head → merge):
+  A. compat + diagnostics (A1, A2, helper PATH policy, stage-specific errors, copyable report, CI yt-dlp matrix)
+  B. hardening (stall/deadline, disk space, CDP byte bounds)
+  C. bulk queue: Rust scheduler (max 4, live 1–4) + queue UI + EN/VI/JA (one PR: the UI is the scheduler's only caller)
+  D. release: docs, APT install in disposable container, Wayland/HiDPI, Snap, packages, six breakers
+- Failed gates: —
+
+## Baseline (verified 2026-10-15)
+
+- 97 tests listed in V1 report; CI = check (fmt, clippy, test+e2e, node, ui parity), audit, .deb.
+- Dev box: Ubuntu 26.04, yt-dlp 2026.03.17 (apt), no deno/yt-dlp-ejs, node 22, Chrome (deb), FFmpeg 8,
+  codex-cli 0.154, docker (user in group), session Wayland. 12 GB free disk.
+
+## Incident evidence
+
+- **A2 YouTube 403** (CC-BY Big Buck Bunny, aqz-KE-bpKQ): reproduced with `run_job` harness:
+  metadata OK (2.1 s), `downloadingVideo` → 403. Plain yt-dlp 2026.03.17 without HighVi: same 403
+  (proxy not the cause). Only client without a JS runtime is `ANDROID_VR`; googlevideo returns 403
+  for its URLs (range requests above ~1–2 MiB on audio, unranged on all). Upstream PR #17461
+  (2026.08.19): "Since 2026.08.17, ALL formats are 403'd with android_vr". yt-dlp 2026.08.19
+  (official zipapp, SHA-256 verified, scratch only) uses `visionos`, no JS runtime needed:
+  unmodified HighVi pipeline → 3840×2160 VP9+AAC MP4, 634.6 s, 1.37 GB.
+  HighVi defects: 403 on the media file is reported as "site may block automated downloads";
+  no yt-dlp version detection/advice.
+- **A1 missav.live/ja/dldss-564 `no_media_found`**: ordinary request → 200 (Cloudflare). Page's
+  player is hls.js loading on DOMContentLoaded (no click needed). Sanitised CDP trace in HighVi's
+  headless Chrome (yt-dlp stubbed so nothing could be downloaded): main document **HTTP 403 +
+  Cloudflare challenge** (challenges.cloudflare.com iframe, Turnstile workers); player never runs.
+  HighVi defect: main-document status ignored → misreported as no_media_found. Site-side: bot
+  check against headless browsers — not circumvented (non-goal).
+- **P2.3 helpers**: yt-dlp `PhantomJSwrapper` runs `phantomjs` from PATH with no proxy argument
+  (iqiyi, douyu, pornhub, openload family); deno is auto-used from PATH. HighVi passes the
+  user's PATH → helpers would bypass the egress proxy if installed.
+
+# V1 mission (2026-10-14)
+
+## Final state
 
 - Phase: 6 — release verification. PR #2 merged (de648d3), PR #3 merged (8a1c9bd).
 - Active branch: `feature/v1-docs-packaging` (docs, screenshots, CI audit + .deb job)
