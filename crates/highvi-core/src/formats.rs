@@ -230,7 +230,8 @@ fn estimate(formats: &[Format], selection: &Selection, duration: Option<f64>) ->
         valid(format.filesize)
             .or(valid(format.filesize_approx))
             // tbr is kbit/s.
-            .or_else(|| valid(Some(valid(format.tbr)? * duration? * 125.0)))
+            // Audio-only formats often state only `abr`.
+            .or_else(|| valid(Some(valid(format.tbr.or(format.abr))? * duration? * 125.0)))
     };
     let mut total = size(&selection.video)?;
     if let Some(audio) = &selection.audio {
@@ -672,6 +673,16 @@ mod tests {
                 r#"{"duration":10,"formats":[{"format_id":"h","protocol":"m3u8_native","url":"https://c.example/p.m3u8","tbr":800}]}"#
             ),
             Some(1_000_000)
+        );
+        // Audio that states only `abr` is estimated too.
+        assert_eq!(
+            estimated(
+                r#"{"duration":10,"formats":[
+                  {"format_id":"v","protocol":"m3u8_native","url":"https://c.example/v.m3u8","vcodec":"avc1","acodec":"none","height":720,"tbr":800},
+                  {"format_id":"a","protocol":"m3u8_native","url":"https://c.example/a.m3u8","vcodec":"none","acodec":"mp4a","abr":128}
+                ]}"#
+            ),
+            Some(1_160_000)
         );
         // Unknown, invalid or absurd values give no estimate.
         for raw in [
