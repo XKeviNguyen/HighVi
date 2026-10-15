@@ -569,6 +569,68 @@ fn message_limit(start: &[u8]) -> usize {
     }
 }
 
+#[derive(Debug, Eq, PartialEq)]
+enum Tracked {
+    Yes,
+    /// Ignored by design (no URL, or one longer than any playlist URL).
+    Ignored,
+    /// Not tracked because the limits are reached: worth reporting.
+    OverBudget,
+}
+
+/// Requests being watched, bounded by count and by total URL bytes.
+#[derive(Debug, Default)]
+struct RequestTracker {
+    requests: HashMap<(String, String), Request>,
+    url_bytes: usize,
+}
+
+impl RequestTracker {
+    /// Starts tracking `key`. A redirect reuses its request's key: the old
+    /// URL is dropped whatever happens to the new one, and since a redirect
+    /// adds no request it only has to fit the byte budget, which an equal
+    /// or shorter URL always does.
+    fn start(
+        &mut self,
+        key: (String, String),
+        url: &str,
+        referer: Option<String>,
+        resource_type: &str,
+    ) -> Tracked {
+        let redirected = self.finish(&key).is_some();
+        if url.is_empty() || url.len() > MAX_TRACKED_URL_BYTES {
+            return Tracked::Ignored;
+        }
+        if (!redirected && self.requests.len() >= MAX_TRACKED_REQUESTS)
+            || self.url_bytes + url.len() > MAX_TRACKED_URL_TOTAL
+        {
+            return Tracked::OverBudget;
+        }
+        self.url_bytes += url.len();
+        self.requests.insert(
+            key,
+            Request {
+                url: url.to_string(),
+                referer,
+                resource_type: resource_type.to_string(),
+                want: Want::Nothing,
+            },
+        );
+        Tracked::Yes
+    }
+
+    fn get_mut(&mut self, key: &(String, String)) -> Option<&mut Request> {
+        self.requests.get_mut(key)
+    }
+
+    /// Stops tracking `key` and returns what was known about it.
+    fn finish(&mut self, key: &(String, String)) -> Option<Request> {
+        let request = self.requests.remove(key)?;
+        self.url_bytes -= request.url.len();
+        Some(request)
+    }
+}
+
 #[derive(Debug)]
 struct Request {
     url: String,
@@ -657,9 +719,9 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
     };
     // Chrome names a page's main frame after its target.
     let mut main_document: Option<String> = None;
-    let mut tracked_url_bytes = 0_usize;
+
     let mut sessions: Vec<String> = vec![main.clone()];
-    let mut requests: HashMap<(String, String), Request> = HashMap::new();
+    let mut requests = RequestTracker::default();
     let mut pending_bodies: HashMap<u64, (Url, Option<String>)> = HashMap::new();
     let mut playlist_fetches = 0;
     let mut sniff_fetches = 0;
@@ -800,34 +862,18 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
                     // Redirects keep the ID; a new navigation replaces it.
                     main_document = Some(id.to_string());
                 }
-                let request = &params["request"];
-                let Some(url) = request["url"].as_str() else {
+                let Some(id) = params["requestId"].as_str() else {
                     continue;
                 };
-                if url.len() > MAX_TRACKED_URL_BYTES {
-                    continue;
-                }
-                if requests.len() >= MAX_TRACKED_REQUESTS
-                    || tracked_url_bytes + url.len() > MAX_TRACKED_URL_TOTAL
-                {
+                let request = &params["request"];
+                let tracked = requests.start(
+                    (session, id.to_string()),
+                    request["url"].as_str().unwrap_or_default(),
+                    header(&request["headers"], "referer").and_then(origin_referer),
+                    params["type"].as_str().unwrap_or_default(),
+                );
+                if tracked == Tracked::OverBudget {
                     report.untracked_requests += 1;
-                    continue;
-                }
-                let referer = header(&request["headers"], "referer").and_then(origin_referer);
-                if let Some(id) = params["requestId"].as_str() {
-                    tracked_url_bytes += url.len();
-                    // A redirect reuses the request ID.
-                    if let Some(previous) = requests.insert(
-                        (session, id.to_string()),
-                        Request {
-                            url: url.to_string(),
-                            referer,
-                            resource_type: params["type"].as_str().unwrap_or_default().to_string(),
-                            want: Want::Nothing,
-                        },
-                    ) {
-                        tracked_url_bytes -= previous.url.len();
-                    }
                 }
             }
             "Network.loadingFailed" => {
@@ -839,9 +885,7 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
                     {
                         report.document_failed = true;
                     }
-                    if let Some(removed) = requests.remove(&(session, id.to_string())) {
-                        tracked_url_bytes -= removed.url.len();
-                    }
+                    requests.finish(&(session, id.to_string()));
                 }
             }
             "Network.responseReceived" => {
@@ -899,10 +943,9 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
                     continue;
                 };
                 // Finished: nothing more to learn about this request.
-                let Some(request) = requests.remove(&(session.clone(), id.to_string())) else {
+                let Some(request) = requests.finish(&(session.clone(), id.to_string())) else {
                     continue;
                 };
-                tracked_url_bytes -= request.url.len();
                 let size = params["encodedDataLength"].as_f64().unwrap_or(0.0);
                 let budget = match request.want {
                     Want::Playlist if size <= MAX_PLAYLIST_BYTES => {
@@ -1356,6 +1399,68 @@ mod tests {
         assert!(cdp.dropped() >= 198, "{}", cdp.dropped());
         assert_eq!(cdp.oversized(), 0);
         drop(writer.await.unwrap());
+    }
+
+    #[test]
+    fn redirects_are_followed_even_when_the_tracking_budget_is_full() {
+        let key = |id: usize| ("s".to_string(), id.to_string());
+        let mut tracker = RequestTracker::default();
+        assert_eq!(
+            tracker.start(
+                key(0),
+                "https://c.example/start-of-the-video",
+                None,
+                "Fetch"
+            ),
+            Tracked::Yes
+        );
+        // Fill the byte budget with long URLs.
+        let long = format!(
+            "https://ads.example/?{}",
+            "x".repeat(MAX_TRACKED_URL_BYTES - 64)
+        );
+        let mut id = 1;
+        while tracker.start(key(id), &long, None, "Fetch") == Tracked::Yes {
+            id += 1;
+        }
+        while tracker.start(key(id), "https://ads.example/1", None, "Fetch") == Tracked::Yes {
+            id += 1;
+        }
+        assert_eq!(
+            tracker.start(key(id + 1), "https://c.example/new", None, "Fetch"),
+            Tracked::OverBudget
+        );
+        // The early request is redirected: its new URL replaces the old one.
+        assert_eq!(
+            tracker.start(key(0), "https://c.example/master.m3u8", None, "Fetch"),
+            Tracked::Yes
+        );
+        assert_eq!(
+            tracker.get_mut(&key(0)).unwrap().url,
+            "https://c.example/master.m3u8"
+        );
+        // A redirect to an ignored URL drops the stale entry.
+        assert_eq!(
+            tracker.start(
+                key(0),
+                &"y".repeat(MAX_TRACKED_URL_BYTES + 1),
+                None,
+                "Fetch"
+            ),
+            Tracked::Ignored
+        );
+        assert!(tracker.get_mut(&key(0)).is_none());
+        // Byte accounting matches what is held.
+        let held: usize = tracker
+            .requests
+            .values()
+            .map(|request| request.url.len())
+            .sum();
+        assert_eq!(tracker.url_bytes, held);
+        for index in 1..id {
+            tracker.finish(&key(index));
+        }
+        assert_eq!(tracker.url_bytes, 0);
     }
 
     #[test]
