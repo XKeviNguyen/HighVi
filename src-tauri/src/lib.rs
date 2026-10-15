@@ -1,7 +1,8 @@
 use highvi_core::{
-    AddReport, JobEnvironment, ProgressEvent, PublicError, QueueEvents, QueueSnapshot,
-    RECOMMENDED_YT_DLP, Report, Runner, Scheduler, SharedResources, SourceRequest, YtDlpVersion,
-    find_browser, find_executable, prepare_output_dir, resolve_python, run_job, yt_dlp_version,
+    AddReport, JobEnvironment, MINIMUM_YT_DLP, ProgressEvent, PublicError, QueueEvents,
+    QueueSnapshot, RECOMMENDED_YT_DLP, Report, Runner, Scheduler, SharedResources, SourceRequest,
+    YtDlpVersion, find_browser, find_executable, prepare_output_dir, resolve_python, run_job,
+    yt_dlp_version,
 };
 use serde::Serialize;
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -25,6 +26,8 @@ struct DependencyStatus {
     yt_dlp_version: Option<String>,
     /// Set when yt-dlp is older than the version HighVi is tested with.
     yt_dlp_recommended: Option<String>,
+    /// Set when yt-dlp is too old to run at all (jobs fail until updated).
+    yt_dlp_minimum: Option<String>,
 }
 
 /// Forwards queue changes to the webview. Emitting only queues a message
@@ -121,6 +124,9 @@ async fn dependency_status() -> DependencyStatus {
     let recommended = YtDlpVersion {
         date: RECOMMENDED_YT_DLP,
     };
+    let minimum = YtDlpVersion {
+        date: MINIMUM_YT_DLP,
+    };
     DependencyStatus {
         yt_dlp: yt_dlp.is_some(),
         ffmpeg: find_executable("ffmpeg").is_some(),
@@ -129,6 +135,9 @@ async fn dependency_status() -> DependencyStatus {
         yt_dlp_recommended: version
             .filter(|version| *version < recommended)
             .map(|_| recommended.to_string()),
+        yt_dlp_minimum: version
+            .filter(|version| *version < minimum)
+            .map(|_| minimum.to_string()),
     }
 }
 

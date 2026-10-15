@@ -545,7 +545,15 @@ impl Scheduler {
         let (outcome, diagnostics) = result;
         self.update(|state| {
             state.active -= 1;
-            let missing = matches!(&outcome, Err(error) if error.code == "missing_dependency");
+            // Failures every other queued job would repeat.
+            let doomed = match &outcome {
+                Err(error)
+                    if matches!(error.code.as_str(), "missing_dependency" | "ytdlp_too_old") =>
+                {
+                    Some(error.code.clone())
+                }
+                _ => None,
+            };
             if let Some(item) = state.item(id)
                 && item.attempt == attempt
             {
@@ -571,10 +579,9 @@ impl Scheduler {
                     }
                 }
             }
-            // Every other queued job would fail the same way.
-            if missing {
+            if let Some(code) = doomed {
                 state.started = false;
-                state.paused_by = Some("missing_dependency".to_string());
+                state.paused_by = Some(code);
             }
         });
     }
@@ -1111,6 +1118,22 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), scheduler.shutdown())
             .await
             .expect("a lost slot blocked shutdown");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_too_old_yt_dlp_pauses_the_queue_like_a_missing_tool() {
+        let (scheduler, fake, _) = setup();
+        scheduler.set_concurrency(1).unwrap();
+        scheduler.add(pages(0..3));
+        scheduler.start();
+        until(&scheduler, |snapshot| snapshot.active == 1).await;
+        end(&fake, 0, End::Fail("ytdlp_too_old")).await;
+        until(&scheduler, |snapshot| !snapshot.started).await;
+        assert_eq!(
+            scheduler.snapshot().paused_by.as_deref(),
+            Some("ytdlp_too_old")
+        );
+        assert_eq!(fake.started.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

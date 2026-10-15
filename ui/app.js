@@ -41,6 +41,7 @@ let lastError = null;
 let missingTools = [];
 let browserMissing = false;
 let outdated = null;
+let tooOld = null;
 // Diagnostic reports already fetched, by "id:attempt".
 const reports = new Map();
 
@@ -103,12 +104,14 @@ function showError(error) {
 }
 
 function renderMissingTools() {
-  setHidden(elements.depsCard, missingTools.length === 0);
+  setHidden(elements.depsCard, missingTools.length === 0 && !tooOld);
   elements.depsMessage.textContent = missingTools.length
     ? t("deps.missing", { tools: missingTools.join(", ") })
-    : "";
+    : tooOld
+      ? t("deps.tooOld", tooOld)
+      : "";
   setHidden(elements.browserNote, !browserMissing || missingTools.length > 0);
-  setHidden(elements.outdatedNote, !outdated);
+  setHidden(elements.outdatedNote, !outdated || Boolean(tooOld));
   elements.outdatedMessage.textContent = outdated ? t("deps.outdated", outdated) : "";
 }
 
@@ -360,9 +363,13 @@ function render() {
   else if (!started && counts.queued > 0) parts.push(t("queue.notStarted"));
   elements.queueStatus.textContent = parts.join(" · ");
   elements.queueCounts.textContent = t("queue.counts", counts);
-  setHidden(elements.queuePaused, snapshot.pausedBy !== "missing_dependency");
-  elements.queuePaused.textContent =
-    snapshot.pausedBy === "missing_dependency" ? t("queue.pausedMissing") : "";
+  const pausedKeys = {
+    missing_dependency: "queue.pausedMissing",
+    ytdlp_too_old: "queue.pausedTooOld",
+  };
+  const pausedKey = pausedKeys[snapshot.pausedBy];
+  setHidden(elements.queuePaused, !pausedKey);
+  elements.queuePaused.textContent = pausedKey ? t(pausedKey) : "";
 
   elements.startButton.textContent = t(started ? "queue.pause" : "queue.start");
   elements.startButton.classList.toggle("primary", !started);
@@ -466,6 +473,10 @@ invoke("dependency_status")
     outdated =
       typeof status.ytDlpRecommended === "string" && typeof status.ytDlpVersion === "string"
         ? { installed: status.ytDlpVersion, recommended: status.ytDlpRecommended }
+        : null;
+    tooOld =
+      typeof status.ytDlpMinimum === "string" && typeof status.ytDlpVersion === "string"
+        ? { installed: status.ytDlpVersion, minimum: status.ytDlpMinimum }
         : null;
     renderMissingTools();
   })

@@ -22,6 +22,9 @@ const I18N = (() => {
         "Saved in Downloads/HighVi. If the name is taken, HighVi adds a number. It never writes over a file.",
       "network.hint":
         "Only public https:// links. Home and office network addresses are always blocked, even if the video points to them later.",
+      "deps.tooOld": "Your yt-dlp ({installed}) is too old for HighVi, which needs {minimum} or newer. Downloads will fail until you update it.",
+      "queue.pausedTooOld": "The queue paused because yt-dlp is too old. Update it, then press Start queue.",
+      "error.ytdlp_too_old": "This yt-dlp is too old for HighVi. Update yt-dlp, then try again.",
       "deps.title": "Missing tools",
       "deps.missing": "HighVi needs {tools} to download videos. Install it, then restart HighVi.",
       "deps.hint": "On Ubuntu: sudo apt install yt-dlp ffmpeg",
@@ -183,6 +186,9 @@ const I18N = (() => {
         "File nằm trong Downloads/HighVi. Nếu trùng tên, HighVi thêm số vào sau. Không bao giờ ghi đè lên file đã có.",
       "network.hint":
         "Chỉ nhận link https:// công khai. Địa chỉ mạng trong nhà hay công ty luôn bị chặn, kể cả khi video trỏ tới đó về sau.",
+      "deps.tooOld": "yt-dlp của bạn ({installed}) quá cũ, HighVi cần bản {minimum} hoặc mới hơn. Chưa cập nhật thì sẽ không tải được.",
+      "queue.pausedTooOld": "Hàng chờ đã tạm dừng vì yt-dlp quá cũ. Cập nhật rồi bấm Bắt đầu tải.",
+      "error.ytdlp_too_old": "yt-dlp này quá cũ so với HighVi. Hãy cập nhật yt-dlp rồi thử lại.",
       "deps.title": "Thiếu công cụ",
       "deps.missing": "HighVi cần {tools} để tải video. Hãy cài vào rồi mở lại HighVi.",
       "deps.hint": "Trên Ubuntu: sudo apt install yt-dlp ffmpeg",
@@ -343,6 +349,9 @@ const I18N = (() => {
         "ファイルは Downloads/HighVi に入ります。同じ名前があるときは番号をつけます。上書きはしません。",
       "network.hint":
         "公開されている https:// のリンクだけ使えます。家や会社のネットワークの住所は、あとから動画がそこを指しても、いつもブロックします。",
+      "deps.tooOld": "お使いの yt-dlp（{installed}）は古すぎます。HighVi には {minimum} 以降が必要です。更新するまでダウンロードできません。",
+      "queue.pausedTooOld": "yt-dlp が古すぎるので、キューを一時停止しました。更新してから「キューを開始」をおしてください。",
+      "error.ytdlp_too_old": "この yt-dlp は HighVi には古すぎます。yt-dlp を更新してから、もう一度ためしてください。",
       "deps.title": "道具が足りません",
       "deps.missing": "動画をダウンロードするには {tools} が必要です。入れてから、HighVi を開きなおしてください。",
       "deps.hint": "Ubuntu では：sudo apt install yt-dlp ffmpeg",

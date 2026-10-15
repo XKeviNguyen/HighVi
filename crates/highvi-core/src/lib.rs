@@ -41,7 +41,7 @@ pub use queue::{
     ProgressEvent, QueueEvents, QueueSnapshot, Report, Runner, Scheduler,
 };
 pub use source::{SourceKind, SourceRequest, ValidatedSource, referer_origin, validate_source};
-pub use tools::{RECOMMENDED_YT_DLP, YtDlpVersion, resolve_python, yt_dlp_version};
+pub use tools::{MINIMUM_YT_DLP, RECOMMENDED_YT_DLP, YtDlpVersion, resolve_python, yt_dlp_version};
 pub use validation::{
     suggested_filename, validate_page_url, validate_playlist_url, validate_referer_page_url,
 };

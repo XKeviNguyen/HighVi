@@ -2397,3 +2397,57 @@ async fn queue_concurrency_profile() {
     );
     fixture.assert_no_job_dirs();
 }
+
+/// Ubuntu 24.04's APT yt-dlp (2024.04.09) does not know options HighVi's
+/// isolation needs. It is identified, and jobs fail with advice to update
+/// instead of a generic yt-dlp failure.
+#[tokio::test]
+async fn a_too_old_yt_dlp_is_named_and_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let directory = temp_directory("old-ytdlp");
+    std::fs::create_dir_all(&directory).unwrap();
+    let fake = directory.join("yt-dlp");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         for arg in \"$@\"; do case \"$arg\" in --no-plugin-dirs|--no-js-runtimes)\n\
+           echo 'Usage: yt-dlp [OPTIONS] URL [URL...]' >&2\n\
+           echo \"yt-dlp: error: no such option: $arg\" >&2; exit 2;; esac; done\n\
+         for arg in \"$@\"; do [ \"$arg\" = --version ] && { echo 2024.04.09; exit 0; }; done\n\
+         exit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        crate::yt_dlp_version(&fake, None)
+            .await
+            .map(|version| version.to_string()),
+        Some("2024.04.09".to_string())
+    );
+    let mut environment = fixture.environment();
+    environment.yt_dlp = fake;
+    let (result, _) = fixture
+        .run_with(&environment, page("https://page.test/anything"), None)
+        .await;
+    let error = result.unwrap_err();
+    assert_eq!(error.code, "ytdlp_too_old");
+    assert_eq!(
+        error.hint,
+        Some(crate::Hint::UpdateYtDlp {
+            installed: "2024.04.09".into(),
+            minimum: Some("2026.08.19".into())
+        })
+    );
+    assert!(
+        !fixture
+            .server
+            .hits()
+            .iter()
+            .any(|hit| hit.host == "page.test")
+    );
+    fixture.assert_no_job_dirs();
+    let _ = std::fs::remove_dir_all(&directory);
+}
