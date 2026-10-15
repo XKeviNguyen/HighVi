@@ -109,6 +109,54 @@ pub struct BrowserFinding {
     pub title: Option<String>,
     /// Only DRM-signalling playlists were seen.
     pub drm_only: bool,
+    pub page: PageReport,
+}
+
+/// What happened to the page, without any URL: enough to tell "the site
+/// refused the browser" from "the page had no video" from "too slow".
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PageReport {
+    /// HTTP status of the main document's last response.
+    pub document_status: Option<u16>,
+    /// The main document was a Cloudflare challenge (`cf-mitigated: challenge`).
+    pub bot_check: bool,
+    /// The main document never arrived (network error, refused by the proxy).
+    pub document_failed: bool,
+    pub loaded: bool,
+    pub played: bool,
+    pub frames: usize,
+    pub workers: usize,
+    pub requests: usize,
+    /// Responses typed as audio, video or HLS.
+    pub media_responses: usize,
+    pub playlists: usize,
+    /// Playlist requests (by name or type) the server answered with 4xx.
+    pub refused_playlists: usize,
+    pub ended: Ended,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Ended {
+    /// Candidates were found and no new ones followed.
+    #[default]
+    Settled,
+    /// Nothing appeared within a few seconds of starting the players.
+    GaveUp,
+    /// The page budget ran out.
+    Deadline,
+    /// Chrome exited or the page crashed.
+    BrowserGone,
+}
+
+impl Ended {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Settled => "settled",
+            Self::GaveUp => "gave_up_after_play",
+            Self::Deadline => "page_budget",
+            Self::BrowserGone => "browser_gone",
+        }
+    }
 }
 
 pub struct BrowserRun<'a> {
@@ -487,6 +535,12 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
 
     let started = Instant::now();
     let deadline = started + PAGE_BUDGET;
+    let mut report = PageReport {
+        ended: Ended::Deadline,
+        ..PageReport::default()
+    };
+    // Chrome names a page's main frame after its target.
+    let mut main_document: Option<String> = None;
     let mut sessions: Vec<String> = vec![main.clone()];
     let mut requests: HashMap<(String, String), Request> = HashMap::new();
     let mut pending_bodies: HashMap<u64, (Url, Option<String>)> = HashMap::new();
@@ -506,6 +560,7 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
             && now >= found + SETTLE
             && pending_bodies.is_empty()
         {
+            report.ended = Ended::Settled;
             break;
         }
         let nothing_yet = observation.playlists.is_empty() && pending_bodies.is_empty();
@@ -513,6 +568,7 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
             && nothing_yet
             && now >= at + GIVE_UP_AFTER_PLAY
         {
+            report.ended = Ended::GaveUp;
             break;
         }
         let play_at = loaded_at.map_or(started + PLAY_WITHOUT_LOAD, |at| at + PLAY_AFTER_LOAD);
@@ -552,6 +608,7 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
             if observation.playlists.is_empty() {
                 return Err(browser_failed());
             }
+            report.ended = Ended::BrowserGone;
             break;
         };
 
@@ -582,6 +639,11 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
                     continue;
                 };
                 let kind = params["targetInfo"]["type"].as_str().unwrap_or_default();
+                match kind {
+                    "iframe" => report.frames += 1,
+                    "worker" | "shared_worker" | "service_worker" => report.workers += 1,
+                    _ => {}
+                }
                 if sessions.len() < MAX_SESSIONS
                     && matches!(
                         kind,
@@ -607,8 +669,20 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
             "Page.loadEventFired" if session == main => {
                 loaded_at.get_or_insert_with(Instant::now);
             }
-            "Inspector.targetCrashed" | "Inspector.detached" if session == main => break,
+            "Inspector.targetCrashed" | "Inspector.detached" if session == main => {
+                report.ended = Ended::BrowserGone;
+                break;
+            }
             "Network.requestWillBeSent" => {
+                report.requests += 1;
+                if session == main
+                    && params["type"].as_str() == Some("Document")
+                    && params["frameId"].as_str() == Some(target_id.as_str())
+                    && let Some(id) = params["requestId"].as_str()
+                {
+                    // Redirects keep the ID; a new navigation replaces it.
+                    main_document = Some(id.to_string());
+                }
                 if requests.len() >= MAX_TRACKED_REQUESTS {
                     continue;
                 }
@@ -634,6 +708,13 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
             }
             "Network.loadingFailed" => {
                 if let Some(id) = params["requestId"].as_str() {
+                    // A navigation that replaces the document cancels it.
+                    if session == main
+                        && main_document.as_deref() == Some(id)
+                        && params["canceled"].as_bool() != Some(true)
+                    {
+                        report.document_failed = true;
+                    }
                     requests.remove(&(session, id.to_string()));
                 }
             }
@@ -641,23 +722,37 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
                 let Some(id) = params["requestId"].as_str() else {
                     continue;
                 };
-                let Some(request) = requests.get_mut(&(session.clone(), id.to_string())) else {
-                    continue;
-                };
                 let response = &params["response"];
+                if session == main && main_document.as_deref() == Some(id) {
+                    report.document_status = response["status"]
+                        .as_u64()
+                        .and_then(|status| u16::try_from(status).ok());
+                    report.bot_check = header(&response["headers"], "cf-mitigated")
+                        .is_some_and(|value| value.trim().eq_ignore_ascii_case("challenge"));
+                    report.document_failed = false;
+                }
                 let status = response["status"].as_u64().unwrap_or(0);
                 let mime = response["mimeType"]
                     .as_str()
                     .unwrap_or_default()
                     .to_ascii_lowercase();
+                let by_type = HLS_MIME_TYPES.contains(&mime.as_str());
+                if mime.starts_with("video/") || mime.starts_with("audio/") || by_type {
+                    report.media_responses += 1;
+                }
+                let Some(request) = requests.get_mut(&(session.clone(), id.to_string())) else {
+                    continue;
+                };
                 let Ok(url) = Url::parse(&request.url) else {
                     continue;
                 };
+                let by_name = url.path().to_ascii_lowercase().ends_with(".m3u8");
+                if (by_name || by_type) && (400..500).contains(&status) {
+                    report.refused_playlists += 1;
+                }
                 if !(200..300).contains(&status) || status == 204 || url.scheme() != "https" {
                     continue;
                 }
-                let by_name = url.path().to_ascii_lowercase().ends_with(".m3u8");
-                let by_type = HLS_MIME_TYPES.contains(&mime.as_str());
                 let sniffable = SNIFF_MIME_TYPES.contains(&mime.as_str())
                     && matches!(
                         request.resource_type.as_str(),
@@ -735,11 +830,15 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
     })
     .filter(|title| !title.is_empty());
 
+    report.loaded = loaded_at.is_some();
+    report.played = played_at.is_some();
+    report.playlists = observation.playlists.len();
     let (candidates, drm_only) = rank(&observation.playlists);
     Ok(BrowserFinding {
         candidates,
         title,
         drm_only,
+        page: report,
     })
 }
 

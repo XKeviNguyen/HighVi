@@ -111,6 +111,25 @@ const I18N = (() => {
       "error.output_publish_failed":
         "The video finished, but HighVi couldn't move it into its folder.",
       "error.open_folder_failed": "HighVi couldn't open the folder.",
+      "error.playlist_access_denied":
+        "The page's player found the video, but the video server said no (HTTP 403). HighVi doesn't use your logins or get around locks.",
+      "error.media_access_denied":
+        "The website showed HighVi the video, but then refused to send the video file (HTTP 403).",
+      "error.rate_limited": "The website says HighVi asked too often (HTTP 429). Wait a while, then try again.",
+      "error.page_unavailable": "The page didn't open in HighVi's private browser. Check the link.",
+      "error.media_discovery_timeout":
+        "The page took too long to open in HighVi's private browser, so no video was found. Try again later.",
+      "hint.updateYtDlp.minimum":
+        "Your yt-dlp is {installed}. This needs {minimum} or newer: websites change, and old versions stop working. Update yt-dlp, then try again.",
+      "hint.updateYtDlp.stale":
+        "Your yt-dlp ({installed}) is more than 90 days old. Websites change, and old versions stop working. Update yt-dlp, then try again.",
+      "diagnostics.copy": "Copy diagnostics",
+      "diagnostics.copied": "Copied.",
+      "diagnostics.copyFailed": "Couldn't copy. Select the text below and copy it.",
+      "diagnostics.show": "Show diagnostics (no links, cookies or passwords)",
+      "deps.outdated":
+        "Your yt-dlp ({installed}) is older than {recommended}, the version HighVi is tested with. Some sites, like YouTube, won't work.",
+      "deps.updateHint": "To update on Ubuntu: sudo apt install pipx, then pipx install yt-dlp, then restart HighVi.",
     },
 
     vi: {
@@ -218,6 +237,25 @@ const I18N = (() => {
       "error.output_publish_failed":
         "Video đã tải xong nhưng HighVi không chuyển được vào thư mục.",
       "error.open_folder_failed": "HighVi không mở được thư mục.",
+      "error.playlist_access_denied":
+        "Trình phát của trang đã tìm thấy video, nhưng máy chủ video từ chối (HTTP 403). HighVi không dùng tài khoản của bạn và không phá khóa.",
+      "error.media_access_denied":
+        "Trang web cho HighVi xem thông tin video, nhưng lại không chịu gửi file video (HTTP 403).",
+      "error.rate_limited": "Trang web bảo HighVi hỏi quá nhiều lần (HTTP 429). Đợi một lúc rồi thử lại.",
+      "error.page_unavailable": "Trang không mở được trong trình duyệt riêng của HighVi. Hãy kiểm tra lại link.",
+      "error.media_discovery_timeout":
+        "Trang mở quá lâu trong trình duyệt riêng của HighVi nên chưa tìm được video. Thử lại sau nhé.",
+      "hint.updateYtDlp.minimum":
+        "yt-dlp của bạn là bản {installed}. Cần bản {minimum} hoặc mới hơn: trang web hay thay đổi, bản cũ sẽ ngừng chạy. Hãy cập nhật yt-dlp rồi thử lại.",
+      "hint.updateYtDlp.stale":
+        "yt-dlp của bạn ({installed}) đã cũ hơn 90 ngày. Trang web hay thay đổi, bản cũ sẽ ngừng chạy. Hãy cập nhật yt-dlp rồi thử lại.",
+      "diagnostics.copy": "Sao chép thông tin chẩn đoán",
+      "diagnostics.copied": "Đã sao chép.",
+      "diagnostics.copyFailed": "Không sao chép được. Hãy bôi đen đoạn chữ bên dưới rồi sao chép.",
+      "diagnostics.show": "Xem thông tin chẩn đoán (không có link, cookie hay mật khẩu)",
+      "deps.outdated":
+        "yt-dlp của bạn ({installed}) cũ hơn bản {recommended} mà HighVi đã thử. Một số trang, như YouTube, sẽ không tải được.",
+      "deps.updateHint": "Cập nhật trên Ubuntu: sudo apt install pipx, rồi pipx install yt-dlp, rồi mở lại HighVi.",
     },
 
     ja: {
@@ -328,6 +366,25 @@ const I18N = (() => {
       "error.mux_failed": "映像と音声を MP4 にまとめられなかったので、何も保存していません。",
       "error.output_publish_failed": "動画はできましたが、HighVi がフォルダーに移せませんでした。",
       "error.open_folder_failed": "フォルダーを開けませんでした。",
+      "error.playlist_access_denied":
+        "ページのプレーヤーは動画を見つけましたが、動画のサーバーにことわられました（HTTP 403）。HighVi はログイン情報を使わず、ロックもやぶりません。",
+      "error.media_access_denied":
+        "サイトは動画の情報を見せてくれましたが、動画ファイルを送ることはことわられました（HTTP 403）。",
+      "error.rate_limited": "アクセスが多すぎるとサイトに言われました（HTTP 429）。しばらく待ってから、もう一度ためしてください。",
+      "error.page_unavailable": "HighVi の専用ブラウザーでページを開けませんでした。リンクを確かめてください。",
+      "error.media_discovery_timeout":
+        "HighVi の専用ブラウザーでページを開くのに時間がかかりすぎて、動画を見つけられませんでした。あとでもう一度ためしてください。",
+      "hint.updateYtDlp.minimum":
+        "お使いの yt-dlp は {installed} です。{minimum} 以降が必要です。サイトは変わるので、古いバージョンは動かなくなります。yt-dlp を更新してから、もう一度ためしてください。",
+      "hint.updateYtDlp.stale":
+        "お使いの yt-dlp（{installed}）は 90 日以上前のものです。サイトは変わるので、古いバージョンは動かなくなります。yt-dlp を更新してから、もう一度ためしてください。",
+      "diagnostics.copy": "診断情報をコピー",
+      "diagnostics.copied": "コピーしました。",
+      "diagnostics.copyFailed": "コピーできませんでした。下の文字を選んでコピーしてください。",
+      "diagnostics.show": "診断情報を見る（リンク・クッキー・パスワードはふくみません）",
+      "deps.outdated":
+        "お使いの yt-dlp（{installed}）は、HighVi がテストした {recommended} より古いです。YouTube など、いくつかのサイトは使えません。",
+      "deps.updateHint": "Ubuntu での更新：sudo apt install pipx のあと pipx install yt-dlp を実行し、HighVi を開きなおしてください。",
     },
   };
 

@@ -6,8 +6,9 @@
 
 use crate::{
     PublicError, SourceKind, ToolSignals, ValidatedSource,
-    browser::{BrowserRun, discover_in_browser},
-    classify_tool_failure,
+    browser::{BrowserFinding, BrowserRun, discover_in_browser},
+    classify::{FetchTarget, signals_from_output},
+    diagnostics::Diagnostics,
     egress::{EgressProxy, EgressStats, RefusalCounts, Resolver},
     filesystem::{
         JobDir, cleanup_stale_jobs, output_dir_error, prepare_output_dir, publish_unique,
@@ -15,11 +16,13 @@ use crate::{
     formats::{MediaInfo, select_media},
     mux::{MuxInput, SNIFF_BYTES, mux_args, sniff},
     process::{CancelToken, RunError, run_captured, run_streaming, tool_command},
-    ytdlp::{INFO_JSON, YtDlpPolicy, ytdlp_env},
+    tools::{extractor_related, today, update_advice},
+    ytdlp::{INFO_JSON, YtDlpPolicy, prepare_tool_path, ytdlp_env},
 };
 use serde::Serialize;
 use std::{
     path::{Path, PathBuf},
+    sync::Mutex,
     time::Duration,
 };
 use tokio::io::AsyncReadExt;
@@ -37,6 +40,8 @@ pub struct JobEnvironment {
     /// Chrome/Chromium for pages whose player is built by JavaScript.
     /// Without it, those pages fail as yt-dlp reports them.
     pub chrome: Option<PathBuf>,
+    /// Linked into yt-dlp's private `PATH` for builds that need it.
+    pub python: Option<PathBuf>,
     /// The fixed output directory, e.g. `~/Downloads/HighVi`.
     pub output_dir: PathBuf,
     #[cfg(test)]
@@ -54,6 +59,7 @@ impl JobEnvironment {
             yt_dlp,
             ffmpeg,
             chrome,
+            python: find_executable("python3"),
             output_dir,
             #[cfg(test)]
             fixture: None,
@@ -120,60 +126,82 @@ pub struct JobOutcome {
     pub title: String,
 }
 
+/// Runs one job. On failure the diagnostics describe what happened, in a
+/// form that is safe to show and copy (see [`Diagnostics::render`]).
 pub async fn run_job(
+    env: &JobEnvironment,
+    source: &ValidatedSource,
+    cancel: CancelToken,
+    report: &(dyn Fn(JobUpdate) + Send + Sync),
+) -> (Result<JobOutcome, PublicError>, Diagnostics) {
+    let recorder = Mutex::new(Diagnostics::new(source));
+    let tracked = |update: JobUpdate| {
+        record(&recorder, |diagnostics| diagnostics.enter(update.stage));
+        report(update);
+    };
+    let result = Box::pin(run(env, source, cancel, &tracked, &recorder)).await;
+    let mut diagnostics = recorder
+        .into_inner()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let result = match result {
+        Ok(outcome) => Ok(outcome),
+        Err(mut error) => {
+            if error.code != "cancelled" {
+                diagnostics.collect_tools(env).await;
+                if extractor_related(&error.code)
+                    && let Some(installed) = diagnostics.yt_dlp
+                {
+                    error.hint = update_advice(installed, diagnostics.site(), today());
+                }
+            }
+            diagnostics.finish(&error);
+            Err(error)
+        }
+    };
+    (result, diagnostics)
+}
+
+/// Updates the job's diagnostics. The lock is never held across an await.
+fn record(recorder: &Mutex<Diagnostics>, update: impl FnOnce(&mut Diagnostics)) {
+    update(
+        &mut recorder
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    );
+}
+
+async fn run(
     env: &JobEnvironment,
     source: &ValidatedSource,
     mut cancel: CancelToken,
     report: &(dyn Fn(JobUpdate) + Send + Sync),
+    recorder: &Mutex<Diagnostics>,
 ) -> Result<JobOutcome, PublicError> {
     report(JobUpdate::stage(Stage::Discovering));
     prepare_output_dir(&env.output_dir).await?;
     cleanup_stale_jobs(&env.output_dir).await;
     let mut job = JobDir::create(&env.output_dir).await?;
+    prepare_tool_path(job.path(), env.python.as_deref())
+        .await
+        .map_err(|_| output_dir_error())?;
     let proxy = EgressProxy::start_with(env.resolver()).await.map_err(|_| {
         PublicError::new("proxy_failed", "HighVi could not start its network guard.")
     })?;
-    let proxy_url = proxy.url();
-
-    let discovered = Box::pin(discover(env, &job, &proxy, source, &mut cancel, report)).await?;
-    let media = discovered.media;
-    report(JobUpdate {
-        title: Some(media.title.clone()),
-        ..JobUpdate::stage(Stage::Discovering)
-    });
-    tokio::fs::write(job.path().join(INFO_JSON), &media.info_json)
-        .await
-        .map_err(|_| output_dir_error())?;
-
-    let policy = env.policy(&proxy_url, discovered.referer.as_deref());
-    let tracks = [
-        Some((
-            media.selection.video.as_str(),
-            "video",
-            Stage::DownloadingVideo,
-        )),
-        media
-            .selection
-            .audio
-            .as_deref()
-            .map(|id| (id, "audio", Stage::DownloadingAudio)),
-    ];
-    for (format_id, stem, stage) in tracks.into_iter().flatten() {
-        Box::pin(download_track(
-            env,
-            &job,
-            &policy,
-            format_id,
-            stem,
-            stage,
-            source.kind(),
-            proxy.stats(),
-            &mut cancel,
-            report,
-        ))
-        .await?;
-    }
+    let result = Box::pin(fetch(
+        env,
+        &job,
+        &proxy,
+        source,
+        &mut cancel,
+        report,
+        recorder,
+    ))
+    .await;
+    let refused = proxy.stats().counts();
+    let tunnels = proxy.stats().tunnels();
+    record(recorder, |diagnostics| diagnostics.egress(tunnels, refused));
     drop(proxy);
+    let media = result?;
     // The info JSON holds the media URLs, which may be signed; nothing after
     // this point needs it, and a kept recovery directory must not hold it.
     let _ = tokio::fs::remove_file(job.path().join(INFO_JSON)).await;
@@ -222,6 +250,62 @@ pub async fn run_job(
     }
 }
 
+/// Everything that needs the network: discovery and the track downloads.
+async fn fetch(
+    env: &JobEnvironment,
+    job: &JobDir,
+    proxy: &EgressProxy,
+    source: &ValidatedSource,
+    cancel: &mut CancelToken,
+    report: &(dyn Fn(JobUpdate) + Send + Sync),
+    recorder: &Mutex<Diagnostics>,
+) -> Result<MediaInfo, PublicError> {
+    let proxy_url = proxy.url();
+    let discovered = Box::pin(discover(env, job, proxy, source, cancel, report, recorder)).await?;
+    let media = discovered.media;
+    record(recorder, |diagnostics| {
+        diagnostics.media(media.extractor.as_deref(), media.summary.clone());
+    });
+    report(JobUpdate {
+        title: Some(media.title.clone()),
+        ..JobUpdate::stage(Stage::Discovering)
+    });
+    tokio::fs::write(job.path().join(INFO_JSON), &media.info_json)
+        .await
+        .map_err(|_| output_dir_error())?;
+
+    let policy = env.policy(&proxy_url, discovered.referer.as_deref());
+    let tracks = [
+        Some((
+            media.selection.video.as_str(),
+            "video",
+            Stage::DownloadingVideo,
+        )),
+        media
+            .selection
+            .audio
+            .as_deref()
+            .map(|id| (id, "audio", Stage::DownloadingAudio)),
+    ];
+    for (format_id, stem, stage) in tracks.into_iter().flatten() {
+        Box::pin(download_track(
+            env,
+            job,
+            &policy,
+            format_id,
+            stem,
+            stage,
+            source.kind(),
+            proxy.stats(),
+            cancel,
+            report,
+            recorder,
+        ))
+        .await?;
+    }
+    Ok(media)
+}
+
 /// What discovery settled on, and the Referer its media needs.
 struct Discovered {
     media: MediaInfo,
@@ -237,6 +321,7 @@ async fn discover(
     source: &ValidatedSource,
     cancel: &mut CancelToken,
     report: &(dyn Fn(JobUpdate) + Send + Sync),
+    recorder: &Mutex<Diagnostics>,
 ) -> Result<Discovered, PublicError> {
     let proxy_url = proxy.url();
     let referer = source.discovery_referer();
@@ -245,9 +330,10 @@ async fn discover(
         job,
         &env.policy(&proxy_url, referer.as_deref()),
         source.discovery_target(),
-        source.kind(),
+        (source.kind(), FetchTarget::Source),
         proxy.stats(),
         cancel,
+        recorder,
     )
     .await;
     let error = match first {
@@ -287,31 +373,26 @@ async fn discover(
         Err(browser) if browser.code == "browser_unavailable" => return Err(error),
         Err(browser) => return Err(browser),
     };
+    record(recorder, |diagnostics| {
+        diagnostics.page(finding.page.clone())
+    });
     if finding.candidates.is_empty() {
-        return Err(if finding.drm_only {
-            PublicError::new(
-                "drm_not_supported",
-                "This media reports DRM protection. HighVi will not bypass DRM or access controls.",
-            )
-        } else {
-            PublicError::new(
-                "no_media_found",
-                "HighVi opened the page in an isolated browser, but no video stream appeared.",
-            )
-        });
+        return Err(empty_browser_result(&finding));
     }
 
     report(JobUpdate::stage(Stage::Discovering));
     let mut last_error = error;
     for candidate in finding.candidates {
+        record(recorder, Diagnostics::candidate_checked);
         let checked = probe(
             env,
             job,
             &env.policy(&proxy_url, candidate.referer.as_deref()),
             &candidate.url,
-            SourceKind::Page,
+            (SourceKind::Page, FetchTarget::BrowserPlaylist),
             proxy.stats(),
             cancel,
+            recorder,
         )
         .await;
         match checked {
@@ -333,6 +414,55 @@ async fn discover(
     Err(last_error)
 }
 
+/// Why the browser found nothing. A page the site refused to show (bot
+/// check, 403) is reported as a refusal, which HighVi does not work around,
+/// rather than as a page without video.
+fn empty_browser_result(finding: &BrowserFinding) -> PublicError {
+    let page = &finding.page;
+    if finding.drm_only {
+        return PublicError::new(
+            "drm_not_supported",
+            "This media reports DRM protection. HighVi will not bypass DRM or access controls.",
+        );
+    }
+    if page.bot_check {
+        return PublicError::new(
+            "host_firewall_block",
+            "The site showed HighVi's isolated browser a Cloudflare bot check instead of the page. HighVi does not use browser sessions or get past bot checks.",
+        );
+    }
+    match page.document_status {
+        Some(401 | 403 | 451) => PublicError::new(
+            "access_denied",
+            "The site refused to show the page to HighVi's isolated browser (HTTP 403). HighVi does not use browser sessions or bypass bot protection.",
+        ),
+        Some(429) => PublicError::new(
+            "rate_limited",
+            "The site reports too many requests (HTTP 429). Wait a while before trying again.",
+        ),
+        Some(status) if status >= 400 => PublicError::new(
+            "page_unavailable",
+            format!("The page did not load in the isolated browser (HTTP {status})."),
+        ),
+        _ if page.document_failed => PublicError::new(
+            "page_unavailable",
+            "The page did not load in the isolated browser.",
+        ),
+        _ if page.refused_playlists > 0 => PublicError::new(
+            "playlist_access_denied",
+            "The page's player asked for a video playlist, but its server refused (HTTP 4xx). HighVi does not use browser sessions or bypass access controls.",
+        ),
+        None => PublicError::new(
+            "media_discovery_timeout",
+            "The page did not arrive in the isolated browser in time, so no video could be found.",
+        ),
+        _ => PublicError::new(
+            "no_media_found",
+            "HighVi opened the page in an isolated browser, but no video stream appeared.",
+        ),
+    }
+}
+
 /// yt-dlp failures that mean "nothing found here", as opposed to a refusal
 /// (blocked address, sign-in, DRM, 403…) that a browser must not work around.
 fn worth_a_browser(error: &PublicError) -> bool {
@@ -343,14 +473,16 @@ fn worth_a_browser(error: &PublicError) -> bool {
 }
 
 /// Runs yt-dlp's metadata extraction on `target` and picks formats.
+#[allow(clippy::too_many_arguments)]
 async fn probe(
     env: &JobEnvironment,
     job: &JobDir,
     policy: &YtDlpPolicy<'_>,
     target: &url::Url,
-    kind: SourceKind,
+    (kind, fetching): (SourceKind, FetchTarget),
     stats: &EgressStats,
     cancel: &mut CancelToken,
+    recorder: &Mutex<Diagnostics>,
 ) -> Result<MediaInfo, PublicError> {
     let before = stats.counts();
     let mut command = tool_command(
@@ -369,10 +501,13 @@ async fn probe(
     .await
     .map_err(|error| run_error(error, "yt-dlp", "discovery_timeout"))?;
 
+    let signals = signals_from_output(&String::from_utf8_lossy(&captured.stderr.bytes));
+    record(recorder, |diagnostics| {
+        diagnostics.signals(signals.labels())
+    });
     if !captured.success {
-        let output = String::from_utf8_lossy(&captured.stderr.bytes);
         return Err(network_refusal(stats.counts().since(before))
-            .unwrap_or_else(|| classify_tool_failure(&output, kind)));
+            .unwrap_or_else(|| signals.classify(kind, fetching)));
     }
     // Oversized stderr is only truncated diagnostics; oversized metadata is unsafe.
     if captured.stdout.overflowed {
@@ -396,6 +531,7 @@ async fn download_track(
     stats: &EgressStats,
     cancel: &mut CancelToken,
     report: &(dyn Fn(JobUpdate) + Send + Sync),
+    recorder: &Mutex<Diagnostics>,
 ) -> Result<(), PublicError> {
     report(JobUpdate::stage(stage));
     let before = stats.counts();
@@ -414,10 +550,12 @@ async fn download_track(
     })
     .await
     .map_err(|error| run_error(error, "yt-dlp", "network_timeout"))?;
+    record(recorder, |diagnostics| {
+        diagnostics.signals(signals.labels())
+    });
     if !success {
-        return Err(
-            network_refusal(stats.counts().since(before)).unwrap_or_else(|| signals.classify(kind))
-        );
+        return Err(network_refusal(stats.counts().since(before))
+            .unwrap_or_else(|| signals.classify(kind, FetchTarget::Media)));
     }
     Ok(())
 }

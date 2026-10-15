@@ -26,6 +26,10 @@ pub struct MediaInfo {
     /// The single-video info JSON handed back to yt-dlp via
     /// `--load-info-json`, so the download uses exactly the formats chosen.
     pub info_json: Vec<u8>,
+    /// yt-dlp's extractor, e.g. `Youtube` or `Generic`.
+    pub extractor: Option<String>,
+    /// What was offered and chosen, in fixed vocabulary, for diagnostics.
+    pub summary: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -33,6 +37,7 @@ struct Metadata {
     title: Option<String>,
     id: Option<String>,
     has_drm: Option<bool>,
+    extractor_key: Option<String>,
     is_live: Option<bool>,
     live_status: Option<String>,
     #[serde(default)]
@@ -174,6 +179,7 @@ pub fn select_media(raw_json: &[u8]) -> Result<MediaInfo, PublicError> {
     }
 
     let selection = choose_formats(&metadata.formats)?;
+    let summary = summarize(&metadata.formats, &selection);
     let title = metadata
         .title
         .as_deref()
@@ -193,7 +199,58 @@ pub fn select_media(raw_json: &[u8]) -> Result<MediaInfo, PublicError> {
         suggested_filename: suggested_filename(metadata.title.as_deref(), metadata.id.as_deref()),
         selection,
         info_json,
+        extractor: metadata.extractor_key,
+        summary,
     })
+}
+
+/// `"33 offered, 15 usable; video https mp4 2160p + audio https m4a"`.
+/// Protocol and extension come from untrusted JSON, so they are reduced to
+/// short identifiers.
+fn summarize(formats: &[Format], selection: &Selection) -> String {
+    let word = |value: Option<&str>| -> String {
+        let word: String = value
+            .unwrap_or("?")
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .take(16)
+            .collect();
+        if word.is_empty() {
+            "?".to_string()
+        } else {
+            word
+        }
+    };
+    let describe = |id: &str| {
+        formats
+            .iter()
+            .find(|format| format.format_id.as_deref() == Some(id))
+            .map(|format| {
+                let height = format
+                    .height
+                    .map(|height| format!(" {height}p"))
+                    .unwrap_or_default();
+                format!(
+                    "{} {}{height}",
+                    word(format.protocol.as_deref()),
+                    word(format.ext.as_deref())
+                )
+            })
+            .unwrap_or_default()
+    };
+    let usable = formats
+        .iter()
+        .filter(|format| format.is_supported())
+        .count();
+    let mut text = format!(
+        "{} offered, {usable} usable; video {}",
+        formats.len(),
+        describe(&selection.video)
+    );
+    if let Some(audio) = &selection.audio {
+        text.push_str(&format!(" + audio {}", describe(audio)));
+    }
+    text
 }
 
 /// Leaves only the chosen formats in the info JSON handed back to yt-dlp,
@@ -418,6 +475,10 @@ mod tests {
         );
         assert_eq!(media.title, "Sample / title");
         assert_eq!(media.suggested_filename, "Sample _ title.mp4");
+        assert_eq!(
+            media.summary,
+            "3 offered, 2 usable; video m3u8_native ? 1080p"
+        );
     }
 
     #[test]

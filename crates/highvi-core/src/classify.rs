@@ -1,5 +1,17 @@
 use crate::{PublicError, SourceKind};
 
+/// What the failing yt-dlp run was fetching, so a refusal can be attributed
+/// to the right stage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FetchTarget {
+    /// The page or playlist the user entered (metadata extraction).
+    Source,
+    /// A playlist the page's own player loaded in the isolated browser.
+    BrowserPlaylist,
+    /// The media file or segments, after metadata extraction succeeded.
+    Media,
+}
+
 /// Failure hints seen in yt-dlp output. Only these booleans leave the stream;
 /// raw lines, which may contain signed URLs, are never stored or returned.
 /// Hints from `ERROR:` lines take precedence, so a warning or retry line
@@ -20,12 +32,26 @@ impl ToolSignals {
         }
     }
 
-    pub fn classify(&self, kind: SourceKind) -> PublicError {
+    pub fn classify(&self, kind: SourceKind, target: FetchTarget) -> PublicError {
         if self.errors.any() {
-            self.errors.classify(kind)
+            self.errors.classify(kind, target)
         } else {
-            self.other.classify(kind)
+            self.other.classify(kind, target)
         }
+    }
+
+    /// Fixed names of the hints seen, for a diagnostic report.
+    pub fn labels(&self) -> Vec<&'static str> {
+        let mut labels = self.errors.labels();
+        for label in self.other.labels() {
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+        if self.other.no_js_runtime || self.errors.no_js_runtime {
+            labels.push("no_js_runtime");
+        }
+        labels
     }
 }
 
@@ -35,10 +61,13 @@ struct Signals {
     authentication: bool,
     firewall_block: bool,
     forbidden: bool,
+    rate_limited: bool,
     not_found: bool,
     unsupported: bool,
     no_formats: bool,
     timeout: bool,
+    /// A warning only: some formats may be missing. Never an error by itself.
+    no_js_runtime: bool,
 }
 
 impl Signals {
@@ -52,11 +81,30 @@ impl Signals {
         // challenge page; it does not prove a JavaScript challenge.
         self.firewall_block |= lower.contains("cloudflare anti-bot challenge");
         self.forbidden |= lower.contains("http error 403");
+        self.rate_limited |= lower.contains("http error 429");
         self.not_found |= lower.contains("http error 404") || lower.contains("http error 410");
         self.unsupported |= lower.contains("unsupported url:");
         self.no_formats |= lower.contains("no video formats")
             || lower.contains("requested format is not available");
         self.timeout |= lower.contains("timed out");
+        self.no_js_runtime |= lower.contains("no supported javascript runtime");
+    }
+
+    fn labels(&self) -> Vec<&'static str> {
+        [
+            (self.drm, "drm"),
+            (self.authentication, "sign_in"),
+            (self.firewall_block, "cloudflare"),
+            (self.forbidden, "http_403"),
+            (self.rate_limited, "http_429"),
+            (self.not_found, "http_404"),
+            (self.unsupported, "unsupported_url"),
+            (self.no_formats, "no_formats"),
+            (self.timeout, "timeout"),
+        ]
+        .into_iter()
+        .filter_map(|(seen, label)| seen.then_some(label))
+        .collect()
     }
 
     fn any(&self) -> bool {
@@ -64,13 +112,14 @@ impl Signals {
             || self.authentication
             || self.firewall_block
             || self.forbidden
+            || self.rate_limited
             || self.not_found
             || self.unsupported
             || self.no_formats
             || self.timeout
     }
 
-    fn classify(&self, kind: SourceKind) -> PublicError {
+    fn classify(&self, kind: SourceKind, target: FetchTarget) -> PublicError {
         if self.drm {
             PublicError::new(
                 "drm_not_supported",
@@ -81,13 +130,27 @@ impl Signals {
                 "authentication_required",
                 "This media requires sign-in or access that HighVi will not bypass.",
             )
-        } else if self.firewall_block || self.forbidden {
-            let code = if self.firewall_block {
-                "host_firewall_block"
-            } else {
-                "access_denied"
-            };
-            PublicError::new(code, forbidden_message(kind, self.firewall_block))
+        } else if self.firewall_block {
+            PublicError::new("host_firewall_block", forbidden_message(kind, true))
+        } else if self.forbidden {
+            match target {
+                FetchTarget::Source => {
+                    PublicError::new("access_denied", forbidden_message(kind, false))
+                }
+                FetchTarget::BrowserPlaylist => PublicError::new(
+                    "playlist_access_denied",
+                    "The page's player loaded a video playlist, but its server refused HighVi (HTTP 403). HighVi does not use browser sessions or bypass access controls.",
+                ),
+                FetchTarget::Media => PublicError::new(
+                    "media_access_denied",
+                    "The site described the video, but its server refused to send the video file (HTTP 403).",
+                ),
+            }
+        } else if self.rate_limited {
+            PublicError::new(
+                "rate_limited",
+                "The site reports too many requests (HTTP 429). Wait a while before trying again.",
+            )
         } else if self.not_found {
             PublicError::new(
                 "media_not_found",
@@ -108,12 +171,16 @@ impl Signals {
     }
 }
 
-pub fn classify_tool_failure(output: &str, kind: SourceKind) -> PublicError {
+pub fn signals_from_output(output: &str) -> ToolSignals {
     let mut signals = ToolSignals::default();
     for line in output.lines().take(2_000) {
         signals.observe(line);
     }
-    signals.classify(kind)
+    signals
+}
+
+pub fn classify_tool_failure(output: &str, kind: SourceKind) -> PublicError {
+    signals_from_output(output).classify(kind, FetchTarget::Source)
 }
 
 fn forbidden_message(kind: SourceKind, firewall: bool) -> String {
@@ -196,7 +263,9 @@ mod tests {
             .observe("[download] Got error: HTTP Error 403: Forbidden. Retrying fragment 1 (1/10)");
         signals.observe("ERROR: fragment 1 not found, unable to continue");
         assert_eq!(
-            signals.classify(SourceKind::DirectHls).code,
+            signals
+                .classify(SourceKind::DirectHls, FetchTarget::Source)
+                .code,
             "access_denied"
         );
     }
@@ -238,6 +307,49 @@ mod tests {
         assert_eq!(design.code, "yt_dlp_failed");
         let sign_in = classify_tool_failure("ERROR: Sign in to confirm your age", SourceKind::Page);
         assert_eq!(sign_in.code, "authentication_required");
+    }
+
+    #[test]
+    fn a_refusal_is_attributed_to_the_stage_that_was_refused() {
+        let output = "ERROR: unable to download video data: HTTP Error 403: Forbidden";
+        let signals = signals_from_output(output);
+        for (target, code) in [
+            (FetchTarget::Source, "access_denied"),
+            (FetchTarget::BrowserPlaylist, "playlist_access_denied"),
+            (FetchTarget::Media, "media_access_denied"),
+        ] {
+            assert_eq!(signals.classify(SourceKind::Page, target).code, code);
+        }
+        assert_eq!(signals.labels(), ["http_403"]);
+        // A Cloudflare block is reported as such at every stage.
+        let cloudflare = signals_from_output(CLOUDFLARE);
+        assert_eq!(
+            cloudflare
+                .classify(SourceKind::Page, FetchTarget::Media)
+                .code,
+            "host_firewall_block"
+        );
+    }
+
+    #[test]
+    fn rate_limits_are_reported_and_a_missing_js_runtime_is_only_a_label() {
+        let signals = signals_from_output(
+            "WARNING: [youtube] No supported JavaScript runtime could be found.\nERROR: [youtube] abc: HTTP Error 429: Too Many Requests",
+        );
+        assert_eq!(
+            signals.classify(SourceKind::Page, FetchTarget::Source).code,
+            "rate_limited"
+        );
+        assert_eq!(signals.labels(), ["http_429", "no_js_runtime"]);
+        let warning_only = signals_from_output(
+            "WARNING: [youtube] No supported JavaScript runtime could be found.",
+        );
+        assert_eq!(
+            warning_only
+                .classify(SourceKind::Page, FetchTarget::Source)
+                .code,
+            "yt_dlp_failed"
+        );
     }
 
     #[test]

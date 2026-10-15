@@ -16,6 +16,9 @@ resumable work log and verification evidence live in [LEDGER.md](LEDGER.md).
 | `mux.rs` | Magic-byte sniffing and the locked-down FFmpeg mux. |
 | `process.rs` | Child processes: no shell, cleared env, own process group, bounded output, cancel/timeout kills the group. |
 | `filesystem.rs` | `Downloads/HighVi`, private locked job directories, no-replace publishing. |
+| `classify.rs` | yt-dlp output → error code, attributed to what was being fetched (page, browser-found playlist, media). |
+| `tools.rs` | Tool versions; whether yt-dlp is older than a site needs (`SITE_MINIMUMS`) or than tested. |
+| `diagnostics.rs` | Per-job report for a failed job: stages, codes, versions, host names only. |
 | `e2e.rs` (tests only) | Local HTTPS fixture + synthetic media; real yt-dlp, FFmpeg and Chrome. |
 
 ## Pipeline
@@ -39,6 +42,20 @@ Stage B (static HTML scanning) is yt-dlp's generic extractor; HighVi does not du
 There is no separate discovery ticket: the job owns its discovery result end to end, so no
 media URL ever crosses into the UI and nothing can be substituted.
 
+## Failure attribution
+
+| Where it failed | Code |
+| --- | --- |
+| Page refused (yt-dlp or browser: 401/403/451) | `access_denied` (`host_firewall_block` for Cloudflare / `cf-mitigated: challenge`) |
+| Page or playlist rate-limited (429) | `rate_limited` |
+| Browser: page never arrived / HTTP error | `media_discovery_timeout` / `page_unavailable` |
+| Browser: the player's playlist was refused (4xx) | `playlist_access_denied` (also when yt-dlp is refused a browser-found playlist) |
+| Browser: page loaded, no playlist | `no_media_found` |
+| Media file or segments refused after metadata succeeded | `media_access_denied` |
+
+Extractor-related failures carry a `hint` to update yt-dlp when it is older than the site needs
+(YouTube: 2026.08.19, see LEDGER) or than `RECOMMENDED_YT_DLP`, or more than 90 days old.
+
 ## Bounds
 
 | What | Limit |
@@ -47,6 +64,8 @@ media URL ever crosses into the UI and nothing can be substituted.
 | Browser discovery | 30 s per page; gives up ~8 s after trying to play; ≤ 48 sessions, ≤ 4 000 tracked requests, ≤ 60 body reads |
 | Proxy | ≤ 64 tunnels, 8 KiB request head, 10 s head/resolve, 15 s connect, 90 s idle |
 | yt-dlp retries | 3 requests, 5 fragments, 1 extractor |
+| yt-dlp `PATH` | `<job>/bin` with only a `python3` link: no helpers (phantomjs, JS runtimes, FFmpeg) |
+| Diagnostic report | 4 KiB, in memory, failed jobs only |
 | Mux | 30 min |
 | Jobs | 1 at a time; Chrome never runs while idle |
 

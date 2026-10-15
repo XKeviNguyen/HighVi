@@ -1,6 +1,7 @@
 use highvi_core::{
-    CancelHandle, JobEnvironment, JobUpdate, PublicError, SourceRequest, cancel_pair, find_browser,
-    find_executable, prepare_output_dir, run_job, validate_source,
+    CancelHandle, JobEnvironment, JobUpdate, PublicError, RECOMMENDED_YT_DLP, SourceRequest,
+    YtDlpVersion, cancel_pair, find_browser, find_executable, prepare_output_dir, run_job,
+    validate_source, yt_dlp_version,
 };
 use serde::Serialize;
 use std::{path::PathBuf, sync::Mutex, time::Duration};
@@ -45,6 +46,26 @@ struct JobResult {
     title: String,
 }
 
+/// A failed job: the error, plus a report the user can copy into a bug
+/// report (no URLs, cookies or tokens; see `highvi_core::Diagnostics`).
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct JobError {
+    #[serde(flatten)]
+    error: PublicError,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostics: Option<String>,
+}
+
+impl From<PublicError> for JobError {
+    fn from(error: PublicError) -> Self {
+        Self {
+            error,
+            diagnostics: None,
+        }
+    }
+}
+
 /// A progress event. `job_id` lets the UI ignore events from an older job
 /// that arrive late.
 #[derive(Clone, Debug, Serialize)]
@@ -62,6 +83,9 @@ struct DependencyStatus {
     ffmpeg: bool,
     /// Optional: only pages whose player is built by JavaScript need it.
     browser: bool,
+    yt_dlp_version: Option<String>,
+    /// Set when yt-dlp is older than the version HighVi is tested with.
+    yt_dlp_recommended: Option<String>,
 }
 
 /// Discovers and downloads `source`. Resolves when the job ends. The webview
@@ -73,17 +97,14 @@ async fn start_job(
     state: State<'_, AppState>,
     job_id: String,
     source: SourceRequest,
-) -> Result<JobResult, PublicError> {
+) -> Result<JobResult, JobError> {
     if job_id.is_empty()
         || job_id.len() > MAX_JOB_ID_CHARS
         || !job_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
     {
-        return Err(PublicError::new(
-            "invalid_job_id",
-            "Invalid job identifier.",
-        ));
+        return Err(PublicError::new("invalid_job_id", "Invalid job identifier.").into());
     }
     let source = validate_source(&source)?;
 
@@ -98,7 +119,8 @@ async fn start_job(
             return Err(PublicError::new(
                 "download_already_active",
                 "Another download is already running. Wait for it to finish.",
-            ));
+            )
+            .into());
         }
         *active = Some(ActiveJob { cancel, finished });
     }
@@ -117,11 +139,18 @@ async fn start_job(
             },
         );
     };
-    let outcome = run_job(&environment, &source, token, &report).await?;
-    Ok(JobResult {
-        saved_to: outcome.saved_to.to_string_lossy().into_owned(),
-        title: outcome.title,
-    })
+    let (outcome, diagnostics) = run_job(&environment, &source, token, &report).await;
+    match outcome {
+        Ok(outcome) => Ok(JobResult {
+            saved_to: outcome.saved_to.to_string_lossy().into_owned(),
+            title: outcome.title,
+        }),
+        Err(error) if error.code == "cancelled" => Err(error.into()),
+        Err(error) => Err(JobError {
+            error,
+            diagnostics: Some(diagnostics.render()),
+        }),
+    }
 }
 
 /// Cancels the running job, if any. Idempotent.
@@ -138,11 +167,23 @@ fn cancel_job(state: State<'_, AppState>) {
 }
 
 #[tauri::command]
-fn dependency_status() -> DependencyStatus {
+async fn dependency_status() -> DependencyStatus {
+    let yt_dlp = find_executable("yt-dlp");
+    let version = match &yt_dlp {
+        Some(path) => yt_dlp_version(path).await,
+        None => None,
+    };
+    let recommended = YtDlpVersion {
+        date: RECOMMENDED_YT_DLP,
+    };
     DependencyStatus {
-        yt_dlp: find_executable("yt-dlp").is_some(),
+        yt_dlp: yt_dlp.is_some(),
         ffmpeg: find_executable("ffmpeg").is_some(),
         browser: find_browser().is_some(),
+        yt_dlp_version: version.map(|version| version.to_string()),
+        yt_dlp_recommended: version
+            .filter(|version| *version < recommended)
+            .map(|_| recommended.to_string()),
     }
 }
 
