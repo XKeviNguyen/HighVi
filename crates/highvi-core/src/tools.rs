@@ -215,7 +215,10 @@ async fn probe(
     args: &[&str],
     env: Option<Vec<(&'static str, OsString)>>,
 ) -> Option<String> {
-    let home = ProbeDir::create()?;
+    let home = match env {
+        Some(_) => None,
+        None => Some(ProbeDir::create()?),
+    };
     let env = env.unwrap_or_else(|| {
         let mut env: Vec<(&str, OsString)> = ["PATH", "LANG"]
             .into_iter()
@@ -226,7 +229,9 @@ async fn probe(
                 .iter()
                 .map(|(name, value)| (*name, OsString::from(value))),
         );
-        env.push(("HOME", home.0.clone().into_os_string()));
+        if let Some(home) = &home {
+            env.push(("HOME", home.0.clone().into_os_string()));
+        }
         env
     });
     let (_handle, mut token) = cancel_pair();

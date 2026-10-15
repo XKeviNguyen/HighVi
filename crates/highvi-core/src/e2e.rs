@@ -1770,7 +1770,7 @@ async fn yt_dlp_ignores_js_runtimes_next_to_its_interpreter() {
     std::fs::write(
         &deno,
         format!(
-            "#!/bin/sh\ntouch '{}'\necho 'deno 2.5.0'\n",
+            "#!/bin/sh\n/usr/bin/touch '{}'\necho 'deno 2.5.0'\n",
             marker.display()
         ),
     )
@@ -1815,7 +1815,8 @@ async fn yt_dlp_ignores_js_runtimes_next_to_its_interpreter() {
         control.contains("deno"),
         "control did not find the fake runtime: {control}"
     );
-    let _ = std::fs::remove_file(&marker);
+    assert!(marker.exists(), "control did not run the fake runtime");
+    std::fs::remove_file(&marker).unwrap();
     let hermetic = run(true);
     assert!(hermetic.contains("JS runtimes: none"), "{hermetic}");
     assert!(!marker.exists(), "the fake deno was run");

@@ -190,7 +190,10 @@ async fn run(
     cleanup_stale_jobs(&env.output_dir).await;
     let mut job = JobDir::create(&env.output_dir).await?;
     let python = match &env.python {
-        Some(python) => resolve_python(python).await,
+        Some(python) => tokio::select! {
+            resolved = resolve_python(python) => resolved,
+            () = cancel.cancelled() => return Err(cancelled_error()),
+        },
         None => None,
     };
     prepare_tool_path(job.path(), python.as_deref())
