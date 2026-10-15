@@ -30,6 +30,8 @@ const I18N = (() => {
       "progress.aria": "Download progress",
       "progress.working": "Working…",
       "progress.discovering": "Looking for the video…",
+      "progress.waitingForBrowser": "Waiting for the private browser (one video at a time)…",
+      "progress.waitingToMerge": "Waiting to put it together…",
       "progress.browsing": "Opening the page in a private browser to find the video…",
       "deps.browserMissing":
         "Optional: install Google Chrome or Chromium so HighVi can find videos on pages whose player is built with JavaScript.",
@@ -189,6 +191,8 @@ const I18N = (() => {
       "progress.aria": "Tiến độ tải",
       "progress.working": "Đang làm…",
       "progress.discovering": "Đang tìm video…",
+      "progress.waitingForBrowser": "Đang chờ trình duyệt riêng (mỗi lần một video)…",
+      "progress.waitingToMerge": "Đang chờ ghép video…",
       "progress.browsing": "Đang mở trang trong một trình duyệt riêng để tìm video…",
       "deps.browserMissing":
         "Không bắt buộc: cài Google Chrome hoặc Chromium để HighVi tìm được video trên các trang có trình phát dựng bằng JavaScript.",
@@ -347,6 +351,8 @@ const I18N = (() => {
       "progress.aria": "ダウンロードの進みぐあい",
       "progress.working": "作業中…",
       "progress.discovering": "動画をさがしています…",
+      "progress.waitingForBrowser": "専用ブラウザーの順番を待っています（1 本ずつ）…",
+      "progress.waitingToMerge": "組み立ての順番を待っています…",
       "progress.browsing": "動画をさがすために、専用のブラウザーでページを開いています…",
       "deps.browserMissing":
         "なくても使えます：Google Chrome か Chromium を入れると、JavaScript で作られたプレーヤーのページでも動画をさがせます。",

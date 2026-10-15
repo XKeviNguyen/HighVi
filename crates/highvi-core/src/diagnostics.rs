@@ -249,9 +249,11 @@ fn yes(value: bool) -> &'static str {
 pub fn stage_name(stage: Stage) -> &'static str {
     match stage {
         Stage::Discovering => "discovering",
+        Stage::WaitingForBrowser => "waitingForBrowser",
         Stage::Browsing => "browsing",
         Stage::DownloadingVideo => "downloadingVideo",
         Stage::DownloadingAudio => "downloadingAudio",
+        Stage::WaitingToMerge => "waitingToMerge",
         Stage::Merging => "merging",
         Stage::Saving => "saving",
     }

@@ -225,8 +225,8 @@ impl State {
     }
 
     /// Marks the next queued items running while a slot is free. FIFO: the
-    /// oldest queued item always goes first, and finished or failed items
-    /// never hold a place.
+    /// oldest queued item always goes first (a retried item keeps its place
+    /// in the list), and finished or failed items never hold a place.
     fn launch_ready(&mut self) -> Vec<Launch> {
         let mut launches = Vec::new();
         let limit = self.desired.min(MAX_ACTIVE_JOBS);
@@ -604,7 +604,10 @@ async fn run_launch(scheduler: Scheduler, launch: Launch) {
     } = launch;
     let reporter = scheduler.clone();
     let report: Report = Arc::new(move |update| reporter.progress(id, attempt, update));
-    let job = (scheduler.inner.runner)(source, token, report);
+    // The runner is called inside the task too, so even a runner that
+    // panics before returning its future cannot keep the slot.
+    let runner = Arc::clone(&scheduler.inner.runner);
+    let job = async move { runner(source, token, report).await };
     let result = match scheduler.inner.runtime.spawn(job).await {
         Ok(result) => result,
         Err(_) => (
@@ -1070,6 +1073,44 @@ mod tests {
         assert_eq!(item.error.as_ref().unwrap().code, "internal_error");
         until(&scheduler, |snapshot| snapshot.active == 1).await;
         assert_eq!(running_ids(&scheduler, &fake).await, ["/v1"]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_runner_that_panics_before_returning_frees_its_slot() {
+        let recorder = Arc::new(Recorder::default());
+        let runner: Runner = Arc::new(|source, _cancel, _report| {
+            assert!(source.discovery_target().path() != "/v0", "runner bug");
+            Box::pin(async {
+                (
+                    Ok(JobOutcome {
+                        saved_to: "/out/v.mp4".into(),
+                        title: "Video".into(),
+                    }),
+                    None,
+                )
+            }) as JobFuture
+        });
+        let scheduler = Scheduler::new(
+            tokio::runtime::Handle::current(),
+            runner,
+            Arc::clone(&recorder) as Arc<dyn QueueEvents>,
+        );
+        scheduler.set_concurrency(1).unwrap();
+        let ids = scheduler.add(pages(0..2)).added;
+        scheduler.start();
+        until(&scheduler, |snapshot| snapshot.counts.completed == 1).await;
+        let snapshot = scheduler.snapshot();
+        let failed = snapshot
+            .items
+            .iter()
+            .find(|item| item.id == ids[0])
+            .unwrap();
+        assert_eq!(failed.status, ItemStatus::Failed);
+        assert_eq!(failed.error.as_ref().unwrap().code, "internal_error");
+        assert_eq!(snapshot.active, 0);
+        tokio::time::timeout(Duration::from_secs(5), scheduler.shutdown())
+            .await
+            .expect("a lost slot blocked shutdown");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

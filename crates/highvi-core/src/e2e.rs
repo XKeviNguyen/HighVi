@@ -697,7 +697,8 @@ async fn direct_hls_master_becomes_a_playable_mp4_with_an_origin_only_referer() 
         .run(direct("https://media.test/muxed/master.m3u8"))
         .await;
     let outcome = result.unwrap();
-    assert_eq!(outcome.saved_to, fixture.output_dir.join("master.mp4"));
+    // "master" says nothing; the playlist's folder names the file.
+    assert_eq!(outcome.saved_to, fixture.output_dir.join("muxed.mp4"));
     let (streams, duration, clean) = fixture.inspect(&outcome.saved_to);
     assert_eq!(streams, ["video", "audio"]);
     assert!((3.5..=4.6).contains(&duration), "{duration}");
@@ -775,8 +776,8 @@ async fn fragmented_mp4_and_aes_128_streams_are_supported() {
             .iter()
             .any(|hit| hit.host == "keys.test")
     );
-    // Both are titled "index"; the second must not replace the first.
-    assert_eq!(fixture.saved_files(), ["index (2).mp4", "index.mp4"]);
+    // Both playlists are called "index"; their folders name the files.
+    assert_eq!(fixture.saved_files(), ["aes.mp4", "fmp4.mp4"]);
 }
 
 #[tokio::test]
@@ -2120,7 +2121,7 @@ async fn four_concurrent_jobs_with_one_title_publish_four_files() {
         );
     }
     std::fs::create_dir_all(&fixture.output_dir).unwrap();
-    // An existing file with the name the first job wants.
+    // An existing file with a name one of the jobs wants.
     std::fs::write(fixture.output_dir.join("Same title (1).mp4"), b"keep me").unwrap();
     let (scheduler, _) = real_scheduler(&fixture);
     scheduler.set_concurrency(4).unwrap();
@@ -2135,7 +2136,22 @@ async fn four_concurrent_jobs_with_one_title_publish_four_files() {
     let started = Instant::now();
     loop {
         let snapshot = scheduler.snapshot();
-        peak = peak.max(snapshot.active);
+        // Each running job has its own working directory: count them, so
+        // the overlap is measured, not inferred from the slot count.
+        let working = std::fs::read_dir(&fixture.output_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".highvi-job-")
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        peak = peak.max(working);
         assert!(snapshot.active <= 4);
         if snapshot.counts.completed == 5 {
             break;
@@ -2174,7 +2190,7 @@ async fn jobs_share_one_browser_at_a_time() {
             &format!("page.test/js/{index}"),
             Route::html(&format!(
                 "<!doctype html><title>JS {index}</title><script>\
-                 setTimeout(() => fetch('https://media.test/js{index}/master.m3u8'), 1500);\
+                 setTimeout(() => fetch('https://media.test/js{index}/master.m3u8'), 5000);\
                  </script>"
             )),
         );
@@ -2185,33 +2201,54 @@ async fn jobs_share_one_browser_at_a_time() {
     }
     let (scheduler, _) = real_scheduler(&fixture);
     scheduler.set_concurrency(4).unwrap();
-    let ids = scheduler
-        .add(
-            (0..3)
-                .map(|index| page(&format!("https://page.test/js/{index}")))
-                .collect(),
-        )
-        .added;
+    let added = scheduler.add(
+        (0..3)
+            .map(|index| page(&format!("https://page.test/js/{index}")))
+            .collect(),
+    );
+    assert_eq!(added.added.len(), 3);
     scheduler.start();
     // Sample the number of browser processes while the jobs run.
     let mut most = 0;
     let started = Instant::now();
     let mut cancelled_waiting = false;
+    let mut waiting_id = None;
+    let mut holder = None;
+    let mut waiting_ended_while_browser_busy = false;
     loop {
         let browsers = chrome_browser_processes(&fixture);
         most = most.max(browsers);
         let snapshot = scheduler.snapshot();
-        // Once one job is browsing, cancel the last one, which is waiting.
+        // Cancel a job that is waiting for the browser while another one
+        // uses it: it must end at once, not after its turn comes.
         if !cancelled_waiting
+            && let Some(browsing) = snapshot
+                .items
+                .iter()
+                .find(|item| item.stage == Some(Stage::Browsing))
+            && let Some(waiting) = snapshot
+                .items
+                .iter()
+                .find(|item| item.stage == Some(Stage::WaitingForBrowser))
+        {
+            holder = Some(browsing.id);
+            waiting_id = Some(waiting.id);
+            scheduler.cancel(waiting.id);
+            cancelled_waiting = true;
+        }
+        // The waiting job must be gone while the job that held the browser
+        // when it was cancelled is still using it.
+        if let (Some(waiting_id), Some(holder)) = (waiting_id, holder)
+            && !waiting_ended_while_browser_busy
             && snapshot
                 .items
                 .iter()
-                .filter(|item| item.stage == Some(Stage::Browsing))
-                .count()
-                >= 2
+                .any(|item| item.id == waiting_id && item.status == crate::ItemStatus::Cancelled)
         {
-            scheduler.cancel(ids[2]);
-            cancelled_waiting = true;
+            waiting_ended_while_browser_busy = snapshot
+                .items
+                .iter()
+                .any(|item| item.id == holder && item.stage == Some(Stage::Browsing));
         }
         let done = snapshot.counts.completed + snapshot.counts.failed + snapshot.counts.cancelled;
         if done == 3 && snapshot.active == 0 {
@@ -2222,6 +2259,10 @@ async fn jobs_share_one_browser_at_a_time() {
     }
     let snapshot = scheduler.snapshot();
     assert_eq!(most, 1, "more than one browser ran at once");
+    assert!(
+        waiting_ended_while_browser_busy,
+        "the job waiting for the browser was not cancelled while waiting"
+    );
     assert_eq!(snapshot.counts.completed, 2, "{snapshot:?}");
     assert_eq!(snapshot.counts.cancelled, 1, "{snapshot:?}");
     assert_no_chrome_left(&fixture).await;

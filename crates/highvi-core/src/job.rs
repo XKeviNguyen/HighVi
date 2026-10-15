@@ -168,10 +168,14 @@ impl JobEnvironment {
 #[serde(rename_all = "camelCase")]
 pub enum Stage {
     Discovering,
+    /// Waiting for the isolated browser, which one job uses at a time.
+    WaitingForBrowser,
     /// Watching the page in the isolated browser.
     Browsing,
     DownloadingVideo,
     DownloadingAudio,
+    /// Waiting for a free mux slot.
+    WaitingToMerge,
     Merging,
     Saving,
 }
@@ -301,11 +305,12 @@ async fn run(
     // this point needs it, and a kept recovery directory must not hold it.
     let _ = tokio::fs::remove_file(job.path().join(INFO_JSON)).await;
 
-    report(JobUpdate::stage(Stage::Merging));
+    report(JobUpdate::stage(Stage::WaitingToMerge));
     let _muxer = tokio::select! {
         permit = env.shared.muxers.acquire() => permit.map_err(|_| mux_error())?,
         () = cancel.cancelled() => return Err(cancelled_error()),
     };
+    report(JobUpdate::stage(Stage::Merging));
     Box::pin(mux(env, &job, media.selection.audio.is_some(), &mut cancel)).await?;
 
     report(JobUpdate::stage(Stage::Saving));
@@ -472,11 +477,12 @@ async fn discover(
         return Err(error);
     }
 
-    report(JobUpdate::stage(Stage::Browsing));
+    report(JobUpdate::stage(Stage::WaitingForBrowser));
     let browser_permit = tokio::select! {
         permit = env.shared.browsers.acquire() => permit.map_err(|_| crate::browser::browser_failed())?,
         () = cancel.cancelled() => return Err(cancelled_error()),
     };
+    report(JobUpdate::stage(Stage::Browsing));
     let finding = discover_in_browser(
         BrowserRun {
             chrome,
@@ -1014,13 +1020,20 @@ fn playlist_folder_name(playlist: &url::Url) -> Option<String> {
         .skip(1)
         .filter_map(|segment| {
             let stem = segment.rsplit_once('.').map_or(*segment, |(stem, _)| stem);
+            let letters = stem.chars().filter(char::is_ascii_alphabetic).count();
+            let digits = stem.chars().filter(char::is_ascii_digit).count();
+            // Random IDs mix upper case, lower case and digits; names
+            // rarely do.
+            let random_looking = digits > 0
+                && stem.chars().any(|character| character.is_ascii_uppercase())
+                && stem.chars().any(|character| character.is_ascii_lowercase());
             let named = (3..=48).contains(&stem.len())
                 && stem.chars().all(|character| {
                     character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
                 })
-                && stem
-                    .chars()
-                    .any(|character| character.is_ascii_alphabetic())
+                && letters >= 3
+                && digits < letters
+                && !random_looking
                 && !stem
                     .chars()
                     .all(|character| character.is_ascii_hexdigit() || character == '-');
@@ -1081,6 +1094,14 @@ mod tests {
             None
         );
         assert_eq!(folder("https://cdn.example/master.m3u8"), None);
+        // Short random IDs and non-names are not used either.
+        for raw in [
+            "https://cdn.example/s/Xk9fQ2LmP7wZ/master.m3u8",
+            "https://cdn.example/10s/master.m3u8",
+            "https://cdn.example/a1b2c3d4e5/index.m3u8",
+        ] {
+            assert_eq!(folder(raw), None, "{raw}");
+        }
     }
 
     #[test]

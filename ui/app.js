@@ -46,9 +46,11 @@ const reports = new Map();
 
 const stageKeys = {
   discovering: "progress.discovering",
+  waitingForBrowser: "progress.waitingForBrowser",
   browsing: "progress.browsing",
   downloadingVideo: "progress.downloadingVideo",
   downloadingAudio: "progress.downloadingAudio",
+  waitingToMerge: "progress.waitingToMerge",
   merging: "progress.merging",
   saving: "progress.saving",
 };
