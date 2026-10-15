@@ -6,13 +6,49 @@ Compact, resumable record. Newest mission first.
 
 ## Current state
 
-- Base: main @ c990a01 (PRs #2, #3, #4 merged; V1 closed). Branch `feature/v1.1-compat-diagnostics`.
-- Plan (PRs, each: focused tests → Codex review → CI on head → merge):
-  A. compat + diagnostics (A1, A2, helper PATH policy, stage-specific errors, copyable report, CI yt-dlp matrix)
-  B. hardening (stall/deadline, disk space, CDP byte bounds)
-  C. bulk queue: Rust scheduler (max 4, live 1–4) + queue UI + EN/VI/JA (one PR: the UI is the scheduler's only caller)
-  D. release: docs, APT install in disposable container, Wayland/HiDPI, Snap, packages, six breakers
-- Failed gates: —
+- PR #5 (A: failure attribution, diagnostics, helper policy) **merged** → main 2b65601.
+- PR #6 (B: stall/deadline/disk, DevTools byte bounds) open; reviewer re-verified at 6012ac2
+  (all closed; #5 unreachable delay, accepted); 86aa4db adds mux margin + stale text fix.
+- `feature/v1.1-bulk-queue` (C: queue + UI + too-old yt-dlp) rebased on B; 156 tests locally.
+- Next: merge B → open C (Codex, CI) → D (docs, packages, release checks).
+- Failed gates: — . Open issue: `target/` was deleted by an unknown actor between
+  11:20 and 11:22 local (not by any logged command of this session, its agents or
+  Codex); only build artifacts lost (incl. V1 bundles; rebuildable from c990a01).
+
+## Review log (V1.1)
+
+- PR #5: Codex r1 (d2af6d4) clean. Opus security review: 5 findings (JS runtimes found
+  next to the interpreter despite private PATH → `--no-js-runtimes`; pyenv shims; shared
+  /tmp probe HOME; uncancellable diagnostics; misleading hints) → fixed, re-verified
+  closed. Codex r2 (2a1754a) + r3 (880a2be) clean. CI caught a test portability bug
+  (pipx shebang) → fixed. Merged 880a2be.
+- PR #6: reviewer: counter restarts read as stalls, stderr progress, JSON-weight budget,
+  6 h deadline, overload on one big event → fixed. Codex r1 P2 mux not watched → fixed;
+  r2 P2 redirect lost when tracking full → RequestTracker + unit test; r3 P2 `abr`
+  estimate → fixed; r4 clean (6012ac2).
+- PR C (pre-PR): Opus flow/concurrency breaker: no critical/high; 24k-call 6-thread
+  stress clean; M1 waiting-cancel not tested, L1 misleading Browsing/Merging while
+  waiting, L2 sync runner panic leaks slot, L3 random-ID folder titles → all fixed with
+  tests proven to fail on the previous code.
+
+## Release evidence so far
+
+- APT (docker, `.deb` from C): Ubuntu 24.04.5 and 26.04.1 — install with deps, binary,
+  desktop entry, icon, starts under Xvfb as a user, remove keeps `~/Downloads/HighVi`.
+  24.04 APT yt-dlp 2024.04.09 is too old (rejects `--no-plugin-dirs`) → `ytdlp_too_old`.
+- Wayland (headless GNOME Shell 50.1, isolated HOME/XDG dirs/session bus): runs as a
+  native Wayland client (titled xdg_toplevel, up 15 s, no panic). Monitor scale 2 →
+  `wl_output.scale(2)` and `wl_surface.set_buffer_scale(2)`. GNOME refuses screenshots,
+  so the 2× layout was checked on Xvfb with GDK_SCALE=2: sharp, nothing clipped.
+- Native (Xvfb, release binary, real IPC): batch add (5 added, 1 duplicate, 1 invalid line),
+  Start, target 2→4 (running jobs untouched), YouTube CC-BY → media 403 + update hint,
+  missav → `host_firewall_block` with report "document 403 (Cloudflare bot check)",
+  3 public test streams saved and fully decoded (1080p 634 s, 720p 1800 s, ToS 734 s),
+  SIGTERM mid-download → exit 57 ms, no yt-dlp/Chrome left, job dir removed, files kept.
+- Profile (fixture, release): 8 jobs at targets 1–4 → 40.7/11.6/6.1/4.9 s; peak threads
+  8–12, fds 21–42, RSS 10–11 MiB (core); Cancel All with 4 in flight 11 ms.
+- Native resource samples: Rust process 172–176 MB RSS, 59–69 threads, ≤ 99 fds;
+  ≤ 4 yt-dlp, ≤ 1 FFmpeg, ≤ 1 Chrome instance; idle CPU 0 %.
 
 ## Baseline (verified 2026-10-15)
 
