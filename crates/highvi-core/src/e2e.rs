@@ -1700,8 +1700,54 @@ async fn yt_dlp_cannot_see_helper_programs() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("[debug] exe versions: none"), "{stderr}");
     assert!(stderr.contains("JS runtimes: none"), "{stderr}");
-    assert!(stderr.contains("Unable to connect to proxy"), "{stderr}");
+    // The wording depends on the HTTP backend; either way nothing was fetched.
+    assert!(stderr.contains("Unable to download webpage"), "{stderr}");
     let _ = std::fs::remove_dir_all(&job);
+}
+
+/// The Python interpreter a script runs with: `#!/path/python`,
+/// `#!/usr/bin/env python3`, or pip's `#!/bin/sh` + `'''exec' python`
+/// wrapper for long paths.
+fn script_interpreter(head: &str) -> Option<PathBuf> {
+    let mut lines = head.lines();
+    let shebang = lines.next()?.strip_prefix("#!")?;
+    let mut parts = shebang.split_whitespace();
+    let program = parts.next()?;
+    if program.ends_with("/env") {
+        let name = parts.find(|part| !part.starts_with('-'))?;
+        return find_executable(name);
+    }
+    if program == "/bin/sh" {
+        let exec = lines.find_map(|line| line.strip_prefix("'''exec' "))?;
+        let quoted = exec.trim_start();
+        let path = match quoted.strip_prefix('"') {
+            Some(rest) => rest.split('"').next()?,
+            None => quoted.split_whitespace().next()?,
+        };
+        return Some(PathBuf::from(path));
+    }
+    Some(PathBuf::from(program))
+}
+
+#[test]
+fn script_interpreters_are_found_in_every_shebang_style() {
+    assert_eq!(
+        script_interpreter("#!/opt/pipx/venvs/yt-dlp/bin/python\nimport sys"),
+        Some(PathBuf::from("/opt/pipx/venvs/yt-dlp/bin/python"))
+    );
+    assert_eq!(
+        script_interpreter("#! /usr/bin/python3\n"),
+        Some(PathBuf::from("/usr/bin/python3"))
+    );
+    assert_eq!(
+        script_interpreter("#!/bin/sh\n'''exec' \"/very long/bin/python\" \"$0\" \"$@\"\n' '''"),
+        Some(PathBuf::from("/very long/bin/python"))
+    );
+    assert_eq!(
+        script_interpreter("#!/usr/bin/env python3\n"),
+        find_executable("python3")
+    );
+    assert_eq!(script_interpreter("no shebang"), None);
 }
 
 /// yt-dlp also looks for JavaScript runtimes next to its Python interpreter
@@ -1736,17 +1782,12 @@ async fn yt_dlp_ignores_js_runtimes_next_to_its_interpreter() {
     {
         tools.yt_dlp.clone()
     } else {
-        // pipx: ask the tool's own interpreter.
-        let shebang =
-            String::from_utf8_lossy(&interpreter_of_tool[..interpreter_of_tool.len().min(256)])
+        // pipx and pip: ask the tool's own interpreter.
+        let head =
+            String::from_utf8_lossy(&interpreter_of_tool[..interpreter_of_tool.len().min(1024)])
                 .into_owned();
-        let interpreter = shebang
-            .lines()
-            .next()
-            .unwrap()
-            .trim_start_matches("#!")
-            .trim()
-            .to_string();
+        let interpreter = script_interpreter(&head)
+            .unwrap_or_else(|| panic!("cannot find the interpreter in: {head:?}"));
         let output = Command::new(&interpreter)
             .args([
                 "-I",
@@ -1754,7 +1795,7 @@ async fn yt_dlp_ignores_js_runtimes_next_to_its_interpreter() {
                 "import yt_dlp, os; print(os.path.dirname(os.path.dirname(yt_dlp.__file__)))",
             ])
             .output()
-            .unwrap();
+            .unwrap_or_else(|error| panic!("{interpreter:?} from {head:?}: {error}"));
         assert!(output.status.success(), "cannot locate yt_dlp");
         PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
     };
