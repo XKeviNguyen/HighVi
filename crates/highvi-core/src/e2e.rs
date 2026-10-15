@@ -1703,3 +1703,121 @@ async fn yt_dlp_cannot_see_helper_programs() {
     assert!(stderr.contains("Unable to connect to proxy"), "{stderr}");
     let _ = std::fs::remove_dir_all(&job);
 }
+
+/// yt-dlp also looks for JavaScript runtimes next to its Python interpreter
+/// (`sysconfig` scripts: `/usr/local/bin`, a pipx venv's `bin`), not only on
+/// `PATH`. A fake `deno` placed there must not be found or run.
+#[tokio::test]
+async fn yt_dlp_ignores_js_runtimes_next_to_its_interpreter() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(tools) = tools() else {
+        return;
+    };
+    let Some(python) = find_executable("python3") else {
+        return;
+    };
+    let root = temp_directory("jsruntime");
+    std::fs::create_dir_all(&root).unwrap();
+    // Where the yt_dlp package is: an importable module, or a zipapp.
+    let located = Command::new(&python)
+        .args([
+            "-I",
+            "-c",
+            "import yt_dlp, os; print(os.path.dirname(os.path.dirname(yt_dlp.__file__)))",
+        ])
+        .output()
+        .unwrap();
+    let interpreter_of_tool = std::fs::read(&tools.yt_dlp).unwrap();
+    let package_path = if located.status.success() {
+        PathBuf::from(String::from_utf8_lossy(&located.stdout).trim())
+    } else if interpreter_of_tool
+        .windows(4)
+        .any(|window| window == b"PK\x03\x04")
+    {
+        tools.yt_dlp.clone()
+    } else {
+        // pipx: ask the tool's own interpreter.
+        let shebang =
+            String::from_utf8_lossy(&interpreter_of_tool[..interpreter_of_tool.len().min(256)])
+                .into_owned();
+        let interpreter = shebang
+            .lines()
+            .next()
+            .unwrap()
+            .trim_start_matches("#!")
+            .trim()
+            .to_string();
+        let output = Command::new(&interpreter)
+            .args([
+                "-I",
+                "-c",
+                "import yt_dlp, os; print(os.path.dirname(os.path.dirname(yt_dlp.__file__)))",
+            ])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "cannot locate yt_dlp");
+        PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
+    };
+    let venv = root.join("venv");
+    let created = Command::new(&python)
+        .args(["-m", "venv", "--without-pip"])
+        .arg(&venv)
+        .status()
+        .unwrap();
+    assert!(created.success());
+    let marker = root.join("deno-ran");
+    let deno = venv.join("bin/deno");
+    std::fs::write(
+        &deno,
+        format!(
+            "#!/bin/sh\ntouch '{}'\necho 'deno 2.5.0'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&deno, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let job = root.join("job");
+    std::fs::create_dir_all(&job).unwrap();
+    crate::ytdlp::prepare_tool_path(&job, None).await.unwrap();
+
+    let run = |hermetic: bool| {
+        let mut command = Command::new(venv.join("bin/python3"));
+        command
+            .env_clear()
+            .envs(crate::ytdlp::ytdlp_env(&job))
+            .env("PYTHONPATH", &package_path)
+            .current_dir(&job)
+            .args(["-m", "yt_dlp", "-v"]);
+        if hermetic {
+            command.args(crate::ytdlp::YT_DLP_HERMETIC_ARGS);
+        } else {
+            command.args(["--ignore-config", "--no-plugin-dirs"]);
+        }
+        let output = command
+            .args([
+                "--proxy",
+                "http://127.0.0.1:9",
+                "--simulate",
+                "--",
+                "https://www.youtube.com/watch?v=aqz-KE-bpKQ",
+            ])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stderr)
+            .lines()
+            .find(|line| line.contains("JS runtimes"))
+            .unwrap_or_default()
+            .to_string()
+    };
+    // Control: without HighVi's arguments, yt-dlp does find the fake.
+    let control = run(false);
+    assert!(
+        control.contains("deno"),
+        "control did not find the fake runtime: {control}"
+    );
+    let _ = std::fs::remove_file(&marker);
+    let hermetic = run(true);
+    assert!(hermetic.contains("JS runtimes: none"), "{hermetic}");
+    assert!(!marker.exists(), "the fake deno was run");
+    let _ = std::fs::remove_dir_all(&root);
+}

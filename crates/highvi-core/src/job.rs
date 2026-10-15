@@ -16,7 +16,7 @@ use crate::{
     formats::{MediaInfo, select_media},
     mux::{MuxInput, SNIFF_BYTES, mux_args, sniff},
     process::{CancelToken, RunError, run_captured, run_streaming, tool_command},
-    tools::{extractor_related, today, update_advice},
+    tools::{extractor_related, resolve_python, today, update_advice},
     ytdlp::{INFO_JSON, YtDlpPolicy, prepare_tool_path, ytdlp_env},
 };
 use serde::Serialize;
@@ -135,6 +135,7 @@ pub async fn run_job(
     report: &(dyn Fn(JobUpdate) + Send + Sync),
 ) -> (Result<JobOutcome, PublicError>, Diagnostics) {
     let recorder = Mutex::new(Diagnostics::new(source));
+    let mut late_cancel = cancel.clone();
     let tracked = |update: JobUpdate| {
         record(&recorder, |diagnostics| diagnostics.enter(update.stage));
         report(update);
@@ -147,8 +148,15 @@ pub async fn run_job(
         Ok(outcome) => Ok(outcome),
         Err(mut error) => {
             if error.code != "cancelled" {
-                diagnostics.collect_tools(env).await;
+                // A cancel while versions are probed still means "cancelled".
+                tokio::select! {
+                    () = diagnostics.collect_tools(env) => {}
+                    () = late_cancel.cancelled() => error = cancelled_error(),
+                }
+                // Refusals seen by the browser are the site's answer to
+                // Chrome; a newer yt-dlp would not change them.
                 if extractor_related(&error.code)
+                    && !diagnostics.failed_in(Stage::Browsing)
                     && let Some(installed) = diagnostics.yt_dlp
                 {
                     error.hint = update_advice(installed, diagnostics.site(), today());
@@ -181,7 +189,11 @@ async fn run(
     prepare_output_dir(&env.output_dir).await?;
     cleanup_stale_jobs(&env.output_dir).await;
     let mut job = JobDir::create(&env.output_dir).await?;
-    prepare_tool_path(job.path(), env.python.as_deref())
+    let python = match &env.python {
+        Some(python) => resolve_python(python).await,
+        None => None,
+    };
+    prepare_tool_path(job.path(), python.as_deref())
         .await
         .map_err(|_| output_dir_error())?;
     let proxy = EgressProxy::start_with(env.resolver()).await.map_err(|_| {
@@ -432,9 +444,11 @@ fn empty_browser_result(finding: &BrowserFinding) -> PublicError {
         );
     }
     match page.document_status {
-        Some(401 | 403 | 451) => PublicError::new(
+        Some(status @ (401 | 403 | 451)) => PublicError::new(
             "access_denied",
-            "The site refused to show the page to HighVi's isolated browser (HTTP 403). HighVi does not use browser sessions or bypass bot protection.",
+            format!(
+                "The site refused to show the page to HighVi's isolated browser (HTTP {status}). HighVi does not use browser sessions or bypass bot protection."
+            ),
         ),
         Some(429) => PublicError::new(
             "rate_limited",

@@ -1,7 +1,7 @@
 use highvi_core::{
     CancelHandle, JobEnvironment, JobUpdate, PublicError, RECOMMENDED_YT_DLP, SourceRequest,
-    YtDlpVersion, cancel_pair, find_browser, find_executable, prepare_output_dir, run_job,
-    validate_source, yt_dlp_version,
+    YtDlpVersion, cancel_pair, find_browser, find_executable, prepare_output_dir, resolve_python,
+    run_job, validate_source, yt_dlp_version,
 };
 use serde::Serialize;
 use std::{path::PathBuf, sync::Mutex, time::Duration};
@@ -170,7 +170,13 @@ fn cancel_job(state: State<'_, AppState>) {
 async fn dependency_status() -> DependencyStatus {
     let yt_dlp = find_executable("yt-dlp");
     let version = match &yt_dlp {
-        Some(path) => yt_dlp_version(path).await,
+        Some(path) => {
+            let python = match find_executable("python3") {
+                Some(python) => resolve_python(&python).await,
+                None => None,
+            };
+            yt_dlp_version(path, python.as_deref()).await
+        }
         None => None,
     };
     let recommended = YtDlpVersion {

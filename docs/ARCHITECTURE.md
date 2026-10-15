@@ -64,7 +64,7 @@ Extractor-related failures carry a `hint` to update yt-dlp when it is older than
 | Browser discovery | 30 s per page; gives up ~8 s after trying to play; ≤ 48 sessions, ≤ 4 000 tracked requests, ≤ 60 body reads |
 | Proxy | ≤ 64 tunnels, 8 KiB request head, 10 s head/resolve, 15 s connect, 90 s idle |
 | yt-dlp retries | 3 requests, 5 fragments, 1 extractor |
-| yt-dlp `PATH` | `<job>/bin` with only a `python3` link: no helpers (phantomjs, JS runtimes, FFmpeg) |
+| yt-dlp `PATH` | `<job>/bin` with only a link to the real `python3`: no helpers (phantomjs, FFmpeg); JS runtimes off via `--no-js-runtimes` |
 | Diagnostic report | 4 KiB, in memory, failed jobs only |
 | Mux | 30 min |
 | Jobs | 1 at a time; Chrome never runs while idle |

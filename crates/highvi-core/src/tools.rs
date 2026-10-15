@@ -8,15 +8,18 @@
 use crate::{
     error::Hint,
     process::{cancel_pair, run_captured, tool_command},
-    ytdlp::YT_DLP_FIXED_ENV,
+    ytdlp::{YT_DLP_FIXED_ENV, prepare_tool_path, ytdlp_env},
 };
 use std::{
     ffi::OsString,
-    path::Path,
+    os::unix::fs::DirBuilderExt,
+    path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
 const MAX_VERSION_CHARS: usize = 60;
 /// yt-dlp itself warns once a build is this old.
 const STALE_AFTER_DAYS: i64 = 90;
@@ -137,10 +140,55 @@ pub struct ToolVersions {
     pub browser: Option<String>,
 }
 
-pub async fn yt_dlp_version(yt_dlp: &Path) -> Option<YtDlpVersion> {
+/// A fresh private (0700) directory for one probe, removed when dropped.
+/// Creation fails rather than reuse a path someone else made.
+struct ProbeDir(PathBuf);
+
+impl ProbeDir {
+    fn create() -> Option<Self> {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos());
+        let path = std::env::temp_dir().join(format!(
+            "highvi-probe-{}-{nanos}-{}",
+            std::process::id(),
+            PROBE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::DirBuilder::new().mode(0o700).create(&path).ok()?;
+        Some(Self(path))
+    }
+}
+
+impl Drop for ProbeDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The interpreter a `python3` on `PATH` really runs. Version managers
+/// (pyenv, asdf, mise) install shell-script shims that need other programs,
+/// which yt-dlp's private `PATH` does not have.
+pub async fn resolve_python(python: &Path) -> Option<PathBuf> {
+    let output = probe(
+        python,
+        &["-I", "-c", "import sys; print(sys.executable)"],
+        None,
+    )
+    .await?;
+    let path = PathBuf::from(output.trim());
+    (path.is_absolute() && std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file()))
+        .then_some(path)
+}
+
+/// yt-dlp's version, run exactly as jobs run it (private `PATH` and `HOME`),
+/// so a build that cannot start in a job is not reported as working.
+pub async fn yt_dlp_version(yt_dlp: &Path, python: Option<&Path>) -> Option<YtDlpVersion> {
+    let directory = ProbeDir::create()?;
+    prepare_tool_path(&directory.0, python).await.ok()?;
     let output = probe(
         yt_dlp,
         &["--ignore-config", "--no-plugin-dirs", "--version"],
+        Some(ytdlp_env(&directory.0)),
     )
     .await?;
     YtDlpVersion::parse(output.lines().next()?)
@@ -148,31 +196,39 @@ pub async fn yt_dlp_version(yt_dlp: &Path) -> Option<YtDlpVersion> {
 
 /// `ffmpeg version 8.0.1-3ubuntu1 Copyright…` → `8.0.1-3ubuntu1`.
 pub async fn ffmpeg_version(ffmpeg: &Path) -> Option<String> {
-    let output = probe(ffmpeg, &["-hide_banner", "-version"]).await?;
+    let output = probe(ffmpeg, &["-hide_banner", "-version"], None).await?;
     let rest = output.lines().next()?.strip_prefix("ffmpeg version ")?;
     clean(rest.split_whitespace().next()?)
 }
 
 /// `Google Chrome 154.0.7590.0` (or Chromium's equivalent).
 pub async fn browser_version(browser: &Path) -> Option<String> {
-    let output = probe(browser, &["--version"]).await?;
+    let output = probe(browser, &["--version"], None).await?;
     clean(output.lines().next()?)
 }
 
-/// Runs `program args` for its version text. `--version` never reaches the
-/// network or a helper, so this only needs `PATH` (interpreters, wrapper
-/// scripts) and a throw-away `HOME`.
-async fn probe(program: &Path, args: &[&str]) -> Option<String> {
-    let mut env: Vec<(&str, OsString)> = ["PATH", "LANG"]
-        .into_iter()
-        .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
-        .collect();
-    env.extend(
-        YT_DLP_FIXED_ENV
-            .iter()
-            .map(|(name, value)| (*name, OsString::from(value))),
-    );
-    env.push(("HOME", std::env::temp_dir().into_os_string()));
+/// Runs `program args` for its output. With `env: None` the tool gets `PATH`
+/// (interpreters, wrapper scripts), `LANG` and a fresh private `HOME`;
+/// version flags never reach the network.
+async fn probe(
+    program: &Path,
+    args: &[&str],
+    env: Option<Vec<(&'static str, OsString)>>,
+) -> Option<String> {
+    let home = ProbeDir::create()?;
+    let env = env.unwrap_or_else(|| {
+        let mut env: Vec<(&str, OsString)> = ["PATH", "LANG"]
+            .into_iter()
+            .filter_map(|name| std::env::var_os(name).map(|value| (name, value)))
+            .collect();
+        env.extend(
+            YT_DLP_FIXED_ENV
+                .iter()
+                .map(|(name, value)| (*name, OsString::from(value))),
+        );
+        env.push(("HOME", home.0.clone().into_os_string()));
+        env
+    });
     let (_handle, mut token) = cancel_pair();
     let captured = run_captured(
         tool_command(program, args, env),
@@ -279,6 +335,38 @@ mod tests {
                 minimum: None
             }
         );
+    }
+
+    #[test]
+    fn probe_homes_are_private_and_removed() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = ProbeDir::create().unwrap();
+        let path = directory.0.clone();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        drop(directory);
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn a_shim_python_resolves_to_the_real_interpreter() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some(python) = crate::find_executable("python3") else {
+            return;
+        };
+        let directory = ProbeDir::create().unwrap();
+        // A pyenv-style shim: a shell script that execs the interpreter.
+        let shim = directory.0.join("python3");
+        std::fs::write(
+            &shim,
+            format!("#!/bin/sh\nexec '{}' \"$@\"\n", python.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let resolved = resolve_python(&shim).await.unwrap();
+        assert_ne!(resolved, shim);
+        assert!(resolved.is_absolute());
+        assert!(!std::fs::read(&resolved).unwrap().starts_with(b"#!"));
     }
 
     #[test]

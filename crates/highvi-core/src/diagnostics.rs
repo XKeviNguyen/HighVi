@@ -116,8 +116,12 @@ impl Diagnostics {
             .iter()
             .any(|(stage, _)| *stage == Stage::Browsing);
         let browser = env.chrome.as_deref().filter(|_| browser_used);
+        let python = match &env.python {
+            Some(python) => tools::resolve_python(python).await,
+            None => None,
+        };
         let (yt_dlp, ffmpeg, browser) = tokio::join!(
-            tools::yt_dlp_version(&env.yt_dlp),
+            tools::yt_dlp_version(&env.yt_dlp, python.as_deref()),
             tools::ffmpeg_version(&env.ffmpeg),
             async {
                 match browser {
@@ -132,6 +136,11 @@ impl Diagnostics {
             ffmpeg,
             browser,
         };
+    }
+
+    /// Whether the job was in `stage` when it failed.
+    pub(crate) fn failed_in(&self, stage: Stage) -> bool {
+        self.stages.last().map(|(last, _)| *last) == Some(stage)
     }
 
     pub(crate) fn finish(&mut self, error: &PublicError) {

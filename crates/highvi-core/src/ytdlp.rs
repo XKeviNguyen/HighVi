@@ -8,8 +8,10 @@
 //!
 //! yt-dlp's `PATH` is a private directory holding only a `python3` link, so
 //! it cannot start helper programs installed on the machine: extractors run
-//! `phantomjs` (with no proxy setting) on page JavaScript, and JavaScript
-//! runtimes such as `deno`, `node` or `bun` are picked up from `PATH`.
+//! `phantomjs` (with no proxy setting) on page JavaScript. JavaScript
+//! runtimes (`deno`, `node`, `bun`) are also searched for next to the Python
+//! interpreter, not only on `PATH`, so they are disabled explicitly with
+//! `--no-js-runtimes`.
 
 use std::{ffi::OsString, path::Path};
 use url::Url;
@@ -52,6 +54,7 @@ pub const YT_DLP_HERMETIC_ARGS: &[&str] = &[
     "--no-cookies",
     "--no-cookies-from-browser",
     "--no-cache-dir",
+    "--no-js-runtimes",
     "--color",
     "never",
 ];
@@ -145,6 +148,8 @@ fn push_all(args: &mut Vec<OsString>, values: &[&str]) {
 /// Creates `<job_dir>/bin` with a link to `python3` and nothing else. The
 /// link serves yt-dlp builds started through `/usr/bin/env python3` (the
 /// upstream zipapp); packaged builds name their interpreter absolutely.
+/// `python` must be the real interpreter, not a shim script that needs
+/// other programs (see `tools::resolve_python`).
 pub async fn prepare_tool_path(job_dir: &Path, python: Option<&Path>) -> std::io::Result<()> {
     let bin = job_dir.join(TOOL_BIN);
     tokio::fs::create_dir(&bin).await?;
