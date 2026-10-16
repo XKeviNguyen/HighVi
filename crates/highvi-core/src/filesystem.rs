@@ -257,7 +257,11 @@ impl Drop for JobDir {
 /// untouched for a day, are removed, and symlinks are never followed.
 pub async fn cleanup_stale_jobs(parent: &Path) {
     // Never through a symlinked or missing output directory: that could
-    // remove directories somewhere else.
+    // remove directories somewhere else. Only a process running as the
+    // user could swap the folder between this check and the removals, and
+    // such a process can delete these files itself; what is removed is
+    // still limited to unlocked, stale job directories carrying HighVi's
+    // marker.
     match tokio::fs::symlink_metadata(parent).await {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
         _ => return,
