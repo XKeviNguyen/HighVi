@@ -34,7 +34,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
-            libayatana-appindicator3-dev librsvg2-dev ffmpeg
+            libayatana-appindicator3-dev librsvg2-dev ffmpeg xvfb
 
       # End-to-end tests run the real downloader against a local HTTPS
       # fixture; pin it so a yt-dlp release cannot silently change results.
@@ -64,10 +64,17 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # The visible HighVi browser window opens on a private Xvfb display
+      # (the tests only ever use the display named here).
       - name: Test
         env:
           HIGHVI_REQUIRE_E2E: "1"
-        run: cargo test --workspace --locked
+          HIGHVI_REQUIRE_HEADED: "1"
+          HIGHVI_TEST_DISPLAY: ":99"
+        run: |
+          Xvfb :99 -screen 0 1600x1000x24 -nolisten tcp &
+          for i in $(seq 1 50); do [ -S /tmp/.X11-unix/X99 ] && break; sleep 0.1; done
+          cargo test --workspace --locked
 
       - name: JavaScript syntax
         run: |

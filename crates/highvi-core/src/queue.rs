@@ -10,7 +10,8 @@
 //! once, even when the job panics.
 
 use crate::{
-    JobOutcome, JobUpdate, PublicError, SourceKind, SourceRequest, Stage, ValidatedSource,
+    Discovery, JobOutcome, JobUpdate, PublicError, SourceKind, SourceRequest, Stage,
+    ValidatedSource,
     process::{CancelHandle, CancelToken, cancel_pair},
     validate_source,
 };
@@ -54,7 +55,8 @@ pub type JobResult = (Result<JobOutcome, PublicError>, Option<String>);
 pub type JobFuture = Pin<Box<dyn Future<Output = JobResult> + Send>>;
 pub type Report = Arc<dyn Fn(JobUpdate) + Send + Sync>;
 /// Starts one job. Production wraps [`crate::run_job`]; tests use fakes.
-pub type Runner = Arc<dyn Fn(ValidatedSource, CancelToken, Report) -> JobFuture + Send + Sync>;
+pub type Runner =
+    Arc<dyn Fn(ValidatedSource, Discovery, CancelToken, Report) -> JobFuture + Send + Sync>;
 
 /// Where the queue reports changes, in the order they happened. Called
 /// without the queue's state lock held, but with its emit lock: an
@@ -90,6 +92,10 @@ pub struct ItemView {
     pub error: Option<PublicError>,
     pub has_diagnostics: bool,
     pub saved_to: Option<String>,
+    /// This attempt uses a visible HighVi browser window.
+    pub interactive: bool,
+    /// A visible HighVi browser window may get past this failure.
+    pub can_open_in_browser: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -132,6 +138,7 @@ struct Item {
     id: u64,
     attempt: u32,
     source: ValidatedSource,
+    discovery: Discovery,
     /// Identity for duplicate detection: the full URL(s), query included.
     key: String,
     host: String,
@@ -166,7 +173,23 @@ impl Item {
             error: self.error.clone(),
             has_diagnostics: self.diagnostics.is_some(),
             saved_to: self.saved_to.clone(),
+            interactive: self.discovery == Discovery::Interactive,
+            can_open_in_browser: self.can_open_in_browser(),
         }
+    }
+
+    /// Only for pages, after an attempt ended without a video that a
+    /// visible window might find (or the user cancelled).
+    fn can_open_in_browser(&self) -> bool {
+        self.source.kind() == SourceKind::Page
+            && match self.status {
+                ItemStatus::Cancelled => true,
+                ItemStatus::Failed => self
+                    .error
+                    .as_ref()
+                    .is_some_and(|error| crate::job::browser_can_help(&error.code)),
+                _ => false,
+            }
     }
 
     /// Back to the queue as a fresh attempt.
@@ -247,6 +270,7 @@ impl State {
                 id: item.id,
                 attempt: item.attempt,
                 source: item.source.clone(),
+                discovery: item.discovery,
                 token,
             });
         }
@@ -259,6 +283,7 @@ struct Launch {
     id: u64,
     attempt: u32,
     source: ValidatedSource,
+    discovery: Discovery,
     token: CancelToken,
 }
 
@@ -355,6 +380,7 @@ impl Scheduler {
                     attempt: 1,
                     host: host(&source),
                     source,
+                    discovery: Discovery::Automatic,
                     key,
                     status: ItemStatus::Queued,
                     stage: None,
@@ -423,12 +449,13 @@ impl Scheduler {
         self.update(|state| state.items.iter_mut().for_each(cancel_item));
     }
 
-    /// Queues a failed or cancelled item again as a new attempt.
+    /// Queues a failed or cancelled item again as a new automatic attempt.
     pub fn retry(&self, id: u64) {
         self.update(|state| {
             if let Some(item) = state.item(id)
                 && matches!(item.status, ItemStatus::Failed | ItemStatus::Cancelled)
             {
+                item.discovery = Discovery::Automatic;
                 item.requeue();
             }
         });
@@ -438,8 +465,23 @@ impl Scheduler {
         self.update(|state| {
             for item in &mut state.items {
                 if item.status == ItemStatus::Failed {
+                    item.discovery = Discovery::Automatic;
                     item.requeue();
                 }
+            }
+        });
+    }
+
+    /// Queues a page again for a visible HighVi browser window, when its
+    /// last attempt ended in a way such a window might get past. The window
+    /// opens when the item's turn comes and the browser is free.
+    pub fn open_in_browser(&self, id: u64) {
+        self.update(|state| {
+            if let Some(item) = state.item(id)
+                && item.can_open_in_browser()
+            {
+                item.discovery = Discovery::Interactive;
+                item.requeue();
             }
         });
     }
@@ -606,6 +648,7 @@ async fn run_launch(scheduler: Scheduler, launch: Launch) {
         id,
         attempt,
         source,
+        discovery,
         token,
     } = launch;
     let reporter = scheduler.clone();
@@ -613,7 +656,7 @@ async fn run_launch(scheduler: Scheduler, launch: Launch) {
     // The runner is called inside the task too, so even a runner that
     // panics before returning its future cannot keep the slot.
     let runner = Arc::clone(&scheduler.inner.runner);
-    let job = async move { runner(source, token, report).await };
+    let job = async move { runner(source, discovery, token, report).await };
     let result = match scheduler.inner.runtime.spawn(job).await {
         Ok(result) => result,
         Err(_) => (
@@ -681,6 +724,8 @@ mod tests {
         started: AtomicUsize,
         enders: Mutex<HashMap<String, oneshot::Sender<End>>>,
         reports: Mutex<Vec<Report>>,
+        /// `(key, mode)` of every launch, in order.
+        modes: Mutex<Vec<(String, Discovery)>>,
     }
 
     #[derive(Default)]
@@ -703,10 +748,11 @@ mod tests {
         let fake = Arc::new(Fake::default());
         let recorder = Arc::new(Recorder::default());
         let runner_fake = Arc::clone(&fake);
-        let runner: Runner = Arc::new(move |source, mut cancel, report| {
+        let runner: Runner = Arc::new(move |source, discovery, mut cancel, report| {
             let fake = Arc::clone(&runner_fake);
             let (sender, receiver) = oneshot::channel();
             let key = source.discovery_target().path().to_string();
+            fake.modes.lock().unwrap().push((key.clone(), discovery));
             fake.enders.lock().unwrap().insert(key.clone(), sender);
             fake.reports.lock().unwrap().push(Arc::clone(&report));
             let now = fake.running.fetch_add(1, Ordering::SeqCst) + 1;
@@ -1084,7 +1130,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_runner_that_panics_before_returning_frees_its_slot() {
         let recorder = Arc::new(Recorder::default());
-        let runner: Runner = Arc::new(|source, _cancel, _report| {
+        let runner: Runner = Arc::new(|source, _discovery, _cancel, _report| {
             assert!(source.discovery_target().path() != "/v0", "runner bug");
             Box::pin(async {
                 (
@@ -1133,6 +1179,80 @@ mod tests {
             Some("ytdlp_too_old")
         );
         assert_eq!(fake.started.load(Ordering::SeqCst), 1);
+    }
+
+    /// Waits until the last launch was `key` in `mode`.
+    async fn launched(fake: &Fake, key: &str, mode: Discovery) {
+        for _ in 0..500 {
+            if fake.modes.lock().unwrap().last() == Some(&(key.to_string(), mode)) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        panic!(
+            "{key} never launched as {mode:?}: {:?}",
+            fake.modes.lock().unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn only_pages_a_window_might_help_can_open_in_the_highvi_browser() {
+        let (scheduler, fake, _) = setup();
+        scheduler.set_concurrency(1).unwrap();
+        let mut sources = pages(0..2);
+        sources.push(SourceRequest::DirectHls {
+            playlist_url: "https://cdn.example/v2.m3u8".into(),
+            referer_page_url: "https://site.example/watch".into(),
+        });
+        let added = scheduler.add(sources);
+        assert!(added.rejected.is_empty(), "{:?}", added.rejected);
+        let ids = added.added;
+        scheduler.start();
+        end(&fake, 0, End::Fail("host_firewall_block")).await;
+        end(&fake, 1, End::Fail("rate_limited")).await;
+        let direct = loop {
+            if let Some(sender) = fake.enders.lock().unwrap().remove("/v2.m3u8") {
+                break sender;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        };
+        let _ = direct.send(End::Fail("host_firewall_block"));
+        until(&scheduler, |snapshot| snapshot.counts.failed == 3).await;
+        let view = |id| {
+            scheduler
+                .snapshot()
+                .items
+                .into_iter()
+                .find(|item| item.id == id)
+                .unwrap()
+        };
+        // A refused page: yes. Rate limiting, or a direct playlist: no.
+        assert!(view(ids[0]).can_open_in_browser);
+        assert!(!view(ids[1]).can_open_in_browser);
+        assert!(!view(ids[2]).can_open_in_browser);
+        scheduler.open_in_browser(ids[1]);
+        scheduler.open_in_browser(ids[2]);
+        assert_eq!(scheduler.snapshot().counts.failed, 3, "ignored");
+
+        scheduler.open_in_browser(ids[0]);
+        until(&scheduler, |snapshot| snapshot.counts.running == 1).await;
+        let opened = view(ids[0]);
+        assert!(opened.interactive && opened.status == ItemStatus::Running);
+        assert_eq!(opened.attempt, 2);
+        launched(&fake, "/v0", Discovery::Interactive).await;
+        // Closed by the user: it may be opened again. A plain retry is
+        // automatic again.
+        end(&fake, 0, End::Fail("browser_closed")).await;
+        until(&scheduler, |snapshot| snapshot.counts.failed == 3).await;
+        assert!(view(ids[0]).can_open_in_browser);
+        scheduler.retry(ids[0]);
+        until(&scheduler, |snapshot| snapshot.counts.running == 1).await;
+        assert!(!view(ids[0]).interactive);
+        launched(&fake, "/v0", Discovery::Automatic).await;
+        end(&fake, 0, End::Done).await;
+        until(&scheduler, |snapshot| snapshot.counts.completed == 1).await;
+        // Finished items cannot be reopened.
+        assert!(!view(ids[0]).can_open_in_browser);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

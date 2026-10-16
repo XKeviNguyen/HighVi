@@ -45,6 +45,8 @@ Có những trang chỉ đưa bản đồ kho báu khi bạn nói mình đến t
 
 **Có cần DevTools hay F12 không?** Không. Chỉ cần dán link trang. Nếu `yt-dlp` không biết trang đó, HighVi mở trang trong một Chrome riêng, dùng xong là bỏ (không dùng hồ sơ, không cookie của bạn, mọi request đều qua lớp bảo vệ mạng), để trình phát của chính trang tự tải, rồi chọn video chính chứ không phải quảng cáo. Chế độ **Link playlist** chỉ là đường lui nâng cao khi bạn đã có sẵn link `.m3u8`.
 
+**Trang web từ chối HighVi?** Có những trang (thường đứng sau Cloudflare) chặn trình duyệt tự động chạy ẩn, nhưng vẫn cho trình duyệt bình thường xem. Khi đó dòng bị lỗi sẽ có nút **Mở trong trình duyệt HighVi**: một cửa sổ HighVi riêng, hiện ra để bạn tự bấm phát video (xem bên dưới).
+
 ## ✅ HighVi làm gì
 
 1. Bạn dán link rồi bấm **Tải MP4**.
@@ -53,12 +55,49 @@ Có những trang chỉ đưa bản đồ kho báu khi bạn nói mình đến t
 4. Các mảnh được tải về và ghép thành một file MP4 ngay trên máy bạn. Bạn thấy tiến độ, tốc độ, thời gian còn lại, và có thể bấm **Hủy** bất cứ lúc nào.
 5. Video xong nằm trong **`~/Downloads/HighVi`**, đặt theo tên video. Nếu trùng tên, HighVi thêm ` (2)`. Không bao giờ ghi đè. Bấm **Mở thư mục** để xem.
 
+## 🧭 Dùng hàng chờ
+
+1. Dán một hoặc nhiều link trang video, mỗi dòng một link (tối đa 100 link mỗi lần), rồi bấm **Thêm vào hàng chờ**. Link trùng hay không hợp lệ sẽ được liệt kê, không bị thêm vào.
+2. Bấm **Bắt đầu tải**. Ô **Cùng lúc** cho chạy 1 đến 4 video một lúc; mặc định là 2. Giảm số này không bao giờ làm dừng video đang tải: các video dư sẽ tải xong trước.
+3. Mỗi dòng cho biết đang ở bước nào: đang tìm video, *đang chờ trình duyệt riêng* (trang cần trình duyệt thì lần lượt từng trang), đang tải, *đang chờ ghép video*, đang lưu.
+4. Mỗi dòng có **Hủy**, **Thử lại**, **Xóa**, và với trang mà cửa sổ hiện ra có thể giúp được thì có **Mở trong trình duyệt HighVi**. Cho cả hàng chờ: **Tạm dừng hàng chờ**, **Hủy tất cả**, **Thử lại các video lỗi**, **Xóa các video đã xong**.
+5. Dòng bị lỗi có thể hiện thông tin chẩn đoán (các bước, mã lỗi, phiên bản công cụ, tên máy chủ; không bao giờ có link, cookie hay mật khẩu) để bạn chép vào báo lỗi.
+
+Hàng chờ chỉ nằm trong bộ nhớ: đóng HighVi sẽ dừng các video đang tải (file đã xong vẫn còn) và xóa danh sách.
+
+## 🌐 Mở trong trình duyệt HighVi
+
+Khi một trang chặn trình duyệt ẩn của HighVi, hoặc trình phát cần bạn bấm phát, nút **Mở trong trình duyệt HighVi** sẽ mở trang đó trong một cửa sổ HighVi hiện ra:
+
+1. Cửa sổ dùng một hồ sơ Chrome mới tinh, riêng cho đúng trang này. Đây không phải trình duyệt của bạn: không lịch sử, không đăng nhập, không cookie, không tiện ích, và bị xóa sau khi xong.
+2. Dùng trang như bình thường và bấm phát video. HighVi theo dõi lưu lượng mạng của cửa sổ để tìm luồng video. Không cần DevTools, không cần chép link.
+3. Ngay khi một luồng video qua được các bước kiểm tra của HighVi, cửa sổ đóng lại và việc tải tiếp tục trong hàng chờ như bình thường. Quảng cáo hay đoạn xem trước không qua được kiểm tra thì không làm cửa sổ đóng.
+
+- Lưu lượng web của cửa sổ vẫn đi qua lớp bảo vệ mạng của HighVi (chỉ địa chỉ `https://` công khai), và sandbox của Chrome vẫn bật. Link mà nó định chuyển cho ứng dụng khác (`mailto:`, `magnet:`, …) sẽ không đi đâu cả, và tải file lên bị tắt.
+- HighVi không bao giờ tự bấm phát hay bấm gì thay bạn trong cửa sổ.
+- Cửa sổ chờ tối đa 10 phút. Mỗi lần chỉ có một trình duyệt HighVi: nếu trang khác đang dùng, cửa sổ sẽ mở khi trình duyệt rảnh. Các video không cần trình duyệt vẫn tải tiếp.
+- Đóng cửa sổ là kết thúc lần thử đó (`browser_closed`). Nút **Hủy** cũng dùng được.
+- Đây là một cửa sổ desktop bình thường: nó dùng chung clipboard như mọi ứng dụng, và trên X11 (không phải Wayland), các ứng dụng trên cùng màn hình có thể thấy cửa sổ của nhau.
+
+> [!NOTE]
+> Trang web vẫn có thể từ chối cả trình duyệt hiện ra, hoặc bắt bạn chứng minh mình là người. HighVi không bao giờ trả lời các bước kiểm tra đó thay bạn. Nếu trang cho bạn vào, đó là vì bạn được phép, chứ không phải vì HighVi lách qua được gì.
+
 ## 🛑 Những điều HighVi không bao giờ làm
 
 - Phá DRM, tường phí hay chuyện đăng nhập.
 - Dùng cookie hay phiên đăng nhập trên trình duyệt của bạn.
 - Giả làm trình duyệt để lách qua chặn bot.
 - Chạy plugin hay lệnh phụ từ cấu hình `yt-dlp` của bạn.
+- Tự giải các bước kiểm tra bot hay CAPTCHA, hoặc chép cookie từ trình duyệt của chính bạn.
+
+## 🔒 Riêng tư và an toàn
+
+- **Không có gì rời khỏi máy bạn ngoài chính video được tải.** HighVi không có tài khoản, không gửi số liệu sử dụng, không tự kiểm tra cập nhật.
+- **Link chỉ nằm trong HighVi.** Link video có chữ ký không bao giờ tới giao diện của HighVi, nhật ký, hay dòng lệnh của chương trình khác. Video đã lưu không mang link hay tag nguồn.
+- **Một lớp bảo vệ cho mọi lưu lượng.** `yt-dlp` và trình duyệt chỉ ra được các địa chỉ `https://` công khai, qua lớp bảo vệ mạng của HighVi. Mạng ở nhà hay ở công ty của bạn thì chúng không với tới được.
+- **Chỗ làm việc dùng xong là bỏ.** Mỗi lần tải dùng một thư mục riêng (`~/Downloads/HighVi/.highvi-job-…`, quyền `0700`), bị xóa khi xong, và cả sau khi app bị sập, lúc HighVi mở lại. Nếu HighVi bị tắt ngang, các công cụ của nó cũng dừng theo.
+- **Không bất ngờ trên ổ đĩa.** HighVi không bao giờ ghi đè file; trùng tên thì thêm ` (2)`.
+- **Thông tin chẩn đoán là của bạn.** Chỉ hiện khi bạn yêu cầu, và không bao giờ được gửi đi đâu.
 
 > [!IMPORTANT]
 > Chỉ tải video của bạn hoặc video bạn được phép tải.
@@ -95,21 +134,36 @@ npm run dev     # mở HighVi
 npm run build   # đóng gói .deb và AppImage
 ```
 
-## 📦 Cài đặt
+## 📦 Cài đặt, nâng cấp, gỡ bỏ
 
-Hiện chưa có bản phát hành sẵn; hãy tự đóng gói (xem **Bắt đầu**), rồi:
+Hiện chưa có bản phát hành sẵn; hãy tự đóng gói (xem **Bắt đầu**).
+
+**Cài file `.deb`** (Ubuntu/Debian; tự cài kèm `yt-dlp` và FFmpeg):
 
 ```bash
-# .deb (Ubuntu/Debian): tự cài kèm yt-dlp và FFmpeg
-# (trên Ubuntu 24.04, cài thêm yt-dlp mới bằng pipx: xem Bắt đầu)
 sudo apt install ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+```
 
-# hoặc AppImage (cần có sẵn yt-dlp và FFmpeg trong PATH)
+Trên Ubuntu 24.04, cài thêm `yt-dlp` mới bằng pipx (xem **Bắt đầu**). Muốn tìm video trên trang có trình phát dựng bằng JavaScript, và để dùng **Mở trong trình duyệt HighVi**, hãy cài Google Chrome hoặc Chromium; bản Chromium snap của Ubuntu cũng dùng được.
+
+**Nâng cấp** lên bản mới hơn: cài file `.deb` mới y như trên. Nếu số phiên bản không đổi, thêm `--reinstall`, không thì apt giữ bản cũ:
+
+```bash
+sudo apt install --reinstall ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+```
+
+**Gỡ cài đặt**: `sudo apt remove high-vi`. Video của bạn trong `~/Downloads/HighVi` vẫn được giữ.
+
+**AppImage** (cần có sẵn `yt-dlp` và FFmpeg trong `PATH`):
+
+```bash
 chmod +x target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
 ./target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
 ```
 
-Nếu AppImage báo lỗi FUSE, chạy với `APPIMAGE_EXTRACT_AND_RUN=1`. Muốn tìm video trên trang có trình phát dựng bằng JavaScript thì cài thêm Google Chrome hoặc Chromium.
+Nếu nó báo lỗi FUSE, chạy với `APPIMAGE_EXTRACT_AND_RUN=1`.
+
+Video được lưu ở **`~/Downloads/HighVi`** (hoặc `Downloads/HighVi` trong thư mục Tải xuống theo ngôn ngữ máy bạn).
 
 ## 🧯 Khi có lỗi
 
@@ -134,13 +188,31 @@ Nếu AppImage báo lỗi FUSE, chạy với `APPIMAGE_EXTRACT_AND_RUN=1`. Muố
 | `download_timeout` | Một phần tải lâu hơn 24 giờ. | Thử lại với mạng nhanh hơn. |
 | `insufficient_disk_space` | Không đủ chỗ trống cho video. | Dọn bớt rồi thử lại. |
 | `discovery_overloaded` | Trang gửi quá nhiều request, trình duyệt riêng không theo dõi kịp. | Dùng **Link playlist** nếu bạn có link `.m3u8`. |
+| `browser_closed` | Cửa sổ trình duyệt HighVi bị đóng trước khi video bắt đầu phát. | Mở lại và bấm phát video trong đó, hoặc để nguyên dòng đó. |
+| `interactive_timeout` | Không có video nào được phát trong cửa sổ trình duyệt HighVi trong 10 phút. | Mở lại; bấm phát video trong cửa sổ. |
+| `browser_no_display` | HighVi không tìm thấy màn hình desktop để mở cửa sổ trình duyệt. | Chạy HighVi từ phiên desktop bình thường của bạn. |
 | `queue_full` / `batch_too_large` | Hàng chờ chứa tối đa 200 video, mỗi lần thêm tối đa 100 link. | Xóa các dòng đã xong, hoặc thêm ít link hơn. |
+
+## ❓ Hỏi đáp
+
+**Sao trang phát được trong Chrome của tôi mà HighVi lại lỗi?** Thường là do trang chặn trình duyệt tự động chạy ẩn (bạn sẽ thấy `host_firewall_block` hoặc `access_denied`). Hãy dùng **Mở trong trình duyệt HighVi**. Nếu trang chặn cả cửa sổ đó, HighVi không tải được từ trang này.
+
+**Mở trong trình duyệt HighVi có dùng hồ sơ Chrome, mật khẩu hay cookie của tôi không?** Không. Đó là một hồ sơ riêng, trống trơn, và bị xóa sau khi xong. HighVi không bao giờ đọc dữ liệu trình duyệt của bạn.
+
+**YouTube báo lỗi 403.** `yt-dlp` của bạn quá cũ với YouTube (cần bản 2026.08.19 trở lên). Cập nhật như ở phần **Bắt đầu**.
+
+**Có chạy được trên Wayland không? Màn hình HiDPI thì sao?** Có. HighVi và cửa sổ trình duyệt của nó chạy trực tiếp trên Wayland lẫn X11, và co giãn theo màn hình.
+
+**Tải được bao nhiêu video cùng lúc?** Tối đa bốn; bạn chọn từ 1 đến 4. Trang nào cần trình duyệt thì dùng lần lượt từng trang.
+
+**Có tải được video có DRM hay video phát trực tiếp không?** Không, và HighVi cũng không bao giờ thử.
 
 ## 🚧 Giới hạn hiện tại
 
 - **Chỉ HLS và MP4 thường.** Trang chỉ có DASH, phát trực tiếp và video có DRM sẽ bị từ chối, cố ý vậy.
 - **Không đăng nhập, không cookie.** Video cần đăng nhập, hoặc cần cookie mà trang đặt cho trình phát, sẽ không tải được. HighVi không bao giờ mượn phiên trình duyệt của bạn.
-- **Tìm bằng trình duyệt cần Google Chrome hoặc Chromium.** HighVi không kèm trình duyệt. Bản Chromium dạng snap của Ubuntu cũng dùng được (mọi bài kiểm thử trình duyệt đều đạt với Chromium 155 bản snap).
+- **Tìm bằng trình duyệt và Mở trong trình duyệt HighVi cần Google Chrome hoặc Chromium.** HighVi không kèm trình duyệt. Bản Chromium dạng snap của Ubuntu cũng dùng được (mọi bài kiểm thử trình duyệt đều đạt với Chromium 155 bản snap).
+- **Trang web vẫn có thể từ chối cả cửa sổ trình duyệt HighVi** (kiểm tra bot, bắt đăng nhập, chặn theo vùng). HighVi báo lại điều đó, chứ không lách qua.
 - **Trình phát cần bấm nút đặc biệt** (lớp “play” riêng, hỏi tuổi, hỏi đồng ý cookie) sẽ không được bấm. HighVi chỉ bật các thẻ `<video>` bình thường.
 - **Không dùng proxy hệ thống hay proxy công ty.** Lớp bảo vệ mạng của HighVi là lối ra duy nhất. Nếu mạng chặn kết nối trực tiếp thì sẽ không tải được.
 - **Media dùng `http://` bị từ chối,** kể cả khi trang là `https://`.

@@ -190,6 +190,9 @@ pub(crate) struct Route {
     pub for_headless: Option<Arc<Route>>,
     /// Send the body in pieces of this size with this pause between them.
     pub trickle: Option<(usize, Duration)>,
+    /// Answer 403 to clients that are not browsers (no `Sec-Fetch-Dest`),
+    /// as media servers bound to a browser session do.
+    pub browser_only: bool,
 }
 
 impl Route {
@@ -204,6 +207,14 @@ impl Route {
             headers: Vec::new(),
             for_headless: None,
             trickle: None,
+            browser_only: false,
+        }
+    }
+
+    pub fn browser_only(self) -> Self {
+        Self {
+            browser_only: true,
+            ..self
         }
     }
 
@@ -429,6 +440,7 @@ async fn serve(
     let mut host = String::new();
     let mut referer = None;
     let mut headless = false;
+    let mut browser = false;
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
             match name.trim().to_ascii_lowercase().as_str() {
@@ -442,6 +454,9 @@ async fn serve(
                 }
                 "referer" => referer = Some(value.trim().to_string()),
                 "user-agent" => headless = value.contains("HeadlessChrome"),
+                // Browsers send it; yt-dlp (which sends Sec-Fetch-Mode)
+                // does not.
+                "sec-fetch-dest" => browser = true,
                 _ => {}
             }
         }
@@ -471,6 +486,10 @@ async fn serve(
             for_headless: Some(variant),
             ..
         }) if headless => (*variant).clone(),
+        Some(route) if route.browser_only && !browser => Route {
+            status: 403,
+            ..Route::ok("text/plain", "browsers only")
+        },
         Some(route) => route,
         None => Route {
             status: 404,
@@ -568,6 +587,22 @@ impl Fixture {
         request: SourceRequest,
         cancel_after: Option<(Stage, Duration)>,
     ) -> (Result<JobOutcome, PublicError>, Vec<JobUpdate>) {
+        self.run_mode(
+            environment,
+            request,
+            crate::Discovery::Automatic,
+            cancel_after,
+        )
+        .await
+    }
+
+    pub async fn run_mode(
+        &self,
+        environment: &JobEnvironment,
+        request: SourceRequest,
+        discovery: crate::Discovery,
+        cancel_after: Option<(Stage, Duration)>,
+    ) -> (Result<JobOutcome, PublicError>, Vec<JobUpdate>) {
         let source = validate_source(&request).unwrap();
         let (handle, token) = cancel_pair();
         let handle = Arc::new(handle);
@@ -589,7 +624,7 @@ impl Fixture {
             }
             updates.lock().unwrap().push(update);
         };
-        let (result, diagnostics) = run_job(environment, &source, token, &report).await;
+        let (result, diagnostics) = run_job(environment, &source, discovery, token, &report).await;
         *self.last_report.lock().unwrap() = diagnostics.render();
         (result, updates.into_inner().unwrap())
     }
@@ -1031,7 +1066,13 @@ async fn cancellation_stops_the_download_and_cleans_up() {
     let source = validate_source(&direct("https://media.test/slow.m3u8")).unwrap();
     let (handle, token) = cancel_pair();
     let environment = fixture.environment();
-    let job = run_job(&environment, &source, token, &|_| {});
+    let job = run_job(
+        &environment,
+        &source,
+        crate::Discovery::Automatic,
+        token,
+        &|_| {},
+    );
     let trigger = async {
         fixture.server.hits_log.wait_for("/slow/s0.ts").await;
         handle.cancel();
@@ -1095,10 +1136,16 @@ async fn signed_urls_do_not_outlive_the_download() {
             }
         }
     };
-    run_job(&fixture.environment(), &source, token, &report)
-        .await
-        .0
-        .unwrap();
+    run_job(
+        &fixture.environment(),
+        &source,
+        crate::Discovery::Automatic,
+        token,
+        &report,
+    )
+    .await
+    .0
+    .unwrap();
     let names = seen.lock().unwrap().clone();
     assert!(!names.is_empty(), "the job directory was not inspected");
     assert!(
@@ -1559,7 +1606,14 @@ async fn a_bot_check_in_the_browser_is_reported_as_a_refusal() {
             environment.output_dir = fixture.output_dir.join(key.replace('/', "-"));
             let source = validate_source(&page(&format!("https://{key}"))).unwrap();
             let (_handle, token) = cancel_pair();
-            let (result, diagnostics) = run_job(&environment, &source, token, &|_| {}).await;
+            let (result, diagnostics) = run_job(
+                &environment,
+                &source,
+                crate::Discovery::Automatic,
+                token,
+                &|_| {},
+            )
+            .await;
             (result, diagnostics.render(), *code, *evidence)
         }
     };
@@ -2136,11 +2190,14 @@ fn real_scheduler(fixture: &Fixture) -> (crate::Scheduler, Arc<QueueLog>) {
             template.output_dir.clone(),
         )
     });
-    let runner: crate::Runner = Arc::new(move |source, cancel, report| {
+    let runner: crate::Runner = Arc::new(move |source, discovery, cancel, report| {
         let environment = Arc::clone(&environment);
         Box::pin(async move {
             let (result, diagnostics) =
-                run_job(&environment, &source, cancel, &|update| report(update)).await;
+                run_job(&environment, &source, discovery, cancel, &|update| {
+                    report(update)
+                })
+                .await;
             let rendered = result.is_err().then(|| diagnostics.render());
             (result, rendered)
         })
@@ -2675,4 +2732,632 @@ async fn source_tags_and_chapters_are_not_saved() {
     assert!(muxed.success());
     assert!(!tagged(&output), "source tags reached the saved video");
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A fixture with a display for the visible HighVi browser: an Xvfb named
+/// by `HIGHVI_TEST_DISPLAY` (never the desktop the tests run on).
+async fn headed_fixture() -> Option<Fixture> {
+    if std::env::var_os("HIGHVI_TEST_DISPLAY").is_none() {
+        assert!(
+            std::env::var_os("HIGHVI_REQUIRE_HEADED").is_none(),
+            "HIGHVI_REQUIRE_HEADED is set but HIGHVI_TEST_DISPLAY is not"
+        );
+        eprintln!("skipping visible-browser test: HIGHVI_TEST_DISPLAY not set");
+        return None;
+    }
+    browser_fixture().await
+}
+
+/// A page whose player asks for its stream only after `delay_ms`, longer
+/// than headless discovery waits, as players that need the user do.
+fn late_player(title: &str, delay_ms: u32) -> String {
+    format!(
+        "<!doctype html><title>{title}</title><video></video><script>\
+         setTimeout(() => fetch('https://media.test/muxed/master.m3u8'), {delay_ms});\
+         </script>"
+    )
+}
+
+/// The Chrome browser processes (not renderers) with a profile under `output`.
+fn chrome_browser_pids_in(output: &Path) -> Vec<i32> {
+    let needle = output.to_string_lossy().into_owned();
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let pid: i32 = entry.file_name().to_str()?.parse().ok()?;
+            let cmdline = std::fs::read(entry.path().join("cmdline")).ok()?;
+            let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+            (cmdline.contains(&needle)
+                && cmdline.contains("--remote-debugging-pipe")
+                && !cmdline.contains("--type="))
+            .then_some(pid)
+        })
+        .collect()
+}
+
+/// The reported incident (a page that refuses headless Chrome with a
+/// Cloudflare challenge but shows a normal browser the page) and its
+/// recovery: automatic discovery reports the refusal; the visible HighVi
+/// browser, same profile rules, proxy and sandbox, gets the page, waits for
+/// the player and downloads a playable MP4.
+#[tokio::test]
+async fn a_page_refused_to_headless_chrome_downloads_in_the_highvi_browser() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    let challenge = "<!doctype html><title>Just a moment...</title>";
+    fixture.server.route(
+        "page.test/guarded",
+        Route::html(&late_player("Guarded video", 15_000)).headless_gets(
+            Route::status(403, "text/html", challenge).header("cf-mitigated", "challenge"),
+        ),
+    );
+    let (automatic, _) = fixture.run(page("https://page.test/guarded")).await;
+    assert_code(&automatic, "host_firewall_block");
+    assert!(crate::browser_can_help("host_firewall_block"));
+
+    let (result, updates) = fixture
+        .run_mode(
+            &fixture.environment(),
+            page("https://page.test/guarded"),
+            crate::Discovery::Interactive,
+            None,
+        )
+        .await;
+    let report = fixture.last_report.lock().unwrap().clone();
+    let outcome = result.unwrap_or_else(|error| panic!("{error:?}\n{report}"));
+    assert_eq!(outcome.title, "Guarded video");
+    let (streams, _, clean) = fixture.inspect(&outcome.saved_to);
+    assert_eq!(streams, ["video", "audio"]);
+    assert!(clean);
+    let stages: Vec<Stage> = updates.iter().map(|update| update.stage).collect();
+    assert!(stages.contains(&Stage::WaitingForUser), "{stages:?}");
+    assert!(!stages.contains(&Stage::Browsing), "{stages:?}");
+    assert!(report.contains("document 200"), "{report}");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// Closing the window ends the attempt as "closed", not as a crash, and
+/// leaves nothing behind. Chrome treats SIGTERM as closing its windows once
+/// it is up (exit 0); before its handler exists, SIGTERM is a kill, which
+/// is a crash, so the test waits until the page is showing.
+#[tokio::test]
+async fn closing_the_highvi_browser_ends_the_attempt() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/quiet",
+        Route::html("<!doctype html><title>Quiet</title><p>no video</p>"),
+    );
+    {
+        let closer = {
+            let output = fixture.output_dir.clone();
+            let hits = Arc::clone(&fixture.server.hits_log);
+            tokio::spawn(async move {
+                for _ in 0..600 {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    let pids = chrome_browser_pids_in(&output);
+                    let page_shown = hits
+                        .list
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .any(|hit| hit.host == "page.test");
+                    if !pids.is_empty() && page_shown {
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        for pid in pids {
+                            // SAFETY: SIGTERM to the test's own Chrome, which
+                            // Chrome handles as closing its windows.
+                            unsafe { libc::kill(pid, libc::SIGTERM) };
+                        }
+                        return true;
+                    }
+                }
+                false
+            })
+        };
+        let (result, _) = fixture
+            .run_mode(
+                &fixture.environment(),
+                page("https://page.test/quiet"),
+                crate::Discovery::Interactive,
+                None,
+            )
+            .await;
+        assert!(closer.await.unwrap(), "no browser window was seen");
+        assert_code(&result, "browser_closed");
+        assert_no_chrome_left(&fixture).await;
+        fixture.assert_no_job_dirs();
+        fixture.server.hits_log.list.lock().unwrap().clear();
+    }
+    assert!(crate::browser_can_help("browser_closed"));
+}
+
+/// Cancelling while the window waits for the user closes it at once.
+#[tokio::test]
+async fn cancelling_while_waiting_for_the_user_closes_the_window() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    fixture
+        .server
+        .route("page.test/wait", Route::html(&late_player("Wait", 60_000)));
+    let started = std::time::Instant::now();
+    let (result, _) = fixture
+        .run_mode(
+            &fixture.environment(),
+            page("https://page.test/wait"),
+            crate::Discovery::Interactive,
+            Some((Stage::WaitingForUser, Duration::from_secs(2))),
+        )
+        .await;
+    assert_code(&result, "cancelled");
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// A window nobody uses is closed when its time is up.
+#[tokio::test]
+async fn the_highvi_browser_closes_when_its_time_is_up() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    fixture
+        .server
+        .route("page.test/idle", Route::html(&late_player("Idle", 60_000)));
+    let mut environment = fixture.environment();
+    environment.limits.interactive_budget = Duration::from_secs(4);
+    let (result, _) = fixture
+        .run_mode(
+            &environment,
+            page("https://page.test/idle"),
+            crate::Discovery::Interactive,
+            None,
+        )
+        .await;
+    assert_code(&result, "interactive_timeout");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// The HighVi browser in the queue: a page reopened in a visible window
+/// holds the one browser while it waits for the user; a direct playlist
+/// still downloads, an automatic page waits its turn for the browser,
+/// lowering the target cancels nothing, and everything finishes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_highvi_browser_waits_for_the_user_without_blocking_the_queue() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/guarded",
+        Route::html(&late_player("Guarded", 12_000)).headless_gets(
+            Route::status(403, "text/html", "<title>Just a moment...</title>")
+                .header("cf-mitigated", "challenge"),
+        ),
+    );
+    fixture.server.route(
+        "page.test/auto",
+        Route::html(&late_player("Automatic", 500)),
+    );
+    let (scheduler, _) = real_scheduler(&fixture);
+    scheduler.set_concurrency(4).unwrap();
+    let guarded = scheduler.add(vec![page("https://page.test/guarded")]).added[0];
+    scheduler.start();
+    let item = |id: u64| {
+        scheduler
+            .snapshot()
+            .items
+            .into_iter()
+            .find(|item| item.id == id)
+            .unwrap()
+    };
+    let started = Instant::now();
+    while item(guarded).status != crate::ItemStatus::Failed {
+        assert!(
+            started.elapsed() < Duration::from_secs(60),
+            "{:?}",
+            item(guarded)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(item(guarded).error.unwrap().code, "host_firewall_block");
+    assert!(item(guarded).can_open_in_browser);
+    scheduler.open_in_browser(guarded);
+    while item(guarded).stage != Some(Stage::WaitingForUser) {
+        assert!(
+            started.elapsed() < Duration::from_secs(90),
+            "{:?}",
+            item(guarded)
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let others = scheduler
+        .add(vec![
+            page("https://page.test/auto"),
+            direct("https://media.test/muxed/master.m3u8"),
+        ])
+        .added;
+    // Three running; the target drops below that. Nothing is cancelled.
+    scheduler.set_concurrency(1).unwrap();
+    let mut most_browsers = 0;
+    let mut auto_waited_for_browser = false;
+    let mut direct_done_while_user_waits = false;
+    loop {
+        most_browsers = most_browsers.max(chrome_browser_processes(&fixture));
+        let snapshot = scheduler.snapshot();
+        assert!(snapshot.counts.cancelled == 0, "{snapshot:?}");
+        let user_waits = item(guarded).stage == Some(Stage::WaitingForUser);
+        auto_waited_for_browser |=
+            user_waits && item(others[0]).stage == Some(Stage::WaitingForBrowser);
+        direct_done_while_user_waits |=
+            user_waits && item(others[1]).status == crate::ItemStatus::Completed;
+        if snapshot.counts.completed == 3 {
+            break;
+        }
+        assert!(snapshot.counts.failed == 0, "{snapshot:?}");
+        assert!(started.elapsed() < Duration::from_secs(180), "{snapshot:?}");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(most_browsers, 1, "more than one browser ran at once");
+    assert!(
+        auto_waited_for_browser,
+        "the automatic page never waited for the browser"
+    );
+    assert!(
+        direct_done_while_user_waits,
+        "the direct playlist waited for the user"
+    );
+    assert!(item(guarded).interactive);
+    assert_eq!(scheduler.snapshot().active, 0);
+    tokio::time::timeout(Duration::from_secs(10), scheduler.shutdown())
+        .await
+        .unwrap();
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// Measurement, not a pass/fail check: what a browser session costs,
+/// headless (automatic discovery of a script-driven page) and visible (the
+/// HighVi browser), three times each: time to a saved MP4, peak Chrome
+/// processes and their memory, cleanup time, and HighVi's own memory after
+/// repeated sessions. Run alone on an Xvfb:
+/// `HIGHVI_TEST_DISPLAY=:99 cargo test -p highvi-core browser_cost_profile -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "measurement; run alone"]
+async fn browser_cost_profile() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    fixture
+        .server
+        .route("page.test/fast", Route::html(&late_player("Fast", 300)));
+    const PAGE_KIB: u64 = 4;
+    let chrome = |output: &Path| {
+        let needle = output.to_string_lossy().into_owned();
+        let mut count = 0;
+        let mut rss_kib = 0;
+        for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+            let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+                continue;
+            };
+            let cmdline = String::from_utf8_lossy(&cmdline);
+            if cmdline.contains(&needle) && cmdline.contains("chrome") {
+                count += 1;
+                if let Ok(statm) = std::fs::read_to_string(entry.path().join("statm")) {
+                    let pages: u64 = statm
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("0")
+                        .parse()
+                        .unwrap_or(0);
+                    rss_kib += pages * PAGE_KIB;
+                }
+            }
+        }
+        (count, rss_kib)
+    };
+    let own_rss = || {
+        let statm = std::fs::read_to_string("/proc/self/statm").unwrap();
+        statm
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            * PAGE_KIB
+    };
+    println!(
+        "mode         run  total_s  launch_s  chrome_procs  chrome_MiB  cleanup_ms  highvi_MiB"
+    );
+    for (label, discovery) in [
+        ("headless", crate::Discovery::Automatic),
+        ("visible", crate::Discovery::Interactive),
+    ] {
+        for run in 1..=3 {
+            let output = fixture.output_dir.clone();
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let sampler = {
+                let stop = Arc::clone(&stop);
+                tokio::spawn(async move {
+                    let started = Instant::now();
+                    let (mut launch, mut peak, mut peak_rss) = (None, 0, 0);
+                    while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                        let (count, rss) = chrome(&output);
+                        if count > 0 && launch.is_none() {
+                            launch = Some(started.elapsed());
+                        }
+                        peak = peak.max(count);
+                        peak_rss = peak_rss.max(rss);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    (launch, peak, peak_rss)
+                })
+            };
+            let started = Instant::now();
+            let (result, _) = fixture
+                .run_mode(
+                    &fixture.environment(),
+                    page("https://page.test/fast"),
+                    discovery,
+                    None,
+                )
+                .await;
+            let total = started.elapsed();
+            let saved = result.unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            let ended = Instant::now();
+            while chrome(&fixture.output_dir).0 > 0 && ended.elapsed() < Duration::from_secs(10) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let cleanup = ended.elapsed();
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let (launch, peak, peak_rss) = sampler.await.unwrap();
+            let _ = std::fs::remove_file(&saved.saved_to);
+            println!(
+                "{label:<12} {run:>3}  {:>7.1}  {:>8.1}  {peak:>12}  {:>10}  {:>10}  {:>10}",
+                total.as_secs_f64(),
+                launch.map_or(f64::NAN, |at| at.as_secs_f64()),
+                peak_rss / 1024,
+                cleanup.as_millis(),
+                own_rss() / 1024
+            );
+        }
+    }
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// Codex P1: a playlist that fails HighVi's checks (here one only the
+/// browser itself may load, like an advert or a preview) comes first. The
+/// window must stay open, keep watching, and take the real video the user
+/// starts later.
+#[tokio::test]
+async fn the_highvi_browser_keeps_watching_after_a_rejected_stream() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "media.test/teaser/master.m3u8",
+        Route::playlist(SPLIT_MASTER_ABSOLUTE).browser_only(),
+    );
+    fixture.server.route(
+        "page.test/teaser",
+        Route::html(
+            "<!doctype html><title>Real video</title><script>\
+             fetch('https://media.test/teaser/master.m3u8').then(r => r.text());\
+             setTimeout(() => fetch('https://media.test/muxed/master.m3u8'), 8000);\
+             </script>",
+        ),
+    );
+    let (result, updates) = fixture
+        .run_mode(
+            &fixture.environment(),
+            page("https://page.test/teaser"),
+            crate::Discovery::Interactive,
+            None,
+        )
+        .await;
+    let report = fixture.last_report.lock().unwrap().clone();
+    let outcome = result.unwrap_or_else(|error| panic!("{error:?}\n{report}"));
+    assert_eq!(outcome.title, "Real video");
+    assert!(fixture.inspect(&outcome.saved_to).2);
+    // Checked once while waiting, then back to waiting for the user.
+    let stages: Vec<Stage> = updates.iter().map(|update| update.stage).collect();
+    let back = stages
+        .windows(2)
+        .any(|pair| pair == [Stage::Discovering, Stage::WaitingForUser]);
+    assert!(back, "{stages:?}");
+    assert!(report.contains("candidates checked 2"), "{report}");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// Breaker M1/M2: HighVi never presses play in a visible window. A gesture
+/// it made would let the page use it without a click (writing the user's
+/// clipboard, handing links to desktop apps). Headless sessions still do.
+#[tokio::test]
+async fn the_highvi_browser_never_acts_for_the_user() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/hooked",
+        Route::html(
+            "<!doctype html><title>Hooked</title><video></video><script>\
+             HTMLMediaElement.prototype.play = function () {\
+               fetch('https://media.test/played'); return Promise.resolve();\
+             };</script>",
+        ),
+    );
+    let played = |fixture: &Fixture| {
+        fixture
+            .server
+            .hits()
+            .iter()
+            .any(|hit| hit.path == "/played")
+    };
+    let (headless, _) = fixture.run(page("https://page.test/hooked")).await;
+    assert!(headless.is_err());
+    assert!(
+        played(&fixture),
+        "headless discovery no longer starts players"
+    );
+    fixture.server.hits_log.list.lock().unwrap().clear();
+
+    let mut environment = fixture.environment();
+    environment.limits.interactive_budget = Duration::from_secs(20);
+    let (result, _) = fixture
+        .run_mode(
+            &environment,
+            page("https://page.test/hooked"),
+            crate::Discovery::Interactive,
+            None,
+        )
+        .await;
+    assert_code(&result, "interactive_timeout");
+    assert!(
+        !played(&fixture),
+        "HighVi pressed play in the visible window"
+    );
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// Codex P2: a window that crashes or is killed is a failure, not
+/// "closed by the user".
+#[tokio::test]
+async fn a_killed_highvi_browser_is_a_failure_not_a_close() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/doomed",
+        Route::html("<!doctype html><title>Doomed</title><p>no video</p>"),
+    );
+    let killer = {
+        let output = fixture.output_dir.clone();
+        let hits = Arc::clone(&fixture.server.hits_log);
+        tokio::spawn(async move {
+            for _ in 0..600 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let shown = hits
+                    .list
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|hit| hit.host == "page.test");
+                let pids = chrome_browser_pids_in(&output);
+                if shown && !pids.is_empty() {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    for pid in pids {
+                        // SAFETY: SIGKILL to the test's own Chrome.
+                        unsafe { libc::kill(pid, libc::SIGKILL) };
+                    }
+                    return true;
+                }
+            }
+            false
+        })
+    };
+    let (result, _) = fixture
+        .run_mode(
+            &fixture.environment(),
+            page("https://page.test/doomed"),
+            crate::Discovery::Interactive,
+            None,
+        )
+        .await;
+    assert!(killer.await.unwrap(), "no browser window was seen");
+    assert_code(&result, "browser_failed");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// Breaker M1: links Chrome cannot open itself (`mailto:`, `magnet:`…) go
+/// to HighVi's stand-ins, never to the desktop's apps. Chrome hands
+/// `mailto:` to the system opener even without a user gesture, so this
+/// fails without the stand-ins. Run alone
+/// with a logging fake `xdg-open` on the `PATH` HighVi inherits:
+/// `PATH=<dir with fake xdg-open>:$PATH HIGHVI_TEST_XDG_LOG=<its log> cargo test -p highvi-core a_page_cannot_start_desktop_apps -- --ignored`
+#[tokio::test]
+#[ignore = "needs a logging fake xdg-open on PATH"]
+async fn a_page_cannot_start_desktop_apps() {
+    let Some(log) = std::env::var_os("HIGHVI_TEST_XDG_LOG").map(PathBuf::from) else {
+        panic!("HIGHVI_TEST_XDG_LOG is not set");
+    };
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/mailto",
+        Route::html(
+            "<!doctype html><title>Mail</title><video></video><script>\
+             HTMLMediaElement.prototype.play = function () {\
+               location.href = 'mailto:someone@example.com'; return Promise.resolve();\
+             };</script>",
+        ),
+    );
+    let _ = std::fs::remove_file(&log);
+    let (result, _) = fixture.run(page("https://page.test/mailto")).await;
+    assert!(result.is_err());
+    assert!(
+        !log.exists(),
+        "a desktop handler ran: {:?}",
+        std::fs::read_to_string(&log)
+    );
+    assert_no_chrome_left(&fixture).await;
+}
+
+/// Breaker N5: several streams arrive together and the real one ranks
+/// below three that fail HighVi's checks. It is checked next, at once,
+/// rather than only when yet another stream appears.
+#[tokio::test]
+async fn the_highvi_browser_checks_lower_ranked_streams_after_a_rejection() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    for index in 0..3 {
+        fixture.server.route(
+            &format!("media.test/advert{index}/master.m3u8"),
+            Route::playlist(SPLIT_MASTER_ABSOLUTE).browser_only(),
+        );
+    }
+    fixture.server.route(
+        "page.test/crowded",
+        Route::html(
+            "<!doctype html><title>Crowded</title><script>\
+             (async () => {\
+               for (const i of [0, 1, 2]) {\
+                 await fetch(`https://media.test/advert${i}/master.m3u8`).then(r => r.text());\
+               }\
+               await fetch('https://media.test/muxed/master.m3u8').then(r => r.text());\
+             })();\
+             </script>",
+        ),
+    );
+    let mut environment = fixture.environment();
+    environment.limits.interactive_budget = Duration::from_secs(40);
+    let (result, _) = fixture
+        .run_mode(
+            &environment,
+            page("https://page.test/crowded"),
+            crate::Discovery::Interactive,
+            None,
+        )
+        .await;
+    let report = fixture.last_report.lock().unwrap().clone();
+    let outcome = result.unwrap_or_else(|error| panic!("{error:?}\n{report}"));
+    assert_eq!(outcome.title, "Crowded");
+    assert!(report.contains("candidates checked 4"), "{report}");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
 }

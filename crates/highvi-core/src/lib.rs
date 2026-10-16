@@ -31,8 +31,8 @@ pub use diagnostics::Diagnostics;
 pub use error::{Hint, PublicError};
 pub use filesystem::{cleanup_stale_jobs, prepare_output_dir};
 pub use job::{
-    JobEnvironment, JobLimits, JobOutcome, JobUpdate, MAX_BROWSERS, MAX_MUXES, SharedResources,
-    Stage, find_executable, run_job,
+    Discovery, JobEnvironment, JobLimits, JobOutcome, JobUpdate, MAX_BROWSERS, MAX_MUXES,
+    SharedResources, Stage, browser_can_help, find_executable, run_job,
 };
 pub use process::{CancelHandle, CancelToken, cancel_pair};
 pub use process_output::{CappedOutput, read_capped};

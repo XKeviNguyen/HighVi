@@ -12,7 +12,7 @@ One page for contributors. Security details live in [SECURITY.md](../SECURITY.md
 | `crates/highvi-core/src/job.rs` | The job: discover → choose formats → download tracks → mux → publish. |
 | `egress.rs`, `netpolicy.rs` | Per-job `CONNECT` proxy on 127.0.0.1: the only network route for yt-dlp and Chrome. Public HTTPS destinations only. |
 | `ytdlp.rs`, `formats.rs` | Hermetic yt-dlp arguments; parsing and sanitising its JSON; choosing formats. |
-| `browser.rs`, `hls.rs` | Headless-Chrome discovery over a DevTools pipe; ranking observed playlists. |
+| `browser.rs`, `hls.rs` | Chrome discovery over a DevTools pipe, headless or in a visible HighVi window (`Mode`); ranking observed playlists. |
 | `mux.rs` | Magic-byte sniffing and the locked-down FFmpeg mux. |
 | `process.rs` | Child processes: no shell, cleared env, own process group, bounded output, cancel/timeout kills the group. |
 | `filesystem.rs` | `Downloads/HighVi`, private locked job directories, no-replace publishing. |
@@ -30,6 +30,7 @@ URL ──► validate (https, no credentials)
           ├─ formats found ─────────────────────────────┐
           └─ "nothing here" (not: blocked/403/DRM/login)│
     ──► C. headless Chrome (fresh profile, pipe, proxy) │
+          (Open in HighVi Browser: straight to C in a visible window)
           └─ observed HLS playlists, ranked; each checked by yt-dlp -J
                                                          ▼
        choose best video (+ separate audio) from yt-dlp's formats
@@ -62,7 +63,9 @@ Extractor-related failures carry a `hint` to update yt-dlp when it is older than
 | What | Limit |
 | --- | --- |
 | yt-dlp metadata | 8 MiB stdout, 60 s |
+| Browser (both modes) | `<profile>/bin` first on Chrome's `PATH`: no-op `xdg-open`, `xdg-email`, `xdg-mime`, `xdg-settings`, `gio`… so links for desktop apps go nowhere; native file chooser intercepted (CDP); downloads denied |
 | Browser discovery | 30 s per page; gives up ~8 s after trying to play; ≤ 48 sessions, ≤ 4 000 tracked requests, ≤ 60 body reads |
+| HighVi browser window | user-started (**Open in HighVi Browser**); waits ≤ 10 min (`JobLimits::interactive_budget`); new playlists are checked by yt-dlp *while the window stays open* and only a passing one ends it (rejected ones are remembered, body budgets reset); ends otherwise on a closed window (`browser_closed`, only on a clean Chrome exit; a crash or kill is `browser_failed`), cancel or the limit (`interactive_timeout`); never presses play or makes a user gesture; popups and new tabs are attached and watched, detached sessions pruned; same flags, proxy, sandbox, profile and limits as headless; environment adds only the display (absolute Wayland socket, or `DISPLAY` + `XAUTHORITY`), plus a private `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS=disabled:` (a snap gets neither, as headless: snapd needs the session to start it) |
 | Proxy | ≤ 64 tunnels, 8 KiB request head, 10 s head/resolve, 15 s connect, 90 s idle |
 | yt-dlp retries | 3 requests, 5 fragments, 1 extractor |
 | yt-dlp `PATH` | `<job>/bin` with only a link to the real `python3`: no helpers (phantomjs, FFmpeg); JS runtimes off via `--no-js-runtimes` |
@@ -77,6 +80,8 @@ Extractor-related failures carry a `hint` to update yt-dlp when it is older than
 
 ```bash
 HIGHVI_REQUIRE_E2E=1 cargo test --workspace   # unit + end-to-end (needs yt-dlp, ffmpeg, ffprobe, Chrome)
+Xvfb :99 & HIGHVI_TEST_DISPLAY=:99 HIGHVI_REQUIRE_HEADED=1 HIGHVI_REQUIRE_E2E=1 cargo test --workspace
+                                               # also the visible-window tests, on that Xvfb only
 node scripts/check-ui.mjs                      # EN/VI/JA catalogue parity, every Rust error code translated, README code tables real and in sync
 ```
 
