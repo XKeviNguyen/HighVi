@@ -79,6 +79,15 @@ const MAX_SNIFF_BYTES: f64 = 512.0 * 1024.0;
 const MAX_PLAYLIST_BYTES: f64 = 8.0 * 1024.0 * 1024.0;
 const MAX_TITLE_CHARS: usize = 200;
 pub const MAX_CANDIDATES: usize = 3;
+/// Playlist bodies held at once (oldest dropped first), so a page that keeps
+/// loading playlists in a 10-minute window cannot grow HighVi's memory.
+const MAX_STORED_PLAYLISTS: usize = 40;
+const MAX_STORED_PLAYLIST_BYTES: usize = 32 * 1024 * 1024;
+/// Rejected rounds after which a window gets no fresh body budgets.
+const MAX_REJECTED_ROUNDS: u32 = 5;
+/// Time a window's checks may take on top of its budget (3 candidates,
+/// each checked by yt-dlp within its own 60 s limit).
+const CHECKS_ALLOWANCE: Duration = Duration::from_secs(MAX_CANDIDATES as u64 * 60);
 
 const HLS_MIME_TYPES: &[&str] = &[
     "application/vnd.apple.mpegurl",
@@ -327,8 +336,12 @@ pub async fn discover_in_browser<T>(
         Mode::Headless => PAGE_BUDGET,
         Mode::Interactive => run.interactive_budget,
     };
+    let allowance = match run.mode {
+        Mode::Headless => Duration::ZERO,
+        Mode::Interactive => CHECKS_ALLOWANCE,
+    };
     let bounded = timeout(
-        STARTUP_TIMEOUT + budget + Duration::from_secs(10),
+        STARTUP_TIMEOUT + budget + allowance + Duration::from_secs(10),
         observe(&mut cdp, run.page, run.mode, budget, check),
     );
     let mut result = tokio::select! {
@@ -343,10 +356,13 @@ pub async fn discover_in_browser<T>(
             matches!(&result, Ok((finding, None)) if finding.page.ended == Ended::Closed);
         let setup_failed = matches!(&result, Err(error) if error.code == "browser_failed");
         if ended_closed || setup_failed {
-            let clean = matches!(
-                timeout(Duration::from_secs(2), child.wait()).await,
-                Ok(Ok(status)) if status.success()
-            );
+            // Still running: the user closed the watched tab with others
+            // open, which is a close too. Exited: only a clean exit is.
+            let clean = match timeout(Duration::from_secs(2), child.wait()).await {
+                Ok(Ok(status)) => status.success(),
+                Ok(Err(_)) => false,
+                Err(_) => ended_closed,
+            };
             if setup_failed && clean {
                 result = Err(browser_closed());
             } else if ended_closed && !clean {
@@ -891,6 +907,25 @@ struct Observation {
     seen: HashSet<String>,
 }
 
+impl Observation {
+    /// Keeps a playlist body, dropping the oldest beyond the limits.
+    fn store(&mut self, url: Url, referer: Option<String>, body: String) {
+        self.playlists.push((url, referer, Some(body)));
+        let bytes = |playlists: &[(Url, Option<String>, Option<String>)]| {
+            playlists
+                .iter()
+                .map(|(_, _, body)| body.as_ref().map_or(0, String::len))
+                .sum::<usize>()
+        };
+        while self.playlists.len() > 1
+            && (self.playlists.len() > MAX_STORED_PLAYLISTS
+                || bytes(&self.playlists) > MAX_STORED_PLAYLIST_BYTES)
+        {
+            self.playlists.remove(0);
+        }
+    }
+}
+
 async fn observe<T>(
     cdp: &mut Cdp,
     page: &Url,
@@ -1011,6 +1046,7 @@ async fn observe<T>(
     // first that passed.
     let mut checked: HashSet<String> = HashSet::new();
     let mut accepted: Option<T> = None;
+    let mut rejected_rounds = 0;
 
     loop {
         let now = Instant::now();
@@ -1029,22 +1065,29 @@ async fn observe<T>(
             // advert or preview may come first, and the user may still be
             // starting the real video.
             last_found = None;
-            let fresh: Vec<Candidate> = rank(&observation.playlists)
-                .0
-                .into_iter()
-                .filter(|candidate| checked.insert(candidate.url.as_str().to_string()))
-                .collect();
+            let fresh = rank_skipping(&observation.playlists, &checked).0;
             if !fresh.is_empty() {
+                checked.extend(
+                    fresh
+                        .iter()
+                        .map(|candidate| candidate.url.as_str().to_string()),
+                );
                 let title = page_title(cdp, &main).await;
                 if let Some(found) = check(fresh, title).await {
                     accepted = Some(found);
                     report.ended = Ended::Settled;
                     break;
                 }
-                // Rejected: the window keeps going, with fresh body budgets
-                // for what the user does next.
-                playlist_fetches = 0;
-                sniff_fetches = 0;
+                // Rejected: forget those bodies, and give what the user
+                // does next fresh body budgets, a few times.
+                observation
+                    .playlists
+                    .retain(|(url, _, _)| !checked.contains(url.as_str()));
+                rejected_rounds += 1;
+                if rejected_rounds <= MAX_REJECTED_ROUNDS {
+                    playlist_fetches = 0;
+                    sniff_fetches = 0;
+                }
             }
             continue;
         }
@@ -1069,7 +1112,11 @@ async fn observe<T>(
                     .send(
                         Some(session),
                         "Runtime.evaluate",
-                        json!({ "expression": PLAY_SCRIPT, "userGesture": true }),
+                        // No user gesture: muted playback needs none
+                        // (--autoplay-policy), and a gesture HighVi made
+                        // would let the page open links in desktop apps
+                        // or write the clipboard without a click.
+                        json!({ "expression": PLAY_SCRIPT }),
                     )
                     .await;
             }
@@ -1115,7 +1162,7 @@ async fn observe<T>(
                 && inspect_playlist(&body, &url).is_some()
                 && observation.seen.insert(url.as_str().to_string())
             {
-                observation.playlists.push((url, referer, Some(body)));
+                observation.store(url, referer, body);
                 last_found = Some(Instant::now());
             }
             continue;
@@ -1172,7 +1219,18 @@ async fn observe<T>(
             }
             "Target.targetCreated" => {
                 let info = &params["targetInfo"];
+                let internal = info["url"].as_str().is_some_and(|url| {
+                    [
+                        "chrome:",
+                        "chrome-untrusted:",
+                        "devtools:",
+                        "chrome-extension:",
+                    ]
+                    .iter()
+                    .any(|scheme| url.starts_with(scheme))
+                });
                 if info["type"].as_str() == Some("page")
+                    && !internal
                     && let Some(id) = info["targetId"].as_str()
                     && sessions.len() < MAX_SESSIONS
                     && known_pages.insert(id.to_string())
@@ -1434,6 +1492,15 @@ fn decode_base64(text: &str) -> Option<Vec<u8>> {
 /// Media playlists that belong to an observed master are folded into it,
 /// and DRM-signalling playlists are dropped.
 fn rank(playlists: &[(Url, Option<String>, Option<String>)]) -> (Vec<Candidate>, bool) {
+    rank_skipping(playlists, &HashSet::new())
+}
+
+/// [`rank`], leaving out playlists already checked, before the best few are
+/// taken (so rejected ones never hide later ones).
+fn rank_skipping(
+    playlists: &[(Url, Option<String>, Option<String>)],
+    skip: &HashSet<String>,
+) -> (Vec<Candidate>, bool) {
     struct Scored {
         candidate: Candidate,
         class: u8,
@@ -1512,6 +1579,7 @@ fn rank(playlists: &[(Url, Option<String>, Option<String>)]) -> (Vec<Candidate>,
         });
     }
     scored.retain(|scored| scored.class == 3 || !children.contains(scored.candidate.url.as_str()));
+    scored.retain(|scored| !skip.contains(scored.candidate.url.as_str()));
     scored.sort_by(|left, right| {
         right
             .class
@@ -1916,6 +1984,57 @@ mod tests {
             assert!(!status.success(), "{name}");
         }
         std::fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[test]
+    fn rejected_playlists_never_hide_later_ones() {
+        let playlist = |index: usize| {
+            (
+                url(&format!("https://c.example/{index}.m3u8")),
+                None,
+                Some(format!(
+                    "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:{}.0,\ns.ts\n#EXT-X-ENDLIST\n",
+                    100 - index
+                )),
+            )
+        };
+        let playlists: Vec<_> = (0..5).map(playlist).collect();
+        let first = rank(&playlists).0;
+        assert_eq!(first.len(), MAX_CANDIDATES);
+        let rejected: HashSet<String> = first
+            .iter()
+            .map(|candidate| candidate.url.to_string())
+            .collect();
+        let next = rank_skipping(&playlists, &rejected).0;
+        assert_eq!(next.len(), 2, "{next:?}");
+        assert!(
+            next.iter()
+                .all(|candidate| !rejected.contains(candidate.url.as_str()))
+        );
+    }
+
+    #[test]
+    fn stored_playlists_stay_bounded_and_keep_the_newest() {
+        let mut observation = Observation::default();
+        let big = "#EXTM3U\n".to_string() + &"x".repeat(4 * 1024 * 1024);
+        for index in 0..200 {
+            observation.store(
+                url(&format!("https://c.example/{index}.m3u8")),
+                None,
+                big.clone(),
+            );
+            let bytes: usize = observation
+                .playlists
+                .iter()
+                .map(|(_, _, body)| body.as_ref().map_or(0, String::len))
+                .sum();
+            assert!(observation.playlists.len() <= MAX_STORED_PLAYLISTS);
+            assert!(bytes <= MAX_STORED_PLAYLIST_BYTES);
+        }
+        assert_eq!(
+            observation.playlists.last().unwrap().0.as_str(),
+            "https://c.example/199.m3u8"
+        );
     }
 
     #[test]

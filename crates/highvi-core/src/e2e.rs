@@ -3283,8 +3283,9 @@ async fn a_killed_highvi_browser_is_a_failure_not_a_close() {
 }
 
 /// Breaker M1: links Chrome cannot open itself (`mailto:`, `magnet:`…) go
-/// to HighVi's stand-ins, never to the desktop's apps, even when a page
-/// hijacks the gesture headless discovery uses to start players. Run alone
+/// to HighVi's stand-ins, never to the desktop's apps. Chrome hands
+/// `mailto:` to the system opener even without a user gesture, so this
+/// fails without the stand-ins. Run alone
 /// with a logging fake `xdg-open` on the `PATH` HighVi inherits:
 /// `PATH=<dir with fake xdg-open>:$PATH HIGHVI_TEST_XDG_LOG=<its log> cargo test -p highvi-core a_page_cannot_start_desktop_apps -- --ignored`
 #[tokio::test]
