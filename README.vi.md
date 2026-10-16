@@ -17,6 +17,18 @@
   <p><code>&gt; tỉnh dậy đi... video đang chờ bạn_</code></p>
 </div>
 
+<div align="center">
+
+<a href="https://github.com/XKeviNguyen/HighVi/releases/download/v0.1.0/HighVi_0.1.0_amd64.deb"><img src="https://img.shields.io/badge/T%E1%BA%A3i%20HighVi%200.1.0%20(.deb)-00ff41?style=for-the-badge&logo=ubuntu&logoColor=000000&labelColor=00ff41&color=000000" alt="Download HighVi 0.1.0 .deb" /></a>
+
+<sub>Ubuntu 24.04 / 26.04, 64-bit · <a href="https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.0">mọi file của bản phát hành này</a> (có cả AppImage)</sub>
+
+</div>
+
+```bash
+sudo apt install ./HighVi_0.1.0_amd64.deb    # trong thư mục bạn đã tải file về
+```
+
 ## 🟩 HighVi là gì?
 
 Nhiều video trên mạng không phải là một file lớn. Chúng được cắt thành **rất nhiều mảnh nhỏ**, và có một danh sách nhỏ gọi là **playlist** (file có đuôi `.m3u8`) ghi lại chỗ của từng mảnh. Bạn cứ hình dung nó như một **tấm bản đồ kho báu**.
@@ -54,8 +66,14 @@ Có những trang chỉ đưa bản đồ kho báu khi bạn nói mình đến t
 1. Mở HighVi. Giữ nguyên lựa chọn **Link trang video**.
 2. Chép địa chỉ của trang đang phát video (trên thanh địa chỉ của trình duyệt) rồi dán vào ô.
 3. Bấm **Thêm vào hàng chờ**. Ngay dưới ô, HighVi cho biết đã thêm bao nhiêu link.
+
+<p align="center"><img src="docs/assets/tutorial/1-paste-vi.png" alt="Link trang video đã dán vào HighVi" width="560" /><br /><sub>Link trang video, sẵn sàng thêm vào.</sub></p>
 4. Kéo xuống phần **Danh sách tải** và bấm **Bắt đầu tải**. Dòng của video cho biết từng bước: đang tìm video, đang tải, đang ghép, đang lưu.
+
+<p align="center"><img src="docs/assets/tutorial/2-queue-vi.png" alt="Hàng chờ với một trang lỗi và một video đang tải" width="560" /><br /><sub>Hai dòng: example.com không có video (xem phần 2); luồng thử nghiệm công khai đang tải, kèm tốc độ và thời gian còn lại.</sub></p>
 5. Khi dòng báo **Đã lưu vào …**, bấm **Mở thư mục**. Video nằm trong `~/Downloads/HighVi`, đặt tên theo video.
+
+<p align="center"><img src="docs/assets/tutorial/3-saved-vi.png" alt="Một video đã tải xong" width="560" /><br /><sub>Xong: dòng cho biết file MP4 được lưu ở đâu.</sub></p>
 
 Nhiều video? Ở bước 2, dán mỗi dòng một link, rồi chọn số video tải cùng lúc ở ô **Cùng lúc** (1–4).
 
@@ -64,6 +82,8 @@ Nhiều video? Ở bước 2, dán mỗi dòng một link, rồi chọn số vid
 Có trang chặn trình duyệt ẩn của HighVi (dòng sẽ báo lỗi kiểu `host_firewall_block`, "Lớp bảo vệ của trang (Cloudflare) đã chặn HighVi").
 
 1. Trên dòng đó, bấm **Mở trong trình duyệt HighVi**. Một cửa sổ HighVi riêng mở trang ra.
+
+<p align="center"><img src="docs/assets/tutorial/4-browser-window.png" alt="Cửa sổ trình duyệt HighVi riêng" width="640" /><br /><sub>Trình duyệt HighVi: một cửa sổ Chrome riêng, một tab. Trình duyệt, tài khoản và cookie của bạn không bao giờ được dùng.</sub></p>
 2. Nếu trang bắt bạn xác nhận mình là người, hãy tự làm trong cửa sổ đó.
 3. Bấm phát video như ở bất kỳ trình duyệt nào.
 4. HighVi nhận ra luồng video, đóng cửa sổ, và việc tải tiếp tục ngay trên dòng đó.
@@ -76,6 +96,8 @@ Chỉ dùng khi bạn đã có sẵn link `.m3u8` của video:
 
 1. Chọn **Link playlist (.m3u8)**.
 2. Dán link `.m3u8` vào ô **Link playlist (.m3u8)**, và địa chỉ trang nơi bạn tìm thấy nó vào ô **Trang bạn tìm thấy playlist**.
+
+<p align="center"><img src="docs/assets/tutorial/5-playlist-vi.png" alt="Chế độ Link playlist" width="560" /><br /><sub>Chế độ Link playlist với một luồng thử nghiệm công khai và trang của nó.</sub></p>
 3. Bấm **Thêm vào hàng chờ**, rồi **Bắt đầu tải**.
 
 Có lỗi? Xem phần **Khi có lỗi** bên dưới. Trên dòng bị lỗi, **Sao chép thông tin chẩn đoán** chép một báo cáo ngắn (không có link, cookie hay mật khẩu) để gửi báo lỗi.
@@ -169,12 +191,12 @@ npm run build   # đóng gói .deb và AppImage
 
 ## 📦 Cài đặt, nâng cấp, gỡ bỏ
 
-Hiện chưa có bản phát hành sẵn; hãy tự đóng gói (xem **Bắt đầu**).
+Tải file `.deb` (hoặc AppImage) ở [bản phát hành v0.1.0](https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.0), hoặc tự đóng gói (xem **Bắt đầu**).
 
 **Cài file `.deb`** (Ubuntu/Debian; tự cài kèm `yt-dlp` và FFmpeg):
 
 ```bash
-sudo apt install ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+sudo apt install ./HighVi_0.1.0_amd64.deb
 ```
 
 Trên Ubuntu 24.04, cài thêm `yt-dlp` mới bằng pipx (xem **Bắt đầu**). Muốn tìm video trên trang có trình phát dựng bằng JavaScript, và để dùng **Mở trong trình duyệt HighVi**, hãy cài Google Chrome hoặc Chromium; bản Chromium snap của Ubuntu cũng dùng được.
@@ -182,7 +204,7 @@ Trên Ubuntu 24.04, cài thêm `yt-dlp` mới bằng pipx (xem **Bắt đầu**)
 **Nâng cấp** lên bản mới hơn: cài file `.deb` mới y như trên. Nếu số phiên bản không đổi, thêm `--reinstall`, không thì apt giữ bản cũ:
 
 ```bash
-sudo apt install --reinstall ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+sudo apt install --reinstall ./HighVi_0.1.0_amd64.deb
 ```
 
 **Gỡ cài đặt**: `sudo apt remove high-vi`. Video của bạn trong `~/Downloads/HighVi` vẫn được giữ.
@@ -190,8 +212,8 @@ sudo apt install --reinstall ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
 **AppImage** (cần có sẵn `yt-dlp` và FFmpeg trong `PATH`):
 
 ```bash
-chmod +x target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
-./target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
+chmod +x HighVi_0.1.0_amd64.AppImage
+./HighVi_0.1.0_amd64.AppImage
 ```
 
 Nếu nó báo lỗi FUSE, chạy với `APPIMAGE_EXTRACT_AND_RUN=1`.

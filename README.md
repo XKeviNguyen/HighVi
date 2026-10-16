@@ -17,6 +17,18 @@
   <p><code>&gt; wake up... the video is waiting_</code></p>
 </div>
 
+<div align="center">
+
+<a href="https://github.com/XKeviNguyen/HighVi/releases/download/v0.1.0/HighVi_0.1.0_amd64.deb"><img src="https://img.shields.io/badge/Download%20HighVi%200.1.0%20(.deb)-00ff41?style=for-the-badge&logo=ubuntu&logoColor=000000&labelColor=00ff41&color=000000" alt="Download HighVi 0.1.0 .deb" /></a>
+
+<sub>Ubuntu 24.04 / 26.04, 64-bit · <a href="https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.0">all files of this release</a> (also an AppImage)</sub>
+
+</div>
+
+```bash
+sudo apt install ./HighVi_0.1.0_amd64.deb    # in the folder you downloaded it to
+```
+
 ## 🟩 What is HighVi?
 
 Lots of videos on the internet aren't one big file. They're chopped into **lots of tiny pieces**, and a small list called a **playlist** (a file ending in `.m3u8`) says where every piece lives. Think of it as a **treasure map**.
@@ -54,8 +66,14 @@ Some websites only hand out the treasure map if you say where you came from, lik
 1. Open HighVi. Keep **Video page link** selected.
 2. Copy the address of the page where the video plays (from your browser's address bar) and paste it into the box.
 3. Press **Add to queue**. Under the box, HighVi says how many links it added.
+
+<p align="center"><img src="docs/assets/tutorial/1-paste-en.png" alt="A page link pasted into HighVi" width="560" /><br /><sub>A video page link, ready to add.</sub></p>
 4. Scroll to **Downloads** and press **Start queue**. The row shows each step: looking for the video, downloading, putting it together, saving.
+
+<p align="center"><img src="docs/assets/tutorial/2-queue-en.png" alt="The download queue with a failed page and a video downloading" width="560" /><br /><sub>Two rows: example.com has no video (see section 2); the public test stream is downloading, with speed and time left.</sub></p>
 5. When the row says **Saved to …**, press **Open folder**. Your video is in `~/Downloads/HighVi`, named after the video.
+
+<p align="center"><img src="docs/assets/tutorial/3-saved-en.png" alt="A finished download" width="560" /><br /><sub>Done: the row shows where the MP4 was saved.</sub></p>
 
 Several videos? Paste one link per line in step 2, and pick how many run together under **At once** (1–4).
 
@@ -64,6 +82,8 @@ Several videos? Paste one link per line in step 2, and pick how many run togethe
 Some sites turn away HighVi's hidden browser (the row shows an error such as `host_firewall_block`, "The website's guard (Cloudflare) blocked HighVi").
 
 1. On that row, press **Open in HighVi Browser**. A private HighVi window opens with the page.
+
+<p align="center"><img src="docs/assets/tutorial/4-browser-window.png" alt="The private HighVi browser window" width="640" /><br /><sub>The HighVi browser: a separate, private Chrome window with one tab. Your own browser, logins and cookies are never used.</sub></p>
 2. If the site asks you to confirm you are human, do it yourself, in that window.
 3. Start the video, as you would in any browser.
 4. HighVi spots the video stream, closes the window, and the download carries on in the row.
@@ -76,6 +96,8 @@ Only if you already have the `.m3u8` link of the video:
 
 1. Select **Playlist link (.m3u8)**.
 2. Paste the `.m3u8` link into **Playlist link (.m3u8)**, and the address of the page you found it on into **Page where you found it**.
+
+<p align="center"><img src="docs/assets/tutorial/5-playlist-en.png" alt="Playlist link mode" width="560" /><br /><sub>Playlist link mode with a public test stream and its page.</sub></p>
 3. Press **Add to queue**, then **Start queue**.
 
 Something went wrong? See **When something goes wrong** below. On a failed row, **Copy diagnostics** copies a short report (no links, cookies or passwords) for a bug report.
@@ -169,12 +191,12 @@ npm run build   # make a .deb and an AppImage
 
 ## 📦 Install, upgrade, remove
 
-There is no published release yet; build the packages yourself (see **Get started**).
+Download the `.deb` (or the AppImage) from the [v0.1.0 release](https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.0), or build the packages yourself (see **Get started**).
 
 **Install the `.deb`** (Ubuntu/Debian; it also installs `yt-dlp` and FFmpeg):
 
 ```bash
-sudo apt install ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+sudo apt install ./HighVi_0.1.0_amd64.deb
 ```
 
 On Ubuntu 24.04, also install a newer `yt-dlp` with pipx (see **Get started**). For pages whose player is built with JavaScript, and for **Open in HighVi Browser**, install Google Chrome or Chromium; Ubuntu's Chromium snap works.
@@ -182,7 +204,7 @@ On Ubuntu 24.04, also install a newer `yt-dlp` with pipx (see **Get started**). 
 **Upgrade** to a newer build: install the new `.deb` the same way. If the version number did not change, add `--reinstall`, or apt keeps the old one:
 
 ```bash
-sudo apt install --reinstall ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+sudo apt install --reinstall ./HighVi_0.1.0_amd64.deb
 ```
 
 **Remove**: `sudo apt remove high-vi`. Your videos in `~/Downloads/HighVi` are kept.
@@ -190,8 +212,8 @@ sudo apt install --reinstall ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
 **AppImage** (needs `yt-dlp` and FFmpeg on your `PATH`):
 
 ```bash
-chmod +x target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
-./target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
+chmod +x HighVi_0.1.0_amd64.AppImage
+./HighVi_0.1.0_amd64.AppImage
 ```
 
 If it complains about FUSE, run it with `APPIMAGE_EXTRACT_AND_RUN=1`.

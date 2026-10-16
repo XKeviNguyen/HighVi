@@ -17,6 +17,18 @@
   <p><code>&gt; 目をさませ…… 動画が待っている_</code></p>
 </div>
 
+<div align="center">
+
+<a href="https://github.com/XKeviNguyen/HighVi/releases/download/v0.1.0/HighVi_0.1.0_amd64.deb"><img src="https://img.shields.io/badge/HighVi%200.1.0%20%E3%82%92%E3%83%80%E3%82%A6%E3%83%B3%E3%83%AD%E3%83%BC%E3%83%89%20(.deb)-00ff41?style=for-the-badge&logo=ubuntu&logoColor=000000&labelColor=00ff41&color=000000" alt="Download HighVi 0.1.0 .deb" /></a>
+
+<sub>Ubuntu 24.04 / 26.04、64 ビット · <a href="https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.0">このリリースのすべてのファイル</a>（AppImage もあります）</sub>
+
+</div>
+
+```bash
+sudo apt install ./HighVi_0.1.0_amd64.deb    # ダウンロードしたフォルダーで
+```
+
 ## 🟩 HighVi って なに？
 
 インターネットの動画の多くは、ひとつの大きなファイルではありません。**小さなかけら**にたくさん分かれていて、どのかけらがどこにあるかは **プレイリスト**（`.m3u8` で終わるファイル）という小さなリストに書いてあります。いわば **宝の地図** です。
@@ -54,8 +66,14 @@ HighVi は **English・Tiếng Việt・日本語** が使えます。右上の�
 1. HighVi をひらきます。**動画ページのリンク** はえらんだままにします。
 2. 動画が再生されるページのアドレス（ブラウザーのアドレスバー）をコピーして、入力欄にはりつけます。
 3. **キューに追加** をおします。欄の下に、いくつ追加したかが出ます。
+
+<p align="center"><img src="docs/assets/tutorial/1-paste-ja.png" alt="HighVi に入れた動画ページのリンク" width="560" /><br /><sub>動画ページのリンク。追加するまえの状態です。</sub></p>
 4. 下の **ダウンロード** までスクロールして、**キューを開始** をおします。行に、いまの手順が出ます：動画をさがしている、ダウンロード中、組み立て中、保存中。
+
+<p align="center"><img src="docs/assets/tutorial/2-queue-ja.png" alt="失敗したページとダウンロード中の動画があるキュー" width="560" /><br /><sub>2 つの行：example.com には動画がありません（2 を見てください）。公開テスト用のストリームは、速さと残り時間を出しながらダウンロード中です。</sub></p>
 5. 行に **保存先：…** と出たら、**フォルダーを開く** をおします。動画は `~/Downloads/HighVi` に、動画の名前で入っています。
+
+<p align="center"><img src="docs/assets/tutorial/3-saved-ja.png" alt="ダウンロードが終わった行" width="560" /><br /><sub>完了：MP4 の保存先が行に出ます。</sub></p>
 
 たくさんの動画なら、手順 2 でリンクを 1 行に 1 つずつ入れて、**同時に** で 1〜4 本をえらびます。
 
@@ -64,6 +82,8 @@ HighVi は **English・Tiếng Việt・日本語** が使えます。右上の�
 HighVi の見えないブラウザーをことわるサイトがあります（行に `host_firewall_block`、「サイトの見はり番（Cloudflare）にブロックされました」などと出ます）。
 
 1. その行で **HighVi のブラウザーでひらく** をおします。HighVi 専用のウィンドウでページがひらきます。
+
+<p align="center"><img src="docs/assets/tutorial/4-browser-window.png" alt="HighVi 専用のブラウザーのウィンドウ" width="640" /><br /><sub>HighVi のブラウザー：タブが 1 つだけの、べつの専用 Chrome ウィンドウです。あなたのブラウザー、ログイン、クッキーは使いません。</sub></p>
 2. 人間かどうかの確認を求められたら、そのウィンドウで自分で答えます。
 3. いつものブラウザーと同じように、動画を再生します。
 4. HighVi が動画のストリームを見つけてウィンドウをとじ、その行でダウンロードが続きます。
@@ -76,6 +96,8 @@ HighVi の見えないブラウザーをことわるサイトがあります（�
 
 1. **プレイリストのリンク（.m3u8）** をえらびます。
 2. `.m3u8` のリンクを **プレイリストのリンク（.m3u8）** に、それを見つけたページのアドレスを **プレイリストを見つけたページ** に入れます。
+
+<p align="center"><img src="docs/assets/tutorial/5-playlist-ja.png" alt="プレイリストのリンクのモード" width="560" /><br /><sub>公開テスト用のストリームとそのページを入れた、プレイリストのリンクのモード。</sub></p>
 3. **キューに追加**、それから **キューを開始** をおします。
 
 うまくいかないときは、下の「うまくいかないときは」を見てください。失敗した行の **診断情報をコピー** で、バグ報告用の短いレポート（リンク、クッキー、パスワードはふくみません）をコピーできます。
@@ -169,12 +191,12 @@ npm run build   # .deb と AppImage を作る
 
 ## 📦 インストール・アップグレード・アンインストール
 
-まだ公開されたリリースはありません。自分でパッケージを作ってください（**はじめかた** を見てください）。
+[v0.1.0 のリリース](https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.0) から `.deb`（または AppImage）をダウンロードするか、自分でパッケージを作ってください（**はじめかた** を見てください）。
 
 **`.deb` を入れる**（Ubuntu/Debian。`yt-dlp` と FFmpeg もいっしょに入ります）：
 
 ```bash
-sudo apt install ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+sudo apt install ./HighVi_0.1.0_amd64.deb
 ```
 
 Ubuntu 24.04 では、新しい `yt-dlp` も pipx で入れてください（**はじめかた** を見てください）。JavaScript でプレーヤーを作るページと **HighVi のブラウザーでひらく** のために、Google Chrome か Chromium を入れてください。Ubuntu の snap 版 Chromium でも動きます。
@@ -182,7 +204,7 @@ Ubuntu 24.04 では、新しい `yt-dlp` も pipx で入れてください（**�
 **アップグレード**：新しい `.deb` を同じように入れます。バージョン番号が変わっていないときは `--reinstall` をつけてください。つけないと apt は古いほうをのこします：
 
 ```bash
-sudo apt install --reinstall ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+sudo apt install --reinstall ./HighVi_0.1.0_amd64.deb
 ```
 
 **アンインストール**：`sudo apt remove high-vi`。`~/Downloads/HighVi` の動画は残ります。
@@ -190,8 +212,8 @@ sudo apt install --reinstall ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
 **AppImage**（`yt-dlp` と FFmpeg が `PATH` にあること）：
 
 ```bash
-chmod +x target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
-./target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
+chmod +x HighVi_0.1.0_amd64.AppImage
+./HighVi_0.1.0_amd64.AppImage
 ```
 
 FUSE のエラーが出るときは `APPIMAGE_EXTRACT_AND_RUN=1` をつけて動かしてください。
