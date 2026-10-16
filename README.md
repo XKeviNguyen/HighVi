@@ -43,7 +43,9 @@ Some websites only hand out the treasure map if you say where you came from, lik
 
 **Many videos at once?** Paste one link per line (up to 100 at a time) and press **Start queue**. HighVi works on up to **four** at once; you choose 1–4. Each row shows what it is doing, including when it is waiting for the private browser (one page at a time). You can cancel, retry, or remove any row. A link that is already in the queue isn't added twice.
 
-**Do I need DevTools or F12?** No. Paste the page link. If `yt-dlp` doesn't know the site, HighVi opens the page in a private, throw-away Chrome (no your profile, no cookies, every request through the network guard), lets the page's own player load, and picks the main video, not the adverts. The **Playlist link** mode is only an advanced fallback for when you already have the `.m3u8` link.
+**Do I need DevTools or F12?** No. Paste the page link. If `yt-dlp` doesn't know the site, HighVi opens the page in a private, throw-away Chrome (not your profile, no cookies, every request through the network guard), lets the page's own player load, and picks the main video, not the adverts. The **Playlist link** mode is only an advanced fallback for when you already have the `.m3u8` link.
+
+**The site refuses HighVi?** Some sites, often behind Cloudflare, turn away hidden, automated browsers while showing the same page to a normal one. The failed row then offers **Open in HighVi Browser**: a visible, private HighVi window where you start the video yourself (see below).
 
 ## ✅ What HighVi does
 
@@ -53,12 +55,47 @@ Some websites only hand out the treasure map if you say where you came from, lik
 4. The pieces are downloaded and glued into one MP4 on your computer. You see progress, speed, and time left, and you can press **Cancel** at any time.
 5. The finished video lands in **`~/Downloads/HighVi`**, named after the video. If the name is taken, HighVi adds ` (2)`. It never writes over a file. Press **Open folder** to see it.
 
+## 🧭 Using the queue
+
+1. Paste one or more video page links, one per line (up to 100 at a time), and press **Add to queue**. Duplicates and invalid lines are listed, not added.
+2. Press **Start queue**. Use **At once** to run 1 to 4 downloads together; the default is 2. Lowering it never stops a running download: the extra ones finish first.
+3. Each row shows its step: looking for the video, *waiting for the private browser* (pages that need it go one at a time), downloading, *waiting to put it together*, saving.
+4. Per row: **Cancel**, **Retry**, **Remove**, and, for pages a visible window may help, **Open in HighVi Browser**. For the whole queue: **Pause queue**, **Cancel all**, **Retry failed**, **Clear completed**.
+5. A failed row can show its diagnostics (steps, error codes, tool versions, host names; never links, cookies or passwords) to copy into a bug report.
+
+The queue lives in memory: closing HighVi stops running downloads (finished files stay) and forgets the list.
+
+## 🌐 Open in HighVi Browser
+
+When a page refuses HighVi's hidden browser, or its player needs you to press play, **Open in HighVi Browser** opens the page in a visible HighVi window:
+
+1. The window is a fresh, private Chrome profile made for this one page. It is not your browser: no history, logins, cookies or extensions, and it is deleted afterwards.
+2. Use the page normally and start the video. HighVi watches the window's network traffic for the video stream. No DevTools, no copying links.
+3. As soon as a stream passes HighVi's checks, the window closes and the download continues in the queue as usual.
+
+- Every request still goes through HighVi's network guard (public `https://` only), with Chrome's sandbox on.
+- The window waits up to 10 minutes, and only one HighVi browser runs at a time. Other downloads keep going.
+- Closing the window ends the attempt (`browser_closed`). **Cancel** works too.
+
+> [!NOTE]
+> A site can still refuse a visible browser, or ask you to prove you are human. HighVi never answers such checks for you. If the site lets you through, it is because you were allowed to, not because HighVi got around anything.
+
 ## 🛑 What HighVi will never do
 
 - Break DRM, paywalls, or logins.
 - Use your browser's cookies or sessions.
 - Pretend to be a web browser to sneak past bot protection.
 - Run plugins or extra commands from your `yt-dlp` settings.
+- Solve bot checks or CAPTCHAs for you, or copy cookies out of your own browser.
+
+## 🔒 Privacy & safety
+
+- **Nothing leaves your computer except the downloads themselves.** HighVi has no account, no telemetry and no update check.
+- **Links stay inside HighVi.** Signed video links never reach HighVi's own window, logs, or other programs' command lines. Saved videos carry no source links or tags.
+- **One guard for all traffic.** `yt-dlp` and the browsers can only reach public `https://` addresses through HighVi's network guard. Your home or office network is unreachable to them.
+- **Throw-away workspace.** Every download works in a private folder (`~/Downloads/HighVi/.highvi-job-…`, mode `0700`) that is removed when it ends, and after a crash when HighVi starts again. If HighVi is killed, its tools stop with it.
+- **No surprises on disk.** HighVi never replaces a file; a taken name gets ` (2)`.
+- **Diagnostics are yours.** They are shown only when you ask, and are never sent anywhere.
 
 > [!IMPORTANT]
 > Only download videos you own or have permission to download.
@@ -95,21 +132,36 @@ npm run dev     # open HighVi
 npm run build   # make a .deb and an AppImage
 ```
 
-## 📦 Install
+## 📦 Install, upgrade, remove
 
-There is no published release yet; build the packages yourself (see **Get started**), then:
+There is no published release yet; build the packages yourself (see **Get started**).
+
+**Install the `.deb`** (Ubuntu/Debian; it also installs `yt-dlp` and FFmpeg):
 
 ```bash
-# .deb (Ubuntu/Debian): also installs yt-dlp and FFmpeg
-# (on Ubuntu 24.04, also install a newer yt-dlp with pipx: see Get started)
 sudo apt install ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+```
 
-# or the AppImage (needs yt-dlp and FFmpeg on your PATH)
+On Ubuntu 24.04, also install a newer `yt-dlp` with pipx (see **Get started**). For pages whose player is built with JavaScript, and for **Open in HighVi Browser**, install Google Chrome or Chromium; Ubuntu's Chromium snap works.
+
+**Upgrade** to a newer build: install the new `.deb` the same way. If the version number did not change, add `--reinstall`, or apt keeps the old one:
+
+```bash
+sudo apt install --reinstall ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+```
+
+**Remove**: `sudo apt remove high-vi`. Your videos in `~/Downloads/HighVi` are kept.
+
+**AppImage** (needs `yt-dlp` and FFmpeg on your `PATH`):
+
+```bash
 chmod +x target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
 ./target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
 ```
 
-If the AppImage complains about FUSE, run it with `APPIMAGE_EXTRACT_AND_RUN=1`. For pages whose player is built with JavaScript, also install Google Chrome or Chromium.
+If it complains about FUSE, run it with `APPIMAGE_EXTRACT_AND_RUN=1`.
+
+Videos are saved in **`~/Downloads/HighVi`** (or `Downloads/HighVi` in your language's Downloads folder).
 
 ## 🧯 When something goes wrong
 
@@ -134,13 +186,31 @@ If the AppImage complains about FUSE, run it with `APPIMAGE_EXTRACT_AND_RUN=1`. 
 | `download_timeout` | One part took longer than 24 hours. | Try again on a faster connection. |
 | `insufficient_disk_space` | There isn't enough free space for the video. | Free some space, then retry. |
 | `discovery_overloaded` | The page made too many requests for the private browser to follow. | Use **Playlist link** if you have the `.m3u8`. |
+| `browser_closed` | The HighVi browser window was closed before a video started. | Open it again and start the video in it, or leave the row as it is. |
+| `interactive_timeout` | No video started in the HighVi browser window within 10 minutes. | Open it again; start the video in the window. |
+| `browser_no_display` | HighVi could not find your desktop's display for its browser window. | Run HighVi from your normal desktop session. |
 | `queue_full` / `batch_too_large` | The queue holds 200 videos, and you can add 100 at a time. | Clear finished rows, or add fewer links. |
+
+## ❓ FAQ
+
+**Why does a page play in my Chrome but fail in HighVi?** Most often the site refuses hidden, automated browsers (you will see `host_firewall_block` or `access_denied`). Use **Open in HighVi Browser**. If the site refuses that window too, HighVi cannot download from it.
+
+**Does Open in HighVi Browser use my Chrome profile, passwords or cookies?** No. It is a separate, empty profile that is deleted afterwards. HighVi never reads your own browser's data.
+
+**YouTube fails with 403.** Your `yt-dlp` is too old for YouTube (2026.08.19 or newer is needed). Update it as in **Get started**.
+
+**Does it work on Wayland? On a HiDPI screen?** Yes. HighVi and its browser window run natively on Wayland and X11, and scale with the screen.
+
+**How many downloads can run at once?** Up to four; you choose 1 to 4. Pages that need a browser use it one at a time.
+
+**Can it download DRM-protected or live videos?** No, and it never tries.
 
 ## 🚧 Known limitations
 
 - **HLS and plain MP4 only.** DASH-only sites, live streams, and DRM-protected video are refused on purpose.
 - **No logins, no cookies.** Videos that need you to be signed in, or a cookie the page sets for the player, won't download. HighVi never borrows your browser session.
-- **Browser search needs Google Chrome or Chromium.** HighVi doesn't ship a browser. Ubuntu's Chromium snap works too (all browser tests pass with Chromium 155 from the snap).
+- **Browser search and Open in HighVi Browser need Google Chrome or Chromium.** HighVi doesn't ship a browser. Ubuntu's Chromium snap works too (all browser tests pass with Chromium 155 from the snap).
+- **A site may refuse even the visible HighVi browser** (bot checks, sign-in, region locks). HighVi reports that; it does not work around it.
 - **A player that needs a special click** (a custom "play" overlay, an age gate, a consent wall) won't be pressed. HighVi only starts normal `<video>` elements.
 - **No system or company proxy.** HighVi's own network guard is the only way out. Behind a proxy that blocks direct connections, downloads fail.
 - **Plain `http://` media is refused,** even when the page itself is `https://`.

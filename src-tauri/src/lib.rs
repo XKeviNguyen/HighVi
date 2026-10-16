@@ -81,6 +81,13 @@ fn queue_retry(state: State<'_, AppState>, id: u64) {
     state.queue.retry(id);
 }
 
+/// Queues a page again for a visible HighVi browser window. Only the item
+/// ID crosses IPC; the page and anything found stay in Rust.
+#[tauri::command]
+fn queue_open_in_browser(state: State<'_, AppState>, id: u64) {
+    state.queue.open_in_browser(id);
+}
+
 #[tauri::command]
 fn queue_retry_failed(state: State<'_, AppState>) {
     state.queue.retry_failed();
@@ -215,7 +222,7 @@ fn job_environment(
 /// Runs one queued source with the real downloader.
 fn job_runner(app: AppHandle) -> Runner {
     let shared = Arc::new(SharedResources::default());
-    Arc::new(move |source, cancel, report: Report| {
+    Arc::new(move |source, discovery, cancel, report: Report| {
         let app = app.clone();
         let shared = Arc::clone(&shared);
         Box::pin(async move {
@@ -224,7 +231,10 @@ fn job_runner(app: AppHandle) -> Runner {
                 Err(error) => return (Err(error), None),
             };
             let (result, diagnostics) =
-                run_job(&environment, &source, cancel, &|update| report(update)).await;
+                run_job(&environment, &source, discovery, cancel, &|update| {
+                    report(update)
+                })
+                .await;
             let report = match &result {
                 Err(error) if error.code != "cancelled" => Some(diagnostics.render()),
                 _ => None,
@@ -293,6 +303,7 @@ pub fn run() {
             queue_cancel,
             queue_cancel_all,
             queue_retry,
+            queue_open_in_browser,
             queue_retry_failed,
             queue_remove,
             queue_clear_completed,

@@ -50,6 +50,7 @@ const reports = new Map();
 const stageKeys = {
   discovering: "progress.discovering",
   waitingForBrowser: "progress.waitingForBrowser",
+  waitingForUser: "progress.waitingForUser",
   browsing: "progress.browsing",
   downloadingVideo: "progress.downloadingVideo",
   downloadingAudio: "progress.downloadingAudio",
@@ -255,6 +256,9 @@ function createRow(item) {
   row.querySelector(".job-retry").addEventListener("click", () => {
     invoke("queue_retry", { id: item.id }).catch(showError);
   });
+  row.querySelector(".job-browser").addEventListener("click", () => {
+    invoke("queue_open_in_browser", { id: item.id }).catch(showError);
+  });
   row.querySelector(".job-remove").addEventListener("click", () => {
     invoke("queue_remove", { id: item.id }).catch(showError);
   });
@@ -272,7 +276,10 @@ function renderRow(row, item) {
   setProgress(row, item);
 
   const failed = item.status === "failed";
-  const hint = failed ? hintText(item.error?.hint) : "";
+  // Without Chrome, a visible window cannot help either.
+  const canOpen = Boolean(item.canOpenInBrowser) && !browserMissing;
+  const hint =
+    (failed ? hintText(item.error?.hint) : "") || (canOpen ? t("job.browserHint") : "");
   const hintElement = row.querySelector(".job-hint");
   hintElement.textContent = hint;
   setHidden(hintElement, !hint);
@@ -298,6 +305,9 @@ function renderRow(row, item) {
   const retry = row.querySelector(".job-retry");
   retry.textContent = t("job.retry");
   setHidden(retry, !["failed", "cancelled"].includes(item.status));
+  const browser = row.querySelector(".job-browser");
+  browser.textContent = t("job.openInBrowser");
+  setHidden(browser, !canOpen);
   const remove = row.querySelector(".job-remove");
   remove.textContent = t("job.remove");
   setHidden(remove, ["running", "cancelling"].includes(item.status));
