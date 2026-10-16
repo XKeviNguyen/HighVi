@@ -1106,10 +1106,29 @@ fn unsupported_container() -> PublicError {
     )
 }
 
+/// Longest leading ID3 tag read past to find what follows it.
+const MAX_LEADING_ID3: u64 = 1024 * 1024;
+
 async fn sniff_file(path: &Path) -> Result<crate::mux::Container, PublicError> {
-    let mut header = Vec::with_capacity(SNIFF_BYTES);
-    let file = tokio::fs::File::open(path).await.map_err(|_| mux_error())?;
-    file.take(SNIFF_BYTES as u64)
+    let mut start = [0_u8; 10];
+    let mut file = tokio::fs::File::open(path).await.map_err(|_| mux_error())?;
+    let read = file.read(&mut start).await.map_err(|_| mux_error())?;
+    // Packed audio starts with an ID3 tag, which can be longer than the
+    // sniffed bytes: read past all of it (bounded) to see the frames.
+    let tag = if read == 10
+        && start.starts_with(b"ID3")
+        && start[6..10].iter().all(|byte| byte & 0x80 == 0)
+    {
+        let length = start[6..10]
+            .iter()
+            .fold(0_u64, |total, byte| (total << 7) | u64::from(*byte));
+        let footer = if start[5] & 0x10 != 0 { 10 } else { 0 };
+        (length + footer).min(MAX_LEADING_ID3)
+    } else {
+        0
+    };
+    let mut header = start[..read].to_vec();
+    file.take(tag + SNIFF_BYTES as u64)
         .read_to_end(&mut header)
         .await
         .map_err(|_| mux_error())?;
@@ -1337,6 +1356,33 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn packed_audio_behind_a_long_id3_tag_is_recognised() {
+        let directory = crate::filesystem::temp_directory("long-id3");
+        // A 2000-byte tag: far past the sniffed bytes.
+        let length = 2000_u32;
+        let size = [
+            (length >> 21) as u8 & 0x7f,
+            (length >> 14) as u8 & 0x7f,
+            (length >> 7) as u8 & 0x7f,
+            length as u8 & 0x7f,
+        ];
+        let mut bytes = b"ID3\x04\x00\x00".to_vec();
+        bytes.extend(size);
+        bytes.extend(vec![0_u8; length as usize]);
+        bytes.extend([0x0b, 0x77, 0xb8, 0xe0, 0x1c, 0x30]);
+        bytes.resize(bytes.len() + 1530, 0);
+        let path = directory.join("audio.ac3");
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(sniff_file(&path).await.unwrap(), Container::Ac3);
+        let aac = directory.join("audio.aac");
+        let mut adts = bytes[..10 + length as usize].to_vec();
+        adts.extend([0xff, 0xf1, 0x50, 0x80, 0x02, 0x1f, 0xfc]);
+        std::fs::write(&aac, &adts).unwrap();
+        assert_eq!(sniff_file(&aac).await.unwrap(), Container::Adts);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn a_mux_reserves_a_margin_above_its_inputs() {
