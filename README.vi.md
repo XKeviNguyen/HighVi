@@ -47,6 +47,39 @@ Có những trang chỉ đưa bản đồ kho báu khi bạn nói mình đến t
 
 **Trang web từ chối HighVi?** Có những trang (thường đứng sau Cloudflare) chặn trình duyệt tự động chạy ẩn, nhưng vẫn cho trình duyệt bình thường xem. Khi đó dòng bị lỗi sẽ có nút **Mở trong trình duyệt HighVi**: một cửa sổ HighVi riêng, hiện ra để bạn tự bấm phát video (xem bên dưới).
 
+## 🎬 Hướng dẫn
+
+### 1. Lần tải đầu tiên
+
+1. Mở HighVi. Giữ nguyên lựa chọn **Link trang video**.
+2. Chép địa chỉ của trang đang phát video (trên thanh địa chỉ của trình duyệt) rồi dán vào ô.
+3. Bấm **Thêm vào hàng chờ**. Ngay dưới ô, HighVi cho biết đã thêm bao nhiêu link.
+4. Kéo xuống phần **Danh sách tải** và bấm **Bắt đầu tải**. Dòng của video cho biết từng bước: đang tìm video, đang tải, đang ghép, đang lưu.
+5. Khi dòng báo **Đã lưu vào …**, bấm **Mở thư mục**. Video nằm trong `~/Downloads/HighVi`, đặt tên theo video.
+
+Nhiều video? Ở bước 2, dán mỗi dòng một link, rồi chọn số video tải cùng lúc ở ô **Cùng lúc** (1–4).
+
+### 2. Khi trang web từ chối HighVi
+
+Có trang chặn trình duyệt ẩn của HighVi (dòng sẽ báo lỗi kiểu `host_firewall_block`, "Lớp bảo vệ của trang (Cloudflare) đã chặn HighVi").
+
+1. Trên dòng đó, bấm **Mở trong trình duyệt HighVi**. Một cửa sổ HighVi riêng mở trang ra.
+2. Nếu trang bắt bạn xác nhận mình là người, hãy tự làm trong cửa sổ đó.
+3. Bấm phát video như ở bất kỳ trình duyệt nào.
+4. HighVi nhận ra luồng video, đóng cửa sổ, và việc tải tiếp tục ngay trên dòng đó.
+
+Đổi ý? Đóng cửa sổ hoặc bấm **Hủy**. Nếu trang chặn cả cửa sổ này, HighVi không tải được từ trang đó.
+
+### 3. Chế độ Link playlist (nâng cao)
+
+Chỉ dùng khi bạn đã có sẵn link `.m3u8` của video:
+
+1. Chọn **Link playlist (.m3u8)**.
+2. Dán link `.m3u8` vào ô **Link playlist (.m3u8)**, và địa chỉ trang nơi bạn tìm thấy nó vào ô **Trang bạn tìm thấy playlist**.
+3. Bấm **Thêm vào hàng chờ**, rồi **Bắt đầu tải**.
+
+Có lỗi? Xem phần **Khi có lỗi** bên dưới. Trên dòng bị lỗi, **Sao chép thông tin chẩn đoán** chép một báo cáo ngắn (không có link, cookie hay mật khẩu) để gửi báo lỗi.
+
 ## ✅ HighVi làm gì
 
 1. Bạn dán link rồi bấm **Tải MP4**.
