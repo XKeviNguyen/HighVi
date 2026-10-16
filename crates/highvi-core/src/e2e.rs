@@ -3423,9 +3423,7 @@ async fn packed_dolby_audio_is_copied_into_the_mp4() {
         std::fs::write(&audio, &packed).unwrap();
         let header = &packed[..crate::mux::SNIFF_BYTES.min(packed.len())];
         assert_eq!(crate::mux::sniff(header), Some(container), "{codec}");
-        let plain = directory.join(format!("plain-{codec}"));
-        crate::mux::unpack_dolby(&audio, &plain).unwrap();
-        std::fs::rename(&plain, &audio).unwrap();
+        crate::mux::unpack_dolby(&audio, &|| false).unwrap();
 
         let output = directory.join(format!("out-{codec}.mp4"));
         let video_input = crate::mux::MuxInput {

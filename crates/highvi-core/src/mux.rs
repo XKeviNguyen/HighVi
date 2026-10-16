@@ -121,33 +121,44 @@ fn dolby_frame_len(header: &[u8]) -> Option<usize> {
         }
         11..=16 => {
             let words = (usize::from(header[2] & 0x07) << 8 | usize::from(header[3])) + 1;
-            Some(words * 2)
+            // A frame is never shorter than the header that describes it.
+            Some(words * 2).filter(|length| *length >= 6)
         }
         _ => None,
     }
 }
 
 /// Rewrites packed AC-3/E-AC-3 audio (HLS segments joined back to back,
-/// each starting with an ID3 tag) as plain frames. FFmpeg's AC-3 reader
-/// does not skip tags between frames: it glues each one to the frame
-/// before, which damages the audio at every segment boundary. Anything
-/// that is neither a whole frame nor an ID3 tag is refused.
-pub fn unpack_dolby(source: &Path, destination: &Path) -> std::io::Result<()> {
+/// each starting with an ID3 tag) as plain frames, in place. FFmpeg's AC-3
+/// reader does not skip tags between frames: it glues each one to the
+/// frame before, which damages the audio at every segment boundary.
+/// Anything that is neither a whole frame nor an ID3 tag is refused
+/// (`InvalidData`); `cancelled` is checked between frames (`Interrupted`).
+/// Only bytes are dropped, so the writer never passes the reader and no
+/// second copy (no extra disk space) is needed.
+pub fn unpack_dolby(path: &Path, cancelled: &dyn Fn() -> bool) -> std::io::Result<()> {
     use std::io::{BufReader, BufWriter, ErrorKind, Read, Write};
     let invalid = || std::io::Error::new(ErrorKind::InvalidData, "not packed (E-)AC-3");
-    let mut input = BufReader::new(std::fs::File::open(source)?);
-    let mut output = BufWriter::new(std::fs::File::create_new(destination)?);
+    let mut input = BufReader::new(std::fs::File::open(path)?);
+    let target = std::fs::OpenOptions::new().write(true).open(path)?;
+    let mut output = BufWriter::new(&target);
+    let mut written = 0_u64;
     let mut header = [0_u8; 10];
     let mut frame = Vec::new();
     let mut frames = 0_u64;
     loop {
-        match input.read_exact(&mut header[..6]) {
-            Ok(()) => {}
-            Err(error) if error.kind() == ErrorKind::UnexpectedEof => break,
-            Err(error) => return Err(error),
+        if cancelled() {
+            return Err(ErrorKind::Interrupted.into());
         }
+        // End of file only before a frame or tag; a cut-off one is invalid.
+        if input.read(&mut header[..1])? == 0 {
+            break;
+        }
+        input.read_exact(&mut header[1..6]).map_err(|_| invalid())?;
         if header.starts_with(b"ID3") {
-            input.read_exact(&mut header[6..10])?;
+            input
+                .read_exact(&mut header[6..10])
+                .map_err(|_| invalid())?;
             if header[6..10].iter().any(|byte| byte & 0x80 != 0) {
                 return Err(invalid());
             }
@@ -170,12 +181,15 @@ pub fn unpack_dolby(source: &Path, destination: &Path) -> std::io::Result<()> {
         frame.resize(length, 0);
         input.read_exact(&mut frame[6..]).map_err(|_| invalid())?;
         output.write_all(&frame)?;
+        written += length as u64;
         frames += 1;
     }
     if frames == 0 {
         return Err(invalid());
     }
-    output.flush()
+    output.flush()?;
+    drop(output);
+    target.set_len(written)
 }
 
 pub struct MuxInput<'a> {
@@ -272,6 +286,11 @@ mod tests {
             "reserved rate"
         );
         assert_eq!(dolby_frame_len(b"ID3\x04\x00\x00"), None);
+        assert_eq!(
+            dolby_frame_len(&[0x0b, 0x77, 0x00, 0x00, 0x00, 0x58]),
+            None,
+            "2-byte frame"
+        );
     }
 
     #[test]
@@ -290,23 +309,33 @@ mod tests {
             packed.extend(frame(segment + 10));
         }
         let source = directory.join("audio.ac3");
-        let plain = directory.join("audio.plain");
         std::fs::write(&source, &packed).unwrap();
-        unpack_dolby(&source, &plain).unwrap();
-        let out = std::fs::read(&plain).unwrap();
+        unpack_dolby(&source, &|| false).unwrap();
+        let out = std::fs::read(&source).unwrap();
         assert_eq!(out.len(), 6 * 1536);
         assert!(out.chunks(1536).all(|chunk| chunk[..2] == [0x0b, 0x77]));
-        // A truncated frame, junk between frames, or no frame at all: refused.
+        // A truncated frame or header, junk between frames, a frame that
+        // claims to be shorter than its header, or no frame: refused.
         for (name, bytes) in [
             ("cut", [&tag[..], &frame(1)[..100]].concat()),
+            (
+                "cut-header",
+                [&frame(1)[..], &[0x0b, 0x77, 0xb8][..]].concat(),
+            ),
             ("junk", [&frame(1)[..], b"<html>junk-bytes"].concat()),
+            ("tiny", vec![0x0b, 0x77, 0x00, 0x00, 0x00, 0x58]),
             ("empty", tag.clone()),
         ] {
             let source = directory.join(format!("{name}.ac3"));
-            let plain = directory.join(format!("{name}.plain"));
             std::fs::write(&source, &bytes).unwrap();
-            assert!(unpack_dolby(&source, &plain).is_err(), "{name}");
+            let error = unpack_dolby(&source, &|| false).unwrap_err();
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidData, "{name}");
         }
+        // Cancelled: stops between frames.
+        let source = directory.join("cancel.ac3");
+        std::fs::write(&source, &packed).unwrap();
+        let error = unpack_dolby(&source, &|| true).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
         std::fs::remove_dir_all(directory).unwrap();
     }
 
@@ -316,14 +345,14 @@ mod tests {
     #[test]
     #[ignore = "needs a real packed (E-)AC-3 file"]
     fn real_packed_dolby_unpacks_to_whole_frames() {
-        let source =
+        let original =
             std::path::PathBuf::from(std::env::var_os("HIGHVI_TEST_PACKED_DOLBY").unwrap());
-        let plain = source.with_extension("plain");
-        let _ = std::fs::remove_file(&plain);
-        unpack_dolby(&source, &plain).unwrap();
+        let copy = original.with_extension("plain");
+        std::fs::copy(&original, &copy).unwrap();
+        unpack_dolby(&copy, &|| false).unwrap();
         let (before, after) = (
-            std::fs::metadata(&source).unwrap().len(),
-            std::fs::metadata(&plain).unwrap().len(),
+            std::fs::metadata(&original).unwrap().len(),
+            std::fs::metadata(&copy).unwrap().len(),
         );
         println!(
             "{before} bytes packed -> {after} bytes of frames ({} bytes of tags removed)",

@@ -986,7 +986,7 @@ async fn mux(
         None => None,
     };
     if let (Some(path), Some(Container::Ac3 | Container::Eac3)) = (&audio_path, audio_container) {
-        unpack_dolby_in_place(path).await?;
+        unpack_dolby_in_place(path, cancel).await?;
     }
     let audio = audio_path
         .as_ref()
@@ -1079,22 +1079,24 @@ async fn find_track(directory: &Path, stem: &str) -> Result<PathBuf, PublicError
     }
 }
 
-/// Replaces packed (E-)AC-3 audio with its plain frames (see
-/// [`crate::mux::unpack_dolby`]), in the job directory.
-async fn unpack_dolby_in_place(path: &Path) -> Result<(), PublicError> {
-    let source = path.to_path_buf();
-    let plain = path.with_extension("plain");
-    let target = plain.clone();
-    let unpacked = tokio::task::spawn_blocking(move || crate::mux::unpack_dolby(&source, &target))
-        .await
-        .map_err(|_| mux_error())?;
-    if unpacked.is_err() {
-        let _ = tokio::fs::remove_file(&plain).await;
-        return Err(unsupported_container());
+/// Rewrites packed (E-)AC-3 audio as its plain frames, in place (see
+/// [`crate::mux::unpack_dolby`]: no extra disk space), stopping on cancel.
+async fn unpack_dolby_in_place(path: &Path, cancel: &CancelToken) -> Result<(), PublicError> {
+    let path = path.to_path_buf();
+    let token = cancel.clone();
+    let unpacked = tokio::task::spawn_blocking(move || {
+        crate::mux::unpack_dolby(&path, &|| token.is_cancelled())
+    })
+    .await
+    .map_err(|_| mux_error())?;
+    match unpacked {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Err(cancelled_error()),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            Err(unsupported_container())
+        }
+        Err(_) => Err(mux_error()),
     }
-    tokio::fs::rename(&plain, path)
-        .await
-        .map_err(|_| mux_error())
 }
 
 fn unsupported_container() -> PublicError {
