@@ -47,6 +47,39 @@ Some websites only hand out the treasure map if you say where you came from, lik
 
 **The site refuses HighVi?** Some sites, often behind Cloudflare, turn away hidden, automated browsers while showing the same page to a normal one. The failed row then offers **Open in HighVi Browser**: a visible, private HighVi window where you start the video yourself (see below).
 
+## 🎬 Tutorial
+
+### 1. Your first download
+
+1. Open HighVi. Keep **Video page link** selected.
+2. Copy the address of the page where the video plays (from your browser's address bar) and paste it into the box.
+3. Press **Add to queue**. Under the box, HighVi says how many links it added.
+4. Scroll to **Downloads** and press **Start queue**. The row shows each step: looking for the video, downloading, putting it together, saving.
+5. When the row says **Saved to …**, press **Open folder**. Your video is in `~/Downloads/HighVi`, named after the video.
+
+Several videos? Paste one link per line in step 2, and pick how many run together under **At once** (1–4).
+
+### 2. When a site refuses HighVi
+
+Some sites turn away HighVi's hidden browser (the row shows an error such as `host_firewall_block`, "The website's guard (Cloudflare) blocked HighVi").
+
+1. On that row, press **Open in HighVi Browser**. A private HighVi window opens with the page.
+2. If the site asks you to confirm you are human, do it yourself, in that window.
+3. Start the video, as you would in any browser.
+4. HighVi spots the video stream, closes the window, and the download carries on in the row.
+
+Changed your mind? Close the window or press **Cancel**. If the site refuses this window too, HighVi cannot download from it.
+
+### 3. Playlist link mode (advanced)
+
+Only if you already have the `.m3u8` link of the video:
+
+1. Select **Playlist link (.m3u8)**.
+2. Paste the `.m3u8` link into **Playlist link (.m3u8)**, and the address of the page you found it on into **Page where you found it**.
+3. Press **Add to queue**, then **Start queue**.
+
+Something went wrong? See **When something goes wrong** below. On a failed row, **Copy diagnostics** copies a short report (no links, cookies or passwords) for a bug report.
+
 ## ✅ What HighVi does
 
 1. You paste a link and press **Download MP4**.
