@@ -3316,3 +3316,48 @@ async fn a_page_cannot_start_desktop_apps() {
     );
     assert_no_chrome_left(&fixture).await;
 }
+
+/// Breaker N5: several streams arrive together and the real one ranks
+/// below three that fail HighVi's checks. It is checked next, at once,
+/// rather than only when yet another stream appears.
+#[tokio::test]
+async fn the_highvi_browser_checks_lower_ranked_streams_after_a_rejection() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    for index in 0..3 {
+        fixture.server.route(
+            &format!("media.test/advert{index}/master.m3u8"),
+            Route::playlist(SPLIT_MASTER_ABSOLUTE).browser_only(),
+        );
+    }
+    fixture.server.route(
+        "page.test/crowded",
+        Route::html(
+            "<!doctype html><title>Crowded</title><script>\
+             (async () => {\
+               for (const i of [0, 1, 2]) {\
+                 await fetch(`https://media.test/advert${i}/master.m3u8`).then(r => r.text());\
+               }\
+               await fetch('https://media.test/muxed/master.m3u8').then(r => r.text());\
+             })();\
+             </script>",
+        ),
+    );
+    let mut environment = fixture.environment();
+    environment.limits.interactive_budget = Duration::from_secs(40);
+    let (result, _) = fixture
+        .run_mode(
+            &environment,
+            page("https://page.test/crowded"),
+            crate::Discovery::Interactive,
+            None,
+        )
+        .await;
+    let report = fixture.last_report.lock().unwrap().clone();
+    let outcome = result.unwrap_or_else(|error| panic!("{error:?}\n{report}"));
+    assert_eq!(outcome.title, "Crowded");
+    assert!(report.contains("candidates checked 4"), "{report}");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}

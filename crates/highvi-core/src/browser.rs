@@ -1088,6 +1088,11 @@ async fn observe<T>(
                     playlist_fetches = 0;
                     sniff_fetches = 0;
                 }
+                // Playlists that ranked below the ones just rejected are
+                // next, without waiting for a new one to appear.
+                if !rank_skipping(&observation.playlists, &checked).0.is_empty() {
+                    last_found = Instant::now().checked_sub(SETTLE);
+                }
             }
             continue;
         }
@@ -1217,7 +1222,9 @@ async fn observe<T>(
                     .send(Some(&child), "Runtime.runIfWaitingForDebugger", json!({}))
                     .await;
             }
-            "Target.targetCreated" => {
+            // A tab is attached once it shows a web page: a new tab starts
+            // as chrome://newtab and only later navigates.
+            "Target.targetCreated" | "Target.targetInfoChanged" => {
                 let info = &params["targetInfo"];
                 let internal = info["url"].as_str().is_some_and(|url| {
                     [
