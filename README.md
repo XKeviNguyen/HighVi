@@ -54,8 +54,14 @@ Some websites only hand out the treasure map if you say where you came from, lik
 1. Open HighVi. Keep **Video page link** selected.
 2. Copy the address of the page where the video plays (from your browser's address bar) and paste it into the box.
 3. Press **Add to queue**. Under the box, HighVi says how many links it added.
+
+<p align="center"><img src="docs/assets/tutorial/1-paste-en.png" alt="A page link pasted into HighVi" width="560" /><br /><sub>A video page link, ready to add.</sub></p>
 4. Scroll to **Downloads** and press **Start queue**. The row shows each step: looking for the video, downloading, putting it together, saving.
+
+<p align="center"><img src="docs/assets/tutorial/2-queue-en.png" alt="The download queue with a failed page and a video downloading" width="560" /><br /><sub>Two rows: example.com has no video (see section 2); the public test stream is downloading, with speed and time left.</sub></p>
 5. When the row says **Saved to …**, press **Open folder**. Your video is in `~/Downloads/HighVi`, named after the video.
+
+<p align="center"><img src="docs/assets/tutorial/3-saved-en.png" alt="A finished download" width="560" /><br /><sub>Done: the row shows where the MP4 was saved.</sub></p>
 
 Several videos? Paste one link per line in step 2, and pick how many run together under **At once** (1–4).
 
@@ -64,6 +70,8 @@ Several videos? Paste one link per line in step 2, and pick how many run togethe
 Some sites turn away HighVi's hidden browser (the row shows an error such as `host_firewall_block`, "The website's guard (Cloudflare) blocked HighVi").
 
 1. On that row, press **Open in HighVi Browser**. A private HighVi window opens with the page.
+
+<p align="center"><img src="docs/assets/tutorial/4-browser-window.png" alt="The private HighVi browser window" width="640" /><br /><sub>The HighVi browser: a separate, private Chrome window with one tab. Your own browser, logins and cookies are never used.</sub></p>
 2. If the site asks you to confirm you are human, do it yourself, in that window.
 3. Start the video, as you would in any browser.
 4. HighVi spots the video stream, closes the window, and the download carries on in the row.
@@ -76,6 +84,8 @@ Only if you already have the `.m3u8` link of the video:
 
 1. Select **Playlist link (.m3u8)**.
 2. Paste the `.m3u8` link into **Playlist link (.m3u8)**, and the address of the page you found it on into **Page where you found it**.
+
+<p align="center"><img src="docs/assets/tutorial/5-playlist-en.png" alt="Playlist link mode" width="560" /><br /><sub>Playlist link mode with a public test stream and its page.</sub></p>
 3. Press **Add to queue**, then **Start queue**.
 
 Something went wrong? See **When something goes wrong** below. On a failed row, **Copy diagnostics** copies a short report (no links, cookies or passwords) for a bug report.
