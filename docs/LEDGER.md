@@ -49,6 +49,11 @@ Compact, resumable record. Newest mission first.
   `--no-js-runtimes` from 2025.11.12 (2025.10.22 lacks it) → MINIMUM_YT_DLP 2025.11.12.
   All 38 real-tool e2e pass with 2025.11.12; real 2025.10.22 → `ytdlp_too_old`; the
   release app shows "yt-dlp is too old" with pipx steps (Xvfb screenshot).
+- Snap Chromium 155.0.8059.79 (installed by the owner), as the only browser: all 38 real-tool
+  e2e pass (TMPDIR in $HOME: the snap has a private /tmp; real jobs use ~/Downloads/HighVi).
+  Exactly one browser per launch. The e2e browser counter was wrong for snaps (cmdline cut
+  at 120 chars hid the flag; renderers and snap-confine's start-up helper repeat the flags)
+  → now counts distinct profiles; fails with MAX_BROWSERS = 2 on both snap and Chrome.
 - Ubuntu 24.04 `/etc/skel/.profile` adds `~/.local/bin` to PATH only if it exists at login:
   after `pipx install yt-dlp` the user must log out and back in (hint text corrected).
 

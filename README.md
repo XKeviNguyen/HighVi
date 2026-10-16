@@ -140,7 +140,7 @@ If the AppImage complains about FUSE, run it with `APPIMAGE_EXTRACT_AND_RUN=1`. 
 
 - **HLS and plain MP4 only.** DASH-only sites, live streams, and DRM-protected video are refused on purpose.
 - **No logins, no cookies.** Videos that need you to be signed in, or a cookie the page sets for the player, won't download. HighVi never borrows your browser session.
-- **Browser search needs Google Chrome or Chromium.** HighVi doesn't ship a browser. The snap version of Chromium is untested.
+- **Browser search needs Google Chrome or Chromium.** HighVi doesn't ship a browser. Ubuntu's Chromium snap works too (all browser tests pass with Chromium 155 from the snap).
 - **A player that needs a special click** (a custom "play" overlay, an age gate, a consent wall) won't be pressed. HighVi only starts normal `<video>` elements.
 - **No system or company proxy.** HighVi's own network guard is the only way out. Behind a proxy that blocks direct connections, downloads fail.
 - **Plain `http://` media is refused,** even when the page itself is `https://`.

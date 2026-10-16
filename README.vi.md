@@ -140,7 +140,7 @@ Nếu AppImage báo lỗi FUSE, chạy với `APPIMAGE_EXTRACT_AND_RUN=1`. Muố
 
 - **Chỉ HLS và MP4 thường.** Trang chỉ có DASH, phát trực tiếp và video có DRM sẽ bị từ chối, cố ý vậy.
 - **Không đăng nhập, không cookie.** Video cần đăng nhập, hoặc cần cookie mà trang đặt cho trình phát, sẽ không tải được. HighVi không bao giờ mượn phiên trình duyệt của bạn.
-- **Tìm bằng trình duyệt cần Google Chrome hoặc Chromium.** HighVi không kèm trình duyệt. Bản Chromium dạng snap chưa được kiểm thử.
+- **Tìm bằng trình duyệt cần Google Chrome hoặc Chromium.** HighVi không kèm trình duyệt. Bản Chromium dạng snap của Ubuntu cũng dùng được (mọi bài kiểm thử trình duyệt đều đạt với Chromium 155 bản snap).
 - **Trình phát cần bấm nút đặc biệt** (lớp “play” riêng, hỏi tuổi, hỏi đồng ý cookie) sẽ không được bấm. HighVi chỉ bật các thẻ `<video>` bình thường.
 - **Không dùng proxy hệ thống hay proxy công ty.** Lớp bảo vệ mạng của HighVi là lối ra duy nhất. Nếu mạng chặn kết nối trực tiếp thì sẽ không tải được.
 - **Media dùng `http://` bị từ chối,** kể cả khi trang là `https://`.

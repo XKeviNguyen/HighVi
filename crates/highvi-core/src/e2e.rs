@@ -1160,7 +1160,9 @@ fn chrome_survivors(fixture: &Fixture) -> Vec<String> {
         if let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) {
             let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
             if cmdline.contains(&needle) && cmdline.contains("chrome") {
-                found.push(cmdline.chars().take(120).collect());
+                // Whole: snap Chromium puts a long path and its own flags
+                // first, so HighVi's flags can come late.
+                found.push(cmdline);
             }
         }
     }
@@ -1174,10 +1176,11 @@ async fn assert_no_chrome_left(fixture: &Fixture) {
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    panic!(
-        "browser processes survived: {:?}",
-        chrome_survivors(fixture)
-    );
+    let survivors: Vec<String> = chrome_survivors(fixture)
+        .iter()
+        .map(|cmdline| cmdline.chars().take(160).collect())
+        .collect();
+    panic!("browser processes survived: {survivors:?}");
 }
 
 const SPLIT_MASTER_ABSOLUTE: &str = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=600000,RESOLUTION=320x240,CODECS=\"avc1.64000d,mp4a.40.2\"\nhttps://media.test/muxed/index.m3u8\n";
@@ -2269,13 +2272,19 @@ async fn jobs_share_one_browser_at_a_time() {
     fixture.assert_no_job_dirs();
 }
 
-/// Chrome's top-level browser processes (not its renderers or helpers) with
-/// a profile under this fixture.
+/// Browsers running at once: distinct profiles (one per launch). Counting
+/// processes would also count snap's `snap-confine` and the helper it forks
+/// while starting, and snap Chromium's renderers, which repeat the flags.
 fn chrome_browser_processes(fixture: &Fixture) -> usize {
     chrome_survivors(fixture)
         .iter()
         .filter(|cmdline| cmdline.contains("--remote-debugging-pipe"))
-        .count()
+        .filter_map(|cmdline| {
+            let profile = cmdline.split("--user-data-dir=").nth(1)?;
+            Some(profile.split(" --").next().unwrap_or(profile).to_string())
+        })
+        .collect::<std::collections::HashSet<_>>()
+        .len()
 }
 
 /// Measurement, not a pass/fail check: HighVi's own cost at each target
