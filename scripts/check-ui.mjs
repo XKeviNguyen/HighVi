@@ -50,7 +50,7 @@ for (const match of html.matchAll(/data-i18n(?:-aria-label)?="([^"]+)"/g)) {
   }
 }
 const app = readFileSync("ui/app.js", "utf8");
-const keyPattern = /"((?:progress|cancel|cancelled|download|success|deps|error|network|hint|diagnostics)\.[A-Za-z_.]+)"/g;
+const keyPattern = /"((?:progress|cancel|cancelled|download|success|deps|error|network|hint|diagnostics|add|queue|job)\.[A-Za-z_.]+)"/g;
 for (const match of app.matchAll(keyPattern)) {
   if (!(match[1] in english)) {
     fail(`app.js uses unknown key ${match[1]}`);
@@ -58,7 +58,7 @@ for (const match of app.matchAll(keyPattern)) {
 }
 
 // Error codes returned by Rust. A few are handled without a message key.
-const handledElsewhere = new Set(["cancelled", "invalid_job_id"]);
+const handledElsewhere = new Set(["cancelled"]);
 const variants = { access_denied: true, host_firewall_block: true };
 const rustFiles = [];
 const walk = (directory) => {

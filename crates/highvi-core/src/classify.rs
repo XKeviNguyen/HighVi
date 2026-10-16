@@ -65,6 +65,8 @@ struct Signals {
     rate_limited: bool,
     not_found: bool,
     unsupported: bool,
+    /// yt-dlp did not know one of HighVi's options: it is too old.
+    unknown_option: bool,
     no_formats: bool,
     timeout: bool,
     /// A warning only: some formats may be missing. Never an error by itself.
@@ -86,6 +88,7 @@ impl Signals {
         self.rate_limited |= lower.contains("http error 429");
         self.not_found |= lower.contains("http error 404") || lower.contains("http error 410");
         self.unsupported |= lower.contains("unsupported url:");
+        self.unknown_option |= is_unknown_option_line(lower);
         self.no_formats |= lower.contains("no video formats")
             || lower.contains("requested format is not available");
         self.timeout |= lower.contains("timed out");
@@ -102,6 +105,7 @@ impl Signals {
             (self.rate_limited, "http_429"),
             (self.not_found, "http_404"),
             (self.unsupported, "unsupported_url"),
+            (self.unknown_option, "unknown_option"),
             (self.no_formats, "no_formats"),
             (self.timeout, "timeout"),
         ]
@@ -112,6 +116,7 @@ impl Signals {
 
     fn any(&self) -> bool {
         self.drm
+            || self.unknown_option
             || self.no_space
             || self.authentication
             || self.firewall_block
@@ -124,7 +129,12 @@ impl Signals {
     }
 
     fn classify(&self, kind: SourceKind, target: FetchTarget) -> PublicError {
-        if self.drm {
+        if self.unknown_option {
+            PublicError::new(
+                "ytdlp_too_old",
+                "This yt-dlp is too old for HighVi: it does not know options HighVi needs to run it safely. Update yt-dlp.",
+            )
+        } else if self.drm {
             PublicError::new(
                 "drm_not_supported",
                 "This media reports DRM protection. HighVi will not bypass DRM or access controls.",
@@ -172,10 +182,7 @@ impl Signals {
         } else if self.timeout {
             PublicError::new("network_timeout", "The media host did not respond in time.")
         } else {
-            PublicError::new(
-                "yt_dlp_failed",
-                "yt-dlp could not process this media. Check that the URL is accessible and that yt-dlp is up to date.",
-            )
+            yt_dlp_failed()
         }
     }
 }
@@ -186,6 +193,30 @@ pub fn signals_from_output(output: &str) -> ToolSignals {
         signals.observe(line);
     }
     signals
+}
+
+/// yt-dlp failed for a reason the output does not name.
+pub fn yt_dlp_failed() -> PublicError {
+    PublicError::new(
+        "yt_dlp_failed",
+        "yt-dlp could not process this media. Check that the URL is accessible and that yt-dlp is up to date.",
+    )
+}
+
+/// yt-dlp's own usage error for one of the options HighVi always passes,
+/// e.g. `yt-dlp: error: no such option: --no-js-runtimes`. Extractor
+/// errors, which can quote a site's text, start with `ERROR:` and never
+/// match. The job still confirms with the installed version.
+fn is_unknown_option_line(lower: &str) -> bool {
+    let Some((program, option)) = lower.trim().split_once(": error: no such option: ") else {
+        return false;
+    };
+    !program.is_empty()
+        && !program.contains(char::is_whitespace)
+        && !program.starts_with("error")
+        && crate::ytdlp::YT_DLP_HERMETIC_ARGS
+            .iter()
+            .any(|known| known.starts_with("--") && option.trim() == *known)
 }
 
 pub fn classify_tool_failure(output: &str, kind: SourceKind) -> PublicError {
@@ -359,6 +390,30 @@ mod tests {
                 .code,
             "yt_dlp_failed"
         );
+    }
+
+    #[test]
+    fn an_unknown_option_means_yt_dlp_is_too_old() {
+        // yt-dlp 2024.04.09 (Ubuntu 24.04 APT) on one of HighVi's options.
+        let error = classify_tool_failure(
+            "Usage: yt-dlp [OPTIONS] URL [URL...]\n\nyt-dlp: error: no such option: --no-plugin-dirs",
+            SourceKind::Page,
+        );
+        assert_eq!(error.code, "ytdlp_too_old");
+        // A site's error text quoting the same words is not yt-dlp's usage
+        // error, and neither is an option HighVi does not pass.
+        for output in [
+            "ERROR: [generic] 1: Video unavailable: yt-dlp: error: no such option: --no-plugin-dirs",
+            "[generic] Title: x: error: no such option: --no-js-runtimes",
+            "yt-dlp: error: no such option: --some-other-option",
+            "ERROR: no such option: --no-plugin-dirs",
+        ] {
+            assert_ne!(
+                classify_tool_failure(output, SourceKind::Page).code,
+                "ytdlp_too_old",
+                "{output}"
+            );
+        }
     }
 
     #[test]

@@ -20,7 +20,9 @@ use crate::{
         CancelToken, DiskFloor, RunError, StallPolicy, Stream, Watch, run_captured, run_streaming,
         tool_command,
     },
-    tools::{extractor_related, resolve_python, today, update_advice},
+    tools::{
+        MINIMUM_YT_DLP, YtDlpVersion, extractor_related, resolve_python, today, update_advice,
+    },
     ytdlp::{INFO_JSON, YtDlpPolicy, prepare_tool_path, ytdlp_env},
 };
 use serde::Serialize;
@@ -69,6 +71,32 @@ impl Default for JobLimits {
     }
 }
 
+/// At most this many isolated browsers run at once, whatever the number of
+/// jobs: Chrome is the heaviest process HighVi starts.
+pub const MAX_BROWSERS: usize = 1;
+/// FFmpeg muxes are short and disk-bound; two keep the disk busy without
+/// competing for it.
+pub const MAX_MUXES: usize = 2;
+
+/// Limits shared by every job of one HighVi process. A job holds at most one
+/// of these permits at a time, so waiting for one cannot deadlock.
+#[derive(Debug)]
+pub struct SharedResources {
+    pub disk: Arc<DiskBudget>,
+    pub browsers: tokio::sync::Semaphore,
+    pub muxers: tokio::sync::Semaphore,
+}
+
+impl Default for SharedResources {
+    fn default() -> Self {
+        Self {
+            disk: Arc::default(),
+            browsers: tokio::sync::Semaphore::new(MAX_BROWSERS),
+            muxers: tokio::sync::Semaphore::new(MAX_MUXES),
+        }
+    }
+}
+
 /// What a job needs from the machine it runs on.
 pub struct JobEnvironment {
     pub yt_dlp: PathBuf,
@@ -81,8 +109,8 @@ pub struct JobEnvironment {
     /// The fixed output directory, e.g. `~/Downloads/HighVi`.
     pub output_dir: PathBuf,
     pub limits: JobLimits,
-    /// Shared by every job that writes to `output_dir`.
-    pub disk: Arc<DiskBudget>,
+    /// Shared by every job of the process.
+    pub shared: Arc<SharedResources>,
     #[cfg(test)]
     pub(crate) fixture: Option<Resolver>,
     #[cfg(test)]
@@ -103,7 +131,7 @@ impl JobEnvironment {
             python: find_executable("python3"),
             output_dir,
             limits: JobLimits::default(),
-            disk: Arc::default(),
+            shared: Arc::default(),
             #[cfg(test)]
             fixture: None,
             #[cfg(test)]
@@ -142,10 +170,14 @@ impl JobEnvironment {
 #[serde(rename_all = "camelCase")]
 pub enum Stage {
     Discovering,
+    /// Waiting for the isolated browser, which one job uses at a time.
+    WaitingForBrowser,
     /// Watching the page in the isolated browser.
     Browsing,
     DownloadingVideo,
     DownloadingAudio,
+    /// Waiting for a free mux slot.
+    WaitingToMerge,
     Merging,
     Saving,
 }
@@ -206,6 +238,23 @@ pub async fn run_job(
                 tokio::select! {
                     () = diagnostics.collect_tools(env) => {}
                     () = late_cancel.cancelled() => error = cancelled_error(),
+                }
+                // Output can imitate yt-dlp's usage error; only the
+                // installed version says yt-dlp is really too old, which
+                // pauses the whole queue.
+                if error.code == "ytdlp_too_old" {
+                    let minimum = YtDlpVersion {
+                        date: MINIMUM_YT_DLP,
+                    };
+                    match diagnostics.yt_dlp {
+                        Some(installed) if installed < minimum => {
+                            error.hint = Some(crate::Hint::UpdateYtDlp {
+                                installed: installed.to_string(),
+                                minimum: Some(minimum.to_string()),
+                            });
+                        }
+                        _ => error = crate::classify::yt_dlp_failed(),
+                    }
                 }
                 // Refusals seen by the browser are the site's answer to
                 // Chrome; a newer yt-dlp would not change them.
@@ -275,6 +324,11 @@ async fn run(
     // this point needs it, and a kept recovery directory must not hold it.
     let _ = tokio::fs::remove_file(job.path().join(INFO_JSON)).await;
 
+    report(JobUpdate::stage(Stage::WaitingToMerge));
+    let _muxer = tokio::select! {
+        permit = env.shared.muxers.acquire() => permit.map_err(|_| mux_error())?,
+        () = cancel.cancelled() => return Err(cancelled_error()),
+    };
     report(JobUpdate::stage(Stage::Merging));
     Box::pin(mux(env, &job, media.selection.audio.is_some(), &mut cancel)).await?;
 
@@ -331,7 +385,16 @@ async fn fetch(
 ) -> Result<(MediaInfo, Reservation), PublicError> {
     let proxy_url = proxy.url();
     let discovered = Box::pin(discover(env, job, proxy, source, cancel, report, recorder)).await?;
-    let media = discovered.media;
+    let mut media = discovered.media;
+    // A playlist link gives yt-dlp only a file name, often "master" or
+    // "index"; the folder it sits in usually names the video.
+    if source.kind() != SourceKind::Page
+        && is_generic_playlist_name(&media.title)
+        && let Some(name) = playlist_folder_name(source.discovery_target())
+    {
+        media.suggested_filename = crate::suggested_filename(Some(&name), None);
+        media.title = name;
+    }
     record(recorder, |diagnostics| {
         diagnostics.media(media.extractor.as_deref(), media.summary.clone());
     });
@@ -347,6 +410,7 @@ async fn fetch(
         .map_or(0, |bytes| bytes.saturating_mul(2));
     let free = env.free_space().unwrap_or(u64::MAX);
     let reservation = env
+        .shared
         .disk
         .reserve(free, needed, env.limits.disk_floor)
         .ok_or_else(|| no_space_error(Some(needed), free))?;
@@ -432,6 +496,11 @@ async fn discover(
         return Err(error);
     }
 
+    report(JobUpdate::stage(Stage::WaitingForBrowser));
+    let browser_permit = tokio::select! {
+        permit = env.shared.browsers.acquire() => permit.map_err(|_| crate::browser::browser_failed())?,
+        () = cancel.cancelled() => return Err(cancelled_error()),
+    };
     report(JobUpdate::stage(Stage::Browsing));
     let finding = discover_in_browser(
         BrowserRun {
@@ -447,6 +516,8 @@ async fn discover(
     .await;
     // The profile holds whatever the page stored; it is not needed again.
     let _ = tokio::fs::remove_dir_all(job.path().join("chrome-profile")).await;
+    // Chrome has exited (it is killed before discovery returns).
+    drop(browser_permit);
     let finding = match finding {
         Ok(finding) => finding,
         // No browser installed: the original explanation is the useful one.
@@ -937,6 +1008,70 @@ fn clean_progress_value(value: Option<&str>) -> Option<String> {
     }
 }
 
+/// File names players give every playlist, which say nothing about the
+/// video.
+fn is_generic_playlist_name(title: &str) -> bool {
+    let name = title.trim().trim_matches('.').to_ascii_lowercase();
+    let name = name.strip_suffix(".m3u8").unwrap_or(&name);
+    matches!(
+        name,
+        "" | "m3u8"
+            | "index"
+            | "master"
+            | "playlist"
+            | "prog_index"
+            | "main"
+            | "stream"
+            | "video"
+            | "chunklist"
+            | "manifest"
+    )
+}
+
+/// The nearest folder of the playlist URL that looks like a name: letters,
+/// digits, `-`, `_`, `.` only, so query-like or token-like segments
+/// (`exp=…`, long hex) never become a file name.
+fn playlist_folder_name(playlist: &url::Url) -> Option<String> {
+    let segments: Vec<&str> = playlist.path_segments()?.collect();
+    segments
+        .iter()
+        .rev()
+        .skip(1)
+        .filter_map(|segment| {
+            let stem = segment.rsplit_once('.').map_or(*segment, |(stem, _)| stem);
+            let letters = stem.chars().filter(char::is_ascii_alphabetic).count();
+            let named = (3..=48).contains(&stem.len())
+                && stem.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+                })
+                && letters >= 2
+                && !looks_random(stem)
+                && !stem
+                    .chars()
+                    .all(|character| character.is_ascii_hexdigit() || character == '-');
+            named.then(|| stem.to_string())
+        })
+        .find(|stem| !is_generic_playlist_name(stem))
+}
+
+/// Random IDs switch between letters and digits, or between cases, many
+/// times within one word; names do so a few times at most
+/// (`Movie2024`, `S01E02`, `BigBuckBunny`).
+fn looks_random(stem: &str) -> bool {
+    stem.split(['-', '_', '.']).any(|word| {
+        let characters: Vec<char> = word.chars().collect();
+        let switches = characters
+            .windows(2)
+            .filter(|pair| pair[0].is_ascii_digit() != pair[1].is_ascii_digit())
+            .count();
+        let humps = characters
+            .windows(2)
+            .filter(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
+            .count();
+        switches > 3 || humps > 3 || (switches > 1 && humps > 1)
+    })
+}
+
 /// Paths to the tools a job needs, found on `PATH`.
 pub fn find_executable(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
@@ -961,6 +1096,64 @@ mod tests {
         let inputs = 1_000 * MIB;
         assert!(mux_space_needed(inputs) >= inputs + inputs / 20);
         assert_eq!(mux_space_needed(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn generic_playlist_names_fall_back_to_their_folder() {
+        let folder = |raw: &str| playlist_folder_name(&url::Url::parse(raw).unwrap());
+        for generic in [".m3u8", "master", "index", "Playlist", "prog_index.m3u8"] {
+            assert!(is_generic_playlist_name(generic), "{generic}");
+        }
+        assert!(!is_generic_playlist_name("x36xhzz"));
+        assert_eq!(
+            folder("https://demo.example/k8s/video/tears-of-steel/tears-of-steel.ism/.m3u8")
+                .as_deref(),
+            Some("tears-of-steel")
+        );
+        assert_eq!(
+            folder("https://cdn.example/examples/img_bipbop_adv_example_ts/master.m3u8").as_deref(),
+            Some("img_bipbop_adv_example_ts")
+        );
+        // Token-like and hash-like folders are never used.
+        assert_eq!(
+            folder("https://cdn.example/exp=1~hmac=ab12/master.m3u8"),
+            None
+        );
+        assert_eq!(
+            folder("https://cdn.example/3f2a9c1b-77d4-4e0a-9b1e-0c2d5e6f7a8b/index.m3u8"),
+            None
+        );
+        assert_eq!(folder("https://cdn.example/master.m3u8"), None);
+        // Short random IDs and non-names are not used either.
+        for raw in [
+            "https://cdn.example/s/Xk9fQ2LmP7wZ/master.m3u8",
+            "https://cdn.example/10s/master.m3u8",
+            "https://cdn.example/a1b2c3d4e5/index.m3u8",
+            "https://cdn.example/x7k2mq9pzr/index.m3u8",
+            "https://cdn.example/1080p/index.m3u8",
+        ] {
+            assert_eq!(folder(raw), None, "{raw}");
+        }
+        // Real names with numbers or capitals are kept.
+        for name in [
+            "big_buck_bunny",
+            "Sintel",
+            "episode-12",
+            "2024-recap",
+            "BBB_1080p",
+            "Movie2024",
+            "Season2",
+            "S01E02",
+            "Avengers_Endgame_2019",
+            "Breaking-Bad-S01E03",
+            "BigBuckBunny",
+        ] {
+            assert_eq!(
+                folder(&format!("https://cdn.example/{name}/master.m3u8")).as_deref(),
+                Some(name),
+                "{name}"
+            );
+        }
     }
 
     #[test]

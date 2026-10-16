@@ -29,9 +29,9 @@
       </header>
 
       <section id="deps-card" class="error-card hidden" role="alert">
-        <strong data-i18n="deps.title"></strong>
+        <strong id="deps-title"></strong>
         <p id="deps-message"></p>
-        <p data-i18n="deps.hint"></p>
+        <p id="deps-hint"></p>
       </section>
 
       <section id="browser-note" class="notice hidden" data-i18n="deps.browserMissing"></section>
@@ -43,7 +43,7 @@
 
       <section class="notice" data-i18n="notice"></section>
 
-      <form id="job-form" class="card">
+      <form id="add-form" class="card">
         <fieldset class="mode-switch">
           <legend data-i18n="mode.legend"></legend>
           <label><input type="radio" name="mode" value="page" checked /> <span data-i18n="mode.page"></span></label>
@@ -51,18 +51,16 @@
         </fieldset>
 
         <div id="page-fields" class="field-stack">
-          <label for="page-url" data-i18n="page.label"></label>
-          <input
-            id="page-url"
-            name="pageUrl"
-            type="url"
-            inputmode="url"
+          <label for="page-urls" data-i18n="page.label"></label>
+          <textarea
+            id="page-urls"
+            name="pageUrls"
+            rows="4"
             autocomplete="off"
             spellcheck="false"
-            maxlength="2048"
-            placeholder="https://example.com/watch/video"
-            required
-          />
+            maxlength="200000"
+            placeholder="https://example.com/watch/video-1&#10;https://example.com/watch/video-2"
+          ></textarea>
           <p class="hint" data-i18n="page.hint"></p>
         </div>
 
@@ -93,63 +91,80 @@
         </div>
 
         <div class="actions">
-          <button id="download-button" class="primary" type="submit" data-i18n="download.button"></button>
+          <button id="add-button" class="primary" type="submit" data-i18n="add.button"></button>
         </div>
+        <p id="add-result" class="add-result hidden" role="status"></p>
         <p class="hint" data-i18n="network.hint"></p>
         <p class="hint" data-i18n="download.hint"></p>
       </form>
 
-      <section id="status-card" class="status card hidden">
-        <p id="status-title" class="status-title hidden"></p>
-        <div class="status-line">
-          <span id="status-dot" class="status-dot" aria-hidden="true"></span>
-          <strong id="status-message" aria-live="polite"></strong>
-          <span id="status-percent" class="percent"></span>
+      <section id="queue-card" class="card queue" aria-labelledby="queue-title">
+        <div class="queue-head">
+          <h2 id="queue-title" data-i18n="queue.title"></h2>
+          <p id="queue-status" class="queue-status" aria-live="polite"></p>
         </div>
-        <div
-          id="progress-track"
-          class="progress-track"
-          role="progressbar"
-          data-i18n-aria-label="progress.aria"
-          aria-valuemin="0"
-          aria-valuemax="100"
-        >
-          <div id="progress-bar" class="progress-bar"></div>
+
+        <div class="queue-controls">
+          <button id="start-button" class="primary" type="button" data-i18n="queue.start"></button>
+          <fieldset class="concurrency" id="concurrency">
+            <legend data-i18n="queue.concurrency"></legend>
+            <label><input type="radio" name="concurrency" value="1" /> <span>1</span></label>
+            <label><input type="radio" name="concurrency" value="2" checked /> <span>2</span></label>
+            <label><input type="radio" name="concurrency" value="3" /> <span>3</span></label>
+            <label><input type="radio" name="concurrency" value="4" /> <span>4</span></label>
+          </fieldset>
         </div>
-        <div class="metrics">
-          <span id="status-speed"></span>
-          <span id="status-eta"></span>
-        </div>
-        <div class="actions">
-          <button id="cancel-button" type="button" data-i18n="cancel.button"></button>
+        <p id="queue-counts" class="queue-counts"></p>
+        <p id="queue-paused" class="notice hidden" role="alert"></p>
+
+        <ul id="job-list" class="job-list" data-i18n-aria-label="queue.listLabel"></ul>
+        <p id="queue-empty" class="hint" data-i18n="queue.empty"></p>
+
+        <div class="actions queue-actions">
+          <button id="cancel-all-button" type="button" data-i18n="queue.cancelAll"></button>
+          <button id="retry-failed-button" type="button" data-i18n="queue.retryFailed"></button>
+          <button id="clear-button" type="button" data-i18n="queue.clearCompleted"></button>
+          <button id="open-folder-button" type="button" data-i18n="success.open"></button>
         </div>
       </section>
 
       <section id="error-card" class="error-card hidden" role="alert">
         <strong data-i18n="error.title"></strong>
         <p id="error-message"></p>
-        <p id="error-hint" class="hidden"></p>
-        <div id="diagnostics" class="diagnostics hidden">
-          <div class="actions">
-            <button id="copy-diagnostics" type="button" data-i18n="diagnostics.copy"></button>
-            <span id="copy-status" class="hint" aria-live="polite"></span>
-          </div>
-          <details>
-            <summary data-i18n="diagnostics.show"></summary>
-            <pre id="diagnostics-text" tabindex="0"></pre>
-          </details>
-        </div>
-      </section>
-
-      <section id="cancelled-card" class="notice hidden" aria-live="polite" data-i18n="cancelled.title"></section>
-
-      <section id="success-card" class="success-card hidden" aria-live="polite">
-        <strong data-i18n="success.title"></strong>
-        <p id="saved-path"></p>
-        <div class="actions">
-          <button id="open-folder-button" type="button" data-i18n="success.open"></button>
-        </div>
       </section>
     </main>
+
+    <template id="job-template">
+      <li class="job">
+        <div class="job-head">
+          <span class="job-dot" aria-hidden="true"></span>
+          <strong class="job-title"></strong>
+          <span class="job-percent"></span>
+        </div>
+        <p class="job-status"></p>
+        <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100">
+          <div class="progress-bar"></div>
+        </div>
+        <p class="job-metrics"></p>
+        <p class="job-error hidden"></p>
+        <p class="job-hint hidden"></p>
+        <p class="job-saved hidden"></p>
+        <div class="diagnostics hidden">
+          <div class="actions">
+            <button class="copy-diagnostics" type="button"></button>
+            <span class="copy-status hint" aria-live="polite"></span>
+          </div>
+          <details>
+            <summary></summary>
+            <pre tabindex="0"></pre>
+          </details>
+        </div>
+        <div class="actions job-actions">
+          <button class="job-cancel" type="button"></button>
+          <button class="job-retry" type="button"></button>
+          <button class="job-remove" type="button"></button>
+        </div>
+      </li>
+    </template>
   </body>
 </html>

@@ -697,7 +697,8 @@ async fn direct_hls_master_becomes_a_playable_mp4_with_an_origin_only_referer() 
         .run(direct("https://media.test/muxed/master.m3u8"))
         .await;
     let outcome = result.unwrap();
-    assert_eq!(outcome.saved_to, fixture.output_dir.join("master.mp4"));
+    // "master" says nothing; the playlist's folder names the file.
+    assert_eq!(outcome.saved_to, fixture.output_dir.join("muxed.mp4"));
     let (streams, duration, clean) = fixture.inspect(&outcome.saved_to);
     assert_eq!(streams, ["video", "audio"]);
     assert!((3.5..=4.6).contains(&duration), "{duration}");
@@ -775,8 +776,8 @@ async fn fragmented_mp4_and_aes_128_streams_are_supported() {
             .iter()
             .any(|hit| hit.host == "keys.test")
     );
-    // Both are titled "index"; the second must not replace the first.
-    assert_eq!(fixture.saved_files(), ["index (2).mp4", "index.mp4"]);
+    // Both playlists are called "index"; their folders name the files.
+    assert_eq!(fixture.saved_files(), ["aes.mp4", "fmp4.mp4"]);
 }
 
 #[tokio::test]
@@ -2096,4 +2097,431 @@ async fn flood_peak_memory() {
         result.err().map(|error| error.code)
     );
     eprintln!("{}", fixture.last_report.lock().unwrap());
+}
+
+// ------------------------------------------------------ bulk queue (V1.1 C)
+
+/// Records queue events; the e2e tests only need the last snapshot.
+#[derive(Default)]
+struct QueueLog(Mutex<Option<crate::QueueSnapshot>>);
+
+impl crate::QueueEvents for QueueLog {
+    fn changed(&self, snapshot: crate::QueueSnapshot) {
+        *self.0.lock().unwrap() = Some(snapshot);
+    }
+    fn progress(&self, _: crate::ProgressEvent) {}
+}
+
+/// A scheduler running real jobs against the fixture, sharing one set of
+/// limits, as the app does.
+fn real_scheduler(fixture: &Fixture) -> (crate::Scheduler, Arc<QueueLog>) {
+    let template = fixture.environment();
+    let shared = Arc::new(crate::SharedResources::default());
+    let environment = Arc::new(JobEnvironment {
+        shared,
+        fixture: template.fixture.clone(),
+        ..JobEnvironment::new(
+            template.yt_dlp.clone(),
+            template.ffmpeg.clone(),
+            template.chrome.clone(),
+            template.output_dir.clone(),
+        )
+    });
+    let runner: crate::Runner = Arc::new(move |source, cancel, report| {
+        let environment = Arc::clone(&environment);
+        Box::pin(async move {
+            let (result, diagnostics) =
+                run_job(&environment, &source, cancel, &|update| report(update)).await;
+            let rendered = result.is_err().then(|| diagnostics.render());
+            (result, rendered)
+        })
+    });
+    let log = Arc::new(QueueLog::default());
+    let scheduler = crate::Scheduler::new(
+        tokio::runtime::Handle::current(),
+        runner,
+        Arc::clone(&log) as Arc<dyn crate::QueueEvents>,
+    );
+    (scheduler, log)
+}
+
+/// Four real jobs at once whose videos share a title: each is published
+/// under its own name and nothing is overwritten.
+#[tokio::test]
+async fn four_concurrent_jobs_with_one_title_publish_four_files() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    for index in 0..5 {
+        fixture.server.route(
+            &format!("page.test/same/{index}"),
+            Route::html(
+                "<!doctype html><title>Same title</title>\
+                 <video src=\"https://media.test/muxed/master.m3u8\" type=\"application/x-mpegURL\"></video>",
+            ),
+        );
+    }
+    std::fs::create_dir_all(&fixture.output_dir).unwrap();
+    // An existing file with a name one of the jobs wants.
+    std::fs::write(fixture.output_dir.join("Same title (1).mp4"), b"keep me").unwrap();
+    let (scheduler, _) = real_scheduler(&fixture);
+    scheduler.set_concurrency(4).unwrap();
+    let report = scheduler.add(
+        (0..5)
+            .map(|index| page(&format!("https://page.test/same/{index}")))
+            .collect(),
+    );
+    assert_eq!(report.added.len(), 5);
+    scheduler.start();
+    let mut peak = 0;
+    let started = Instant::now();
+    loop {
+        let snapshot = scheduler.snapshot();
+        // Each running job has its own working directory: count them, so
+        // the overlap is measured, not inferred from the slot count.
+        let working = std::fs::read_dir(&fixture.output_dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".highvi-job-")
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        peak = peak.max(working);
+        assert!(snapshot.active <= 4);
+        if snapshot.counts.completed == 5 {
+            break;
+        }
+        assert!(snapshot.counts.failed == 0, "{snapshot:?}");
+        assert!(started.elapsed() < Duration::from_secs(90), "{snapshot:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(peak, 4, "four jobs never ran together");
+    let files = fixture.saved_files();
+    assert_eq!(files.len(), 6, "{files:?}");
+    assert_eq!(
+        std::fs::read(fixture.output_dir.join("Same title (1).mp4")).unwrap(),
+        b"keep me"
+    );
+    for name in files
+        .iter()
+        .filter(|name| name.as_str() != "Same title (1).mp4")
+    {
+        let (streams, _, clean) = fixture.inspect(&fixture.output_dir.join(name));
+        assert_eq!(streams, ["video", "audio"], "{name}");
+        assert!(clean, "{name}");
+    }
+    fixture.assert_no_job_dirs();
+}
+
+/// Browser discovery is limited to one Chrome at a time, whatever the
+/// number of jobs; a job waiting for the browser can still be cancelled.
+#[tokio::test]
+async fn jobs_share_one_browser_at_a_time() {
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    for index in 0..3 {
+        fixture.server.route(
+            &format!("page.test/js/{index}"),
+            Route::html(&format!(
+                "<!doctype html><title>JS {index}</title><script>\
+                 setTimeout(() => fetch('https://media.test/js{index}/master.m3u8'), 5000);\
+                 </script>"
+            )),
+        );
+        fixture.server.route(
+            &format!("media.test/js{index}/master.m3u8"),
+            Route::playlist(SPLIT_MASTER_ABSOLUTE),
+        );
+    }
+    let (scheduler, _) = real_scheduler(&fixture);
+    scheduler.set_concurrency(4).unwrap();
+    let added = scheduler.add(
+        (0..3)
+            .map(|index| page(&format!("https://page.test/js/{index}")))
+            .collect(),
+    );
+    assert_eq!(added.added.len(), 3);
+    scheduler.start();
+    // Sample the number of browser processes while the jobs run.
+    let mut most = 0;
+    let started = Instant::now();
+    let mut cancelled_waiting = false;
+    let mut waiting_id = None;
+    let mut holder = None;
+    let mut waiting_ended_while_browser_busy = false;
+    loop {
+        let browsers = chrome_browser_processes(&fixture);
+        most = most.max(browsers);
+        let snapshot = scheduler.snapshot();
+        // Cancel a job that is waiting for the browser while another one
+        // uses it: it must end at once, not after its turn comes.
+        if !cancelled_waiting
+            && let Some(browsing) = snapshot
+                .items
+                .iter()
+                .find(|item| item.stage == Some(Stage::Browsing))
+            && let Some(waiting) = snapshot
+                .items
+                .iter()
+                .find(|item| item.stage == Some(Stage::WaitingForBrowser))
+        {
+            holder = Some(browsing.id);
+            waiting_id = Some(waiting.id);
+            scheduler.cancel(waiting.id);
+            cancelled_waiting = true;
+        }
+        // The waiting job must be gone while the job that held the browser
+        // when it was cancelled is still using it.
+        if let (Some(waiting_id), Some(holder)) = (waiting_id, holder)
+            && !waiting_ended_while_browser_busy
+            && snapshot
+                .items
+                .iter()
+                .any(|item| item.id == waiting_id && item.status == crate::ItemStatus::Cancelled)
+        {
+            waiting_ended_while_browser_busy = snapshot
+                .items
+                .iter()
+                .any(|item| item.id == holder && item.stage == Some(Stage::Browsing));
+        }
+        let done = snapshot.counts.completed + snapshot.counts.failed + snapshot.counts.cancelled;
+        if done == 3 && snapshot.active == 0 {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(120), "{snapshot:?}");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let snapshot = scheduler.snapshot();
+    assert_eq!(most, 1, "more than one browser ran at once");
+    assert!(
+        waiting_ended_while_browser_busy,
+        "the job waiting for the browser was not cancelled while waiting"
+    );
+    assert_eq!(snapshot.counts.completed, 2, "{snapshot:?}");
+    assert_eq!(snapshot.counts.cancelled, 1, "{snapshot:?}");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// Chrome's top-level browser processes (not its renderers or helpers) with
+/// a profile under this fixture.
+fn chrome_browser_processes(fixture: &Fixture) -> usize {
+    chrome_survivors(fixture)
+        .iter()
+        .filter(|cmdline| cmdline.contains("--remote-debugging-pipe"))
+        .count()
+}
+
+/// Measurement, not a pass/fail check: HighVi's own cost at each target
+/// from 1 to 4 (8 jobs of ~6 MB each from the local fixture), and how long
+/// Cancel All takes with four transfers in flight. Run alone:
+/// `cargo test -p highvi-core queue_concurrency_profile -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "measurement; run alone"]
+async fn queue_concurrency_profile() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let segments: Vec<String> = (0..60)
+        .map(|_| "https://media.test/muxed/s0.ts".to_string())
+        .collect();
+    let refs: Vec<&str> = segments.iter().map(String::as_str).collect();
+    for index in 0..8 {
+        fixture.server.route(
+            &format!("media.test/profile/{index}.m3u8"),
+            Route::playlist(&media_playlist(&refs, "")),
+        );
+    }
+    let children = || {
+        let me = std::process::id().to_string();
+        let mut count = 0;
+        for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+            if let Ok(stat) = std::fs::read_to_string(entry.path().join("stat"))
+                && let Some(rest) = stat.rsplit(')').next()
+                && rest.split_whitespace().nth(1) == Some(me.as_str())
+            {
+                count += 1;
+            }
+        }
+        count
+    };
+    let status_value = |key: &str| -> u64 {
+        std::fs::read_to_string("/proc/self/status")
+            .unwrap_or_default()
+            .lines()
+            .find(|line| line.starts_with(key))
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0)
+    };
+    eprintln!("target | wall s | peak active | peak threads | peak fds | peak children | RSS KiB");
+    for target in 1..=4 {
+        let (scheduler, _) = real_scheduler(&fixture);
+        scheduler.set_concurrency(target).unwrap();
+        let sources = (0..8)
+            .map(|index| SourceRequest::DirectHls {
+                playlist_url: format!("https://media.test/profile/{index}.m3u8?run={target}"),
+                referer_page_url: "https://page.test/".into(),
+            })
+            .collect();
+        assert_eq!(scheduler.add(sources).added.len(), 8);
+        let started = Instant::now();
+        scheduler.start();
+        let (mut active, mut threads, mut fds, mut kids) = (0, 0, 0, 0);
+        loop {
+            let snapshot = scheduler.snapshot();
+            active = active.max(snapshot.active);
+            threads = threads.max(status_value("Threads:"));
+            fds = fds.max(std::fs::read_dir("/proc/self/fd").map_or(0, |dir| dir.count()));
+            kids = kids.max(children());
+            if snapshot.counts.completed + snapshot.counts.failed == 8 {
+                assert_eq!(snapshot.counts.completed, 8, "{snapshot:?}");
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        eprintln!(
+            "{target} | {:.1} | {active} | {threads} | {fds} | {kids} | {}",
+            started.elapsed().as_secs_f64(),
+            status_value("VmRSS:")
+        );
+        for name in fixture.saved_files() {
+            let _ = std::fs::remove_file(fixture.output_dir.join(name));
+        }
+    }
+    // Cancel All with four slow transfers in flight.
+    let slow: Vec<String> = (0..4)
+        .map(|index| format!("https://media.test/slowp/{index}.ts"))
+        .collect();
+    for (index, url) in slow.iter().enumerate() {
+        let segment = std::fs::read(media(&fixture.tools.ffmpeg).join("muxed/s0.ts")).unwrap();
+        fixture.server.route(
+            &format!("media.test/slowp/{index}.ts"),
+            Route::ok("video/mp2t", segment).trickled(1024, Duration::from_millis(200)),
+        );
+        fixture.server.route(
+            &format!("media.test/slowp/{index}.m3u8"),
+            Route::playlist(&media_playlist(&[url.as_str()], "")),
+        );
+    }
+    let (scheduler, _) = real_scheduler(&fixture);
+    scheduler.set_concurrency(4).unwrap();
+    scheduler.add(
+        (0..4)
+            .map(|index| direct(&format!("https://media.test/slowp/{index}.m3u8")))
+            .collect(),
+    );
+    scheduler.start();
+    for index in 0..4 {
+        fixture
+            .server
+            .hits_log
+            .wait_for(&format!("/slowp/{index}.ts"))
+            .await;
+    }
+    let cancelled = Instant::now();
+    scheduler.cancel_all();
+    while scheduler.snapshot().active > 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    eprintln!(
+        "cancel all (4 in flight) -> all slots free: {} ms; children left: {}",
+        cancelled.elapsed().as_millis(),
+        children()
+    );
+    fixture.assert_no_job_dirs();
+}
+
+/// Ubuntu 24.04's APT yt-dlp (2024.04.09) does not know options HighVi's
+/// isolation needs. It is identified, and jobs fail with advice to update
+/// instead of a generic yt-dlp failure.
+#[tokio::test]
+async fn a_too_old_yt_dlp_is_named_and_refused() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let directory = temp_directory("old-ytdlp");
+    std::fs::create_dir_all(&directory).unwrap();
+    let fake = directory.join("yt-dlp");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         for arg in \"$@\"; do case \"$arg\" in --no-plugin-dirs|--no-js-runtimes)\n\
+           echo 'Usage: yt-dlp [OPTIONS] URL [URL...]' >&2\n\
+           echo \"yt-dlp: error: no such option: $arg\" >&2; exit 2;; esac; done\n\
+         for arg in \"$@\"; do [ \"$arg\" = --version ] && { echo 2024.04.09; exit 0; }; done\n\
+         exit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        crate::yt_dlp_version(&fake, None)
+            .await
+            .map(|version| version.to_string()),
+        Some("2024.04.09".to_string())
+    );
+    let mut environment = fixture.environment();
+    environment.yt_dlp = fake;
+    let (result, _) = fixture
+        .run_with(&environment, page("https://page.test/anything"), None)
+        .await;
+    let error = result.unwrap_err();
+    assert_eq!(error.code, "ytdlp_too_old");
+    assert_eq!(
+        error.hint,
+        Some(crate::Hint::UpdateYtDlp {
+            installed: "2024.04.09".into(),
+            minimum: Some("2025.11.12".into())
+        })
+    );
+    assert!(
+        !fixture
+            .server
+            .hits()
+            .iter()
+            .any(|hit| hit.host == "page.test")
+    );
+    fixture.assert_no_job_dirs();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Output that only imitates yt-dlp's usage error (a site's text on a line
+/// of its own) does not make a current yt-dlp "too old", which would pause
+/// the whole queue: the installed version decides.
+#[tokio::test]
+async fn an_imitated_usage_error_does_not_mean_too_old() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let directory = temp_directory("forged-ytdlp");
+    std::fs::create_dir_all(&directory).unwrap();
+    let fake = directory.join("yt-dlp");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         for arg in \"$@\"; do [ \"$arg\" = --version ] && { echo 2026.09.01; exit 0; }; done\n\
+         echo 'ERROR: [generic] Unable to download: the site says' >&2\n\
+         echo 'yt-dlp: error: no such option: --no-plugin-dirs' >&2\n\
+         exit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut environment = fixture.environment();
+    environment.yt_dlp = fake;
+    let (result, _) = fixture
+        .run_with(&environment, page("https://page.test/anything"), None)
+        .await;
+    let error = result.unwrap_err();
+    assert_ne!(error.code, "ytdlp_too_old");
+    fixture.assert_no_job_dirs();
+    let _ = std::fs::remove_dir_all(&directory);
 }
