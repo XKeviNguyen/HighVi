@@ -13,7 +13,9 @@ const elements = {
   addButton: $("#add-button"),
   addResult: $("#add-result"),
   depsCard: $("#deps-card"),
+  depsTitle: $("#deps-title"),
   depsMessage: $("#deps-message"),
+  depsHint: $("#deps-hint"),
   browserNote: $("#browser-note"),
   outdatedNote: $("#outdated-note"),
   outdatedMessage: $("#outdated-message"),
@@ -105,11 +107,16 @@ function showError(error) {
 
 function renderMissingTools() {
   setHidden(elements.depsCard, missingTools.length === 0 && !tooOld);
-  elements.depsMessage.textContent = missingTools.length
+  // A missing tool comes first; once installed, a too-old yt-dlp is shown
+  // with update steps (the APT package may be the too-old build).
+  const missing = missingTools.length > 0;
+  elements.depsTitle.textContent = t(missing ? "deps.title" : "deps.titleTooOld");
+  elements.depsMessage.textContent = missing
     ? t("deps.missing", { tools: missingTools.join(", ") })
     : tooOld
       ? t("deps.tooOld", tooOld)
       : "";
+  elements.depsHint.textContent = t(missing ? "deps.hint" : "deps.updateHint");
   setHidden(elements.browserNote, !browserMissing || missingTools.length > 0);
   setHidden(elements.outdatedNote, !outdated || Boolean(tooOld));
   elements.outdatedMessage.textContent = outdated ? t("deps.outdated", outdated) : "";

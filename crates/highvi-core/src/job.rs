@@ -20,7 +20,9 @@ use crate::{
         CancelToken, DiskFloor, RunError, StallPolicy, Stream, Watch, run_captured, run_streaming,
         tool_command,
     },
-    tools::{extractor_related, resolve_python, today, update_advice},
+    tools::{
+        MINIMUM_YT_DLP, YtDlpVersion, extractor_related, resolve_python, today, update_advice,
+    },
     ytdlp::{INFO_JSON, YtDlpPolicy, prepare_tool_path, ytdlp_env},
 };
 use serde::Serialize;
@@ -236,6 +238,23 @@ pub async fn run_job(
                 tokio::select! {
                     () = diagnostics.collect_tools(env) => {}
                     () = late_cancel.cancelled() => error = cancelled_error(),
+                }
+                // Output can imitate yt-dlp's usage error; only the
+                // installed version says yt-dlp is really too old, which
+                // pauses the whole queue.
+                if error.code == "ytdlp_too_old" {
+                    let minimum = YtDlpVersion {
+                        date: MINIMUM_YT_DLP,
+                    };
+                    match diagnostics.yt_dlp {
+                        Some(installed) if installed < minimum => {
+                            error.hint = Some(crate::Hint::UpdateYtDlp {
+                                installed: installed.to_string(),
+                                minimum: Some(minimum.to_string()),
+                            });
+                        }
+                        _ => error = crate::classify::yt_dlp_failed(),
+                    }
                 }
                 // Refusals seen by the browser are the site's answer to
                 // Chrome; a newer yt-dlp would not change them.
@@ -1021,25 +1040,36 @@ fn playlist_folder_name(playlist: &url::Url) -> Option<String> {
         .filter_map(|segment| {
             let stem = segment.rsplit_once('.').map_or(*segment, |(stem, _)| stem);
             let letters = stem.chars().filter(char::is_ascii_alphabetic).count();
-            let digits = stem.chars().filter(char::is_ascii_digit).count();
-            // Random IDs mix upper case, lower case and digits; names
-            // rarely do.
-            let random_looking = digits > 0
-                && stem.chars().any(|character| character.is_ascii_uppercase())
-                && stem.chars().any(|character| character.is_ascii_lowercase());
             let named = (3..=48).contains(&stem.len())
                 && stem.chars().all(|character| {
                     character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
                 })
-                && letters >= 3
-                && digits < letters
-                && !random_looking
+                && letters >= 2
+                && !looks_random(stem)
                 && !stem
                     .chars()
                     .all(|character| character.is_ascii_hexdigit() || character == '-');
             named.then(|| stem.to_string())
         })
         .find(|stem| !is_generic_playlist_name(stem))
+}
+
+/// Random IDs switch between letters and digits, or between cases, many
+/// times within one word; names do so a few times at most
+/// (`Movie2024`, `S01E02`, `BigBuckBunny`).
+fn looks_random(stem: &str) -> bool {
+    stem.split(['-', '_', '.']).any(|word| {
+        let characters: Vec<char> = word.chars().collect();
+        let switches = characters
+            .windows(2)
+            .filter(|pair| pair[0].is_ascii_digit() != pair[1].is_ascii_digit())
+            .count();
+        let humps = characters
+            .windows(2)
+            .filter(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
+            .count();
+        switches > 3 || humps > 3 || (switches > 1 && humps > 1)
+    })
 }
 
 /// Paths to the tools a job needs, found on `PATH`.
@@ -1099,8 +1129,30 @@ mod tests {
             "https://cdn.example/s/Xk9fQ2LmP7wZ/master.m3u8",
             "https://cdn.example/10s/master.m3u8",
             "https://cdn.example/a1b2c3d4e5/index.m3u8",
+            "https://cdn.example/x7k2mq9pzr/index.m3u8",
+            "https://cdn.example/1080p/index.m3u8",
         ] {
             assert_eq!(folder(raw), None, "{raw}");
+        }
+        // Real names with numbers or capitals are kept.
+        for name in [
+            "big_buck_bunny",
+            "Sintel",
+            "episode-12",
+            "2024-recap",
+            "BBB_1080p",
+            "Movie2024",
+            "Season2",
+            "S01E02",
+            "Avengers_Endgame_2019",
+            "Breaking-Bad-S01E03",
+            "BigBuckBunny",
+        ] {
+            assert_eq!(
+                folder(&format!("https://cdn.example/{name}/master.m3u8")).as_deref(),
+                Some(name),
+                "{name}"
+            );
         }
     }
 

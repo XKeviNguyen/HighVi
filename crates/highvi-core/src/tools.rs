@@ -26,10 +26,11 @@ const STALE_AFTER_DAYS: i64 = 90;
 /// The newest yt-dlp HighVi is tested with (CI matrix). Older builds still
 /// work for plain HLS, but sites change and old extractors stop working.
 pub const RECOMMENDED_YT_DLP: (u16, u8, u8) = (2026, 8, 19);
-/// The oldest yt-dlp HighVi runs (CI matrix; Ubuntu 26.04 APT). Older
-/// builds lack options HighVi's isolation depends on (`--no-plugin-dirs`,
-/// `--no-js-runtimes`), so they are refused rather than run without them.
-pub const MINIMUM_YT_DLP: (u16, u8, u8) = (2026, 3, 17);
+/// The oldest yt-dlp that knows every option HighVi's isolation depends on
+/// (`--no-js-runtimes` arrived in 2025.11.12, `--no-plugin-dirs` earlier;
+/// measured on the release builds). Older builds are refused rather than
+/// run without them. CI tests from 2026.03.17 (Ubuntu 26.04 APT).
+pub const MINIMUM_YT_DLP: (u16, u8, u8) = (2025, 11, 12);
 /// Sites whose extractor is known to fail below a version, by yt-dlp
 /// `extractor_key` (lower case). YouTube: since 2026-08-17 every format of
 /// the `android_vr` client — the only one older builds use without a
@@ -133,7 +134,6 @@ pub fn extractor_related(code: &str) -> bool {
             | "hls_not_found"
             | "unsupported_page"
             | "invalid_extractor_output"
-            | "ytdlp_too_old"
     )
 }
 

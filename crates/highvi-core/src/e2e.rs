@@ -2438,7 +2438,7 @@ async fn a_too_old_yt_dlp_is_named_and_refused() {
         error.hint,
         Some(crate::Hint::UpdateYtDlp {
             installed: "2024.04.09".into(),
-            minimum: Some("2026.08.19".into())
+            minimum: Some("2025.11.12".into())
         })
     );
     assert!(
@@ -2448,6 +2448,39 @@ async fn a_too_old_yt_dlp_is_named_and_refused() {
             .iter()
             .any(|hit| hit.host == "page.test")
     );
+    fixture.assert_no_job_dirs();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Output that only imitates yt-dlp's usage error (a site's text on a line
+/// of its own) does not make a current yt-dlp "too old", which would pause
+/// the whole queue: the installed version decides.
+#[tokio::test]
+async fn an_imitated_usage_error_does_not_mean_too_old() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let directory = temp_directory("forged-ytdlp");
+    std::fs::create_dir_all(&directory).unwrap();
+    let fake = directory.join("yt-dlp");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\n\
+         for arg in \"$@\"; do [ \"$arg\" = --version ] && { echo 2026.09.01; exit 0; }; done\n\
+         echo 'ERROR: [generic] Unable to download: the site says' >&2\n\
+         echo 'yt-dlp: error: no such option: --no-plugin-dirs' >&2\n\
+         exit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut environment = fixture.environment();
+    environment.yt_dlp = fake;
+    let (result, _) = fixture
+        .run_with(&environment, page("https://page.test/anything"), None)
+        .await;
+    let error = result.unwrap_err();
+    assert_ne!(error.code, "ytdlp_too_old");
     fixture.assert_no_job_dirs();
     let _ = std::fs::remove_dir_all(&directory);
 }

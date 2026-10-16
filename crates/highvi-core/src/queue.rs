@@ -545,18 +545,17 @@ impl Scheduler {
         let (outcome, diagnostics) = result;
         self.update(|state| {
             state.active -= 1;
-            // Failures every other queued job would repeat.
-            let doomed = match &outcome {
-                Err(error)
-                    if matches!(error.code.as_str(), "missing_dependency" | "ytdlp_too_old") =>
-                {
-                    Some(error.code.clone())
-                }
-                _ => None,
-            };
+            let mut doomed = None;
             if let Some(item) = state.item(id)
                 && item.attempt == attempt
             {
+                // Failures every other queued job would repeat. A stale
+                // attempt's result never pauses the queue.
+                if let Err(error) = &outcome
+                    && matches!(error.code.as_str(), "missing_dependency" | "ytdlp_too_old")
+                {
+                    doomed = Some(error.code.clone());
+                }
                 let was_cancelled = item.status == ItemStatus::Cancelling;
                 item.cancel = None;
                 item.stage = None;
