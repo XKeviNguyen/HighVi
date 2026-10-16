@@ -10,8 +10,12 @@ Compact, resumable record. Newest mission first.
 - PR #6 (B: stall/deadline/disk, DevTools byte bounds) **merged by the owner** → main 6b32985
   (head 86aa4db: CI green, Codex r5 clean, reviewer findings closed; #5 accepted).
 - Merges: the auto-mode permission check blocks `gh pr merge`; the owner merges.
-- `feature/v1.1-bulk-queue` (C: queue + UI + too-old yt-dlp) rebased on B; 156 tests locally.
-- Next: C open (Codex, CI) → owner merges → D (docs, packages, release checks).
+- PR #7 (C: queue + UI + too-old yt-dlp) open; head 48e173f: CI green (both yt-dlp,
+  .deb, audit), 158 tests locally; Codex blocked by its usage limit, retry scheduled.
+- `feature/v1.1-release-docs` (D, stacked on C): READMEs EN/VI/JA (queue, yt-dlp ≥ 2025.11.12,
+  Ubuntu 24.04 pipx + re-login, 9 new error rows), ARCHITECTURE, screenshots, README
+  code-table check in `check-ui.mjs`, update hint says "log out and back in".
+- Next: Codex on C → owner merges C → open D (Codex, CI) → owner merges D.
 - Failed gates: — . Open issue: `target/` was deleted by an unknown actor between
   11:20 and 11:22 local (not by any logged command of this session, its agents or
   Codex); only build artifacts lost (incl. V1 bundles; rebuildable from c990a01).
@@ -32,7 +36,21 @@ Compact, resumable record. Newest mission first.
   waiting, L2 sync runner panic leaks slot, L3 random-ID folder titles → all fixed with
   tests proven to fail on the previous code.
 
+- PR C (#7): reviewer on 76616d9 + f69e8f5: no critical/high. M1 "no such option" from
+  site text → ytdlp_too_old paused the queue → anchored to yt-dlp's usage line for
+  HighVi's own options + installed-version confirmation (tests fail without each). M2
+  too-old card said "Missing tools" + apt hint → own title + pipx steps. L: minimum is
+  the measured 2025.11.12; folder names keep Movie2024/S01E02/BBB_1080p; stale attempts
+  cannot pause the queue. Fixed in 48e173f.
+
 ## Release evidence so far
+
+- yt-dlp option support (official release zipapps): `--no-plugin-dirs` from ≤ 2025.09.26,
+  `--no-js-runtimes` from 2025.11.12 (2025.10.22 lacks it) → MINIMUM_YT_DLP 2025.11.12.
+  All 38 real-tool e2e pass with 2025.11.12; real 2025.10.22 → `ytdlp_too_old`; the
+  release app shows "yt-dlp is too old" with pipx steps (Xvfb screenshot).
+- Ubuntu 24.04 `/etc/skel/.profile` adds `~/.local/bin` to PATH only if it exists at login:
+  after `pipx install yt-dlp` the user must log out and back in (hint text corrected).
 
 - APT (docker, `.deb` from C): Ubuntu 24.04.5 and 26.04.1 — install with deps, binary,
   desktop entry, icon, starts under Xvfb as a user, remove keeps `~/Downloads/HighVi`.

@@ -135,7 +135,7 @@ const I18N = (() => {
       "diagnostics.show": "Show diagnostics (no links, cookies or passwords)",
       "deps.outdated":
         "Your yt-dlp ({installed}) is older than {recommended}, the version HighVi is tested with. Some sites, like YouTube, won't work.",
-      "deps.updateHint": "To update on Ubuntu: sudo apt install pipx, then pipx install yt-dlp, then restart HighVi.",
+      "deps.updateHint": "To update on Ubuntu: sudo apt install pipx, then pipx install yt-dlp, then log out and back in.",
       "add.button": "Add to queue",
       "add.added": "Added {count}.",
       "add.duplicates": "{count} already in the queue.",
@@ -299,7 +299,7 @@ const I18N = (() => {
       "diagnostics.show": "Xem thông tin chẩn đoán (không có link, cookie hay mật khẩu)",
       "deps.outdated":
         "yt-dlp của bạn ({installed}) cũ hơn bản {recommended} mà HighVi đã thử. Một số trang, như YouTube, sẽ không tải được.",
-      "deps.updateHint": "Cập nhật trên Ubuntu: sudo apt install pipx, rồi pipx install yt-dlp, rồi mở lại HighVi.",
+      "deps.updateHint": "Cập nhật trên Ubuntu: sudo apt install pipx, rồi pipx install yt-dlp, rồi đăng xuất và đăng nhập lại.",
       "add.button": "Thêm vào hàng chờ",
       "add.added": "Đã thêm {count}.",
       "add.duplicates": "{count} link đã có trong hàng chờ.",
@@ -465,7 +465,7 @@ const I18N = (() => {
       "diagnostics.show": "診断情報を見る（リンク・クッキー・パスワードはふくみません）",
       "deps.outdated":
         "お使いの yt-dlp（{installed}）は、HighVi がテストした {recommended} より古いです。YouTube など、いくつかのサイトは使えません。",
-      "deps.updateHint": "Ubuntu での更新：sudo apt install pipx のあと pipx install yt-dlp を実行し、HighVi を開きなおしてください。",
+      "deps.updateHint": "Ubuntu での更新：sudo apt install pipx のあと pipx install yt-dlp を実行し、いったんログアウトしてログインしなおしてください。",
       "add.button": "キューに追加",
       "add.added": "{count} 件 追加しました。",
       "add.duplicates": "{count} 件はもうキューにあります。",

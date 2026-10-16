@@ -41,6 +41,8 @@ HighVi nói được **English, Tiếng Việt và 日本語**. Bấm nút ở g
 **Sao chế độ “Link playlist” lại hỏi thêm trang web?**
 Có những trang chỉ đưa bản đồ kho báu khi bạn nói mình đến từ đâu, giống như phải trình vé ở cửa. Lời nhắn đó gọi là **Referer**. HighVi chỉ nói địa chỉ "cổng chính" của trang (ví dụ `https://example.com/`). HighVi không bao giờ gửi phần còn lại của link, cookie hay tài khoản đăng nhập của bạn.
 
+**Tải nhiều video một lúc?** Dán mỗi dòng một link (tối đa 100 link mỗi lần) rồi bấm **Bắt đầu tải**. HighVi tải tối đa **bốn** video cùng lúc; bạn chọn từ 1 đến 4. Mỗi dòng cho biết video đang ở bước nào, kể cả khi đang chờ trình duyệt riêng (mỗi lần chỉ mở một trang). Bạn có thể hủy, thử lại hoặc xóa từng dòng. Link đã có trong hàng chờ sẽ không bị thêm lần nữa.
+
 **Có cần DevTools hay F12 không?** Không. Chỉ cần dán link trang. Nếu `yt-dlp` không biết trang đó, HighVi mở trang trong một Chrome riêng, dùng xong là bỏ (không dùng hồ sơ, không cookie của bạn, mọi request đều qua lớp bảo vệ mạng), để trình phát của chính trang tự tải, rồi chọn video chính chứ không phải quảng cáo. Chế độ **Link playlist** chỉ là đường lui nâng cao khi bạn đã có sẵn link `.m3u8`.
 
 ## ✅ HighVi làm gì
@@ -73,7 +75,13 @@ sudo apt install build-essential curl wget file libxdo-dev libssl-dev \
   libayatana-appindicator3-dev librsvg2-dev libwebkit2gtk-4.1-dev ffmpeg
 ```
 
-Cài `yt-dlp` bằng trình quản lý gói hoặc từ [dự án chính thức](https://github.com/yt-dlp/yt-dlp), và nhớ cập nhật thường xuyên. Sau đó kiểm tra lại:
+Cài `yt-dlp` **bản 2025.11.12 trở lên** (HighVi được thử với 2026.03.17 và 2026.08.19), và nhớ cập nhật thường xuyên. Gói của Ubuntu 26.04 là đủ mới; **gói của Ubuntu 24.04 thì không** (2024.04.09). Trên 24.04, hãy cài bằng pipx, rồi **đăng xuất và đăng nhập lại** để máy tìm thấy bản mới trước:
+
+```bash
+sudo apt install pipx && pipx install yt-dlp
+```
+
+Sau đó kiểm tra lại:
 
 ```bash
 yt-dlp --version && ffmpeg -version && node --version && cargo --version
@@ -93,6 +101,7 @@ Hiện chưa có bản phát hành sẵn; hãy tự đóng gói (xem **Bắt đ�
 
 ```bash
 # .deb (Ubuntu/Debian): tự cài kèm yt-dlp và FFmpeg
+# (trên Ubuntu 24.04, cài thêm yt-dlp mới bằng pipx: xem Bắt đầu)
 sudo apt install ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
 
 # hoặc AppImage (cần có sẵn yt-dlp và FFmpeg trong PATH)
@@ -118,6 +127,14 @@ Nếu AppImage báo lỗi FUSE, chạy với `APPIMAGE_EXTRACT_AND_RUN=1`. Muố
 | `unsafe_network_target` | Video định kết nối tới máy trong mạng nhà hay mạng công ty. | HighVi cố ý chặn lại. |
 | `live_not_supported` | Đây là phát trực tiếp. | HighVi chỉ tải video đã phát xong. |
 | `missing_dependency` | Chưa cài `yt-dlp` hoặc FFmpeg. | Cài vào rồi thử lại. |
+| `ytdlp_too_old` | `yt-dlp` của bạn cũ hơn 2025.11.12, không chạy được các thiết lập an toàn của HighVi. | Cài bản mới bằng pipx (xem **Bắt đầu**), rồi đăng xuất và đăng nhập lại. |
+| `rate_limited` | Trang web báo bạn hỏi quá nhiều lần (HTTP 429). | Đợi một lúc, và tải ít video cùng lúc hơn. |
+| `media_access_denied` | Đã tìm thấy trang, nhưng máy chủ video **từ chối** (HTTP 403). | Thường là do `yt-dlp` cũ: hãy cập nhật. Có trang chỉ cho trình phát của chính nó tải. |
+| `download_stalled` | Việc tải đứng yên suốt 2 phút. | Thử lại sau. |
+| `download_timeout` | Một phần tải lâu hơn 24 giờ. | Thử lại với mạng nhanh hơn. |
+| `insufficient_disk_space` | Không đủ chỗ trống cho video. | Dọn bớt rồi thử lại. |
+| `discovery_overloaded` | Trang gửi quá nhiều request, trình duyệt riêng không theo dõi kịp. | Dùng **Link playlist** nếu bạn có link `.m3u8`. |
+| `queue_full` / `batch_too_large` | Hàng chờ chứa tối đa 200 video, mỗi lần thêm tối đa 100 link. | Xóa các dòng đã xong, hoặc thêm ít link hơn. |
 
 ## 🚧 Giới hạn hiện tại
 
@@ -127,8 +144,8 @@ Nếu AppImage báo lỗi FUSE, chạy với `APPIMAGE_EXTRACT_AND_RUN=1`. Muố
 - **Trình phát cần bấm nút đặc biệt** (lớp “play” riêng, hỏi tuổi, hỏi đồng ý cookie) sẽ không được bấm. HighVi chỉ bật các thẻ `<video>` bình thường.
 - **Không dùng proxy hệ thống hay proxy công ty.** Lớp bảo vệ mạng của HighVi là lối ra duy nhất. Nếu mạng chặn kết nối trực tiếp thì sẽ không tải được.
 - **Media dùng `http://` bị từ chối,** kể cả khi trang là `https://`.
-- **Chỉ Linux** (đã thử trên Ubuntu 26.04, Google Chrome 153/154, yt-dlp 2026.03.17, FFmpeg 8).
-- **Mỗi lần một video.** Chưa có hàng đợi.
+- **Chỉ Linux.** Đã thử trên Ubuntu 26.04 với Google Chrome 153/154, yt-dlp 2026.03.17 và 2026.08.19, FFmpeg 8. Trên Ubuntu 24.04 mới chỉ kiểm tra việc cài và mở gói `.deb`. Trên Wayland mới chỉ kiểm tra việc khởi động và hiển thị sắc nét trên màn hình HiDPI.
+- **Tối đa bốn video cùng lúc,** và mỗi lần chỉ một trang trong trình duyệt riêng. Hàng chờ mất khi đóng HighVi.
 - **URL media rất dài (trên 8 KiB) thấy trong trình duyệt sẽ bị bỏ qua.**
 
 ## 🧠 Dành cho lập trình viên
@@ -146,7 +163,7 @@ node scripts/check-ui.mjs   # translation parity
 ```text
 crates/highvi-core/   Lớp bảo vệ mạng (egress proxy), tìm video, chọn format, job tải, ghép MP4, lưu file an toàn
                       (unit test + test end-to-end với yt-dlp/FFmpeg thật và server HTTPS cục bộ)
-src-tauri/            Lệnh Tauri: bắt đầu/hủy job, sự kiện tiến độ, mở thư mục
+src-tauri/            Lệnh Tauri: hàng chờ tải, sự kiện tiến độ, mở thư mục
 ui/                   Cửa sổ màu xanh: index.html, styles.css, app.js, i18n.js (English · Tiếng Việt · 日本語), rain.js
 docs/assets/          Banner và ảnh chụp màn hình cho README
 ```

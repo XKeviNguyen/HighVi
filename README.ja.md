@@ -41,6 +41,8 @@ HighVi は **English・Tiếng Việt・日本語** が使えます。右上の�
 **どうして「プレイリストのリンク」でもページを聞くの？**
 「どこから来たの？」と言わないと地図をくれないサイトがあります。入口でチケットを見せるようなものです。このメモを **Referer（リファラー）** といいます。HighVi が伝えるのは、サイトの「玄関の住所」（たとえば `https://example.com/`）だけです。ページのくわしいリンクや、クッキー、ログイン情報は送りません。
 
+**たくさんの動画をまとめて？** リンクを 1 行に 1 つずつ（1 回に 100 個まで）入れて、**キューを開始** をおします。HighVi は同時に **4 本** まで進めます。何本にするかは 1〜4 からえらべます。それぞれの行に、いま何をしているかが出ます（専用ブラウザーは 1 ページずつなので、その順番待ちも出ます）。どの行も、キャンセル・やりなおし・削除ができます。もうキューにあるリンクは、二重には入りません。
+
 **DevTools や F12 は必要？** いりません。ページのリンクを入れるだけです。`yt-dlp` がサイトを知らないときは、HighVi が使い捨ての専用 Chrome（あなたのプロフィールやクッキーは使わず、通信はぜんぶ見はり番を通ります）でページを開き、ページ自身のプレーヤーに読みこませて、広告ではなく本編の動画をえらびます。**プレイリストのリンク** は、`.m3u8` をもう持っているとき用の上級者向けの方法です。
 
 ## ✅ HighVi がすること
@@ -73,7 +75,13 @@ sudo apt install build-essential curl wget file libxdo-dev libssl-dev \
   libayatana-appindicator3-dev librsvg2-dev libwebkit2gtk-4.1-dev ffmpeg
 ```
 
-`yt-dlp` はパッケージマネージャーか [公式プロジェクト](https://github.com/yt-dlp/yt-dlp) から入れて、いつも新しくしておきましょう。そのあと、ちゃんと入ったか確かめます：
+`yt-dlp` は **2025.11.12 以降** を入れて、いつも新しくしておきましょう（HighVi は 2026.03.17 と 2026.08.19 でテストしています）。Ubuntu 26.04 のパッケージなら大丈夫ですが、**Ubuntu 24.04 のものは古すぎます**（2024.04.09）。24.04 では pipx で入れて、新しいほうが先に見つかるように **いったんログアウトしてログインしなおして** ください：
+
+```bash
+sudo apt install pipx && pipx install yt-dlp
+```
+
+そのあと、ちゃんと入ったか確かめます：
 
 ```bash
 yt-dlp --version && ffmpeg -version && node --version && cargo --version
@@ -93,6 +101,7 @@ npm run build   # .deb と AppImage を作る
 
 ```bash
 # .deb（Ubuntu/Debian）：yt-dlp と FFmpeg もいっしょに入ります
+# （Ubuntu 24.04 では、新しい yt-dlp も pipx で入れてください：「はじめかた」を参照）
 sudo apt install ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
 
 # または AppImage（yt-dlp と FFmpeg が PATH にあること）
@@ -118,6 +127,14 @@ AppImage が FUSE のエラーを出すときは `APPIMAGE_EXTRACT_AND_RUN=1` �
 | `unsafe_network_target` | 動画が家や会社のネットワークの中のパソコンにつなごうとしました。 | HighVi がわざとブロックしています。 |
 | `live_not_supported` | ライブ配信です。 | HighVi は配信が終わった動画だけダウンロードします。 |
 | `missing_dependency` | `yt-dlp` か FFmpeg が入っていません。 | 入れてから、もう一度ためしましょう。 |
+| `ytdlp_too_old` | `yt-dlp` が 2025.11.12 より古く、HighVi の安全のための設定が使えません。 | pipx で新しいものを入れて（「はじめかた」を参照）、ログアウトしてログインしなおしましょう。 |
+| `rate_limited` | サイトに「たのみすぎ」と言われました（HTTP 429）。 | しばらく待って、同時に進める本数をへらしましょう。 |
+| `media_access_denied` | ページは見つかりましたが、動画のサーバーに **ことわられました**（HTTP 403）。 | `yt-dlp` が古いことが多いので、新しくしましょう。自分のプレーヤーにしか出さないサイトもあります。 |
+| `download_stalled` | ダウンロードが 2 分のあいだ止まりました。 | あとでもう一度ためしましょう。 |
+| `download_timeout` | ひとつの部分に 24 時間以上かかりました。 | 速い回線でためしましょう。 |
+| `insufficient_disk_space` | 動画を入れる空きがたりません。 | 空きをつくってから、やりなおしましょう。 |
+| `discovery_overloaded` | ページの通信が多すぎて、専用ブラウザーで追いきれませんでした。 | `.m3u8` があれば **プレイリストのリンク** を使いましょう。 |
+| `queue_full` / `batch_too_large` | キューに入るのは 200 本まで、1 回に入れられるのは 100 個までです。 | 終わった行を消すか、入れるリンクをへらしましょう。 |
 
 ## 🚧 いまの制限
 
@@ -127,8 +144,8 @@ AppImage が FUSE のエラーを出すときは `APPIMAGE_EXTRACT_AND_RUN=1` �
 - **特別なボタンが必要なプレーヤー**（独自の再生ボタン、年齢確認、同意画面）はおしません。HighVi が動かすのはふつうの `<video>` だけです。
 - **システムや会社のプロキシは使いません。** HighVi の見はり番だけが外への出口です。直接つなげないネットワークではダウンロードできません。
 - **`http://` の動画はことわります。** ページが `https://` でも同じです。
-- **Linux だけ**（Ubuntu 26.04、Google Chrome 153/154、yt-dlp 2026.03.17、FFmpeg 8 でテスト）。
-- **一度にひとつ。** まだ順番待ちはありません。
+- **Linux だけ。** Ubuntu 26.04、Google Chrome 153/154、yt-dlp 2026.03.17 と 2026.08.19、FFmpeg 8 でテストしています。Ubuntu 24.04 では `.deb` を入れて起動できることだけ、Wayland では起動と HiDPI でくっきり表示されることだけをたしかめました。
+- **同時に 4 本まで。** 専用ブラウザーは 1 ページずつです。HighVi を閉じるとキューは消えます。
 - **ブラウザーで見つけた、とても長い（8 KiB をこえる）動画の URL は無視します。**
 
 ## 🧠 開発する人へ
@@ -146,7 +163,7 @@ node scripts/check-ui.mjs   # translation parity
 ```text
 crates/highvi-core/   ネットワークの見はり番（egress proxy）、動画さがし、形式えらび、ダウンロード、MP4 づくり、安全な保存
                       （ユニットテスト＋本物の yt-dlp/FFmpeg とローカル HTTPS サーバーでの end-to-end テスト）
-src-tauri/            Tauri のコマンド：ジョブの開始・キャンセル、進みぐあい、フォルダーを開く
+src-tauri/            Tauri のコマンド：ダウンロードのキュー、進みぐあい、フォルダーを開く
 ui/                   みどりの画面：index.html、styles.css、app.js、i18n.js（English・Tiếng Việt・日本語）、rain.js
 docs/assets/          README のバナーとスクリーンショット
 ```

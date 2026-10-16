@@ -41,6 +41,8 @@ HighVi speaks **English, Tiếng Việt, and 日本語**. Pick one with the butt
 **Why does “Playlist link” ask for the page too?**
 Some websites only hand out the treasure map if you say where you came from, like showing a ticket at the door. That note is called the **Referer**. HighVi only tells them the website's front-door address (for example `https://example.com/`). It never sends the rest of the page link, your cookies, or your logins.
 
+**Many videos at once?** Paste one link per line (up to 100 at a time) and press **Start queue**. HighVi works on up to **four** at once; you choose 1–4. Each row shows what it is doing, including when it is waiting for the private browser (one page at a time). You can cancel, retry, or remove any row. A link that is already in the queue isn't added twice.
+
 **Do I need DevTools or F12?** No. Paste the page link. If `yt-dlp` doesn't know the site, HighVi opens the page in a private, throw-away Chrome (no your profile, no cookies, every request through the network guard), lets the page's own player load, and picks the main video, not the adverts. The **Playlist link** mode is only an advanced fallback for when you already have the `.m3u8` link.
 
 ## ✅ What HighVi does
@@ -73,7 +75,13 @@ sudo apt install build-essential curl wget file libxdo-dev libssl-dev \
   libayatana-appindicator3-dev librsvg2-dev libwebkit2gtk-4.1-dev ffmpeg
 ```
 
-Install `yt-dlp` from your package manager or from the [official project](https://github.com/yt-dlp/yt-dlp), and keep it up to date. Then check that everything is there:
+Install `yt-dlp` **2025.11.12 or newer** (HighVi is tested with 2026.03.17 and 2026.08.19), and keep it up to date. Ubuntu 26.04's package is new enough; **Ubuntu 24.04's is not** (2024.04.09). There, install it with pipx, then **log out and back in** so the new one is found first:
+
+```bash
+sudo apt install pipx && pipx install yt-dlp
+```
+
+Then check that everything is there:
 
 ```bash
 yt-dlp --version && ffmpeg -version && node --version && cargo --version
@@ -93,6 +101,7 @@ There is no published release yet; build the packages yourself (see **Get starte
 
 ```bash
 # .deb (Ubuntu/Debian): also installs yt-dlp and FFmpeg
+# (on Ubuntu 24.04, also install a newer yt-dlp with pipx: see Get started)
 sudo apt install ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
 
 # or the AppImage (needs yt-dlp and FFmpeg on your PATH)
@@ -118,6 +127,14 @@ If the AppImage complains about FUSE, run it with `APPIMAGE_EXTRACT_AND_RUN=1`. 
 | `unsafe_network_target` | The video tried to reach a computer on a home or office network. | HighVi blocked it on purpose. |
 | `live_not_supported` | It's a live stream. | HighVi downloads finished videos only. |
 | `missing_dependency` | `yt-dlp` or FFmpeg isn't installed. | Install it, then try again. |
+| `ytdlp_too_old` | Your `yt-dlp` is older than 2025.11.12 and can't run HighVi's safety settings. | Install a newer one with pipx (see **Get started**), then log out and back in. |
+| `rate_limited` | The website says you are asking too often (HTTP 429). | Wait a while, and download fewer videos at once. |
+| `media_access_denied` | The page was found, but the video's server said **no** (HTTP 403). | Often an old `yt-dlp`: update it. Some sites only allow their own player. |
+| `download_stalled` | The download stopped moving for 2 minutes. | Try again later. |
+| `download_timeout` | One part took longer than 24 hours. | Try again on a faster connection. |
+| `insufficient_disk_space` | There isn't enough free space for the video. | Free some space, then retry. |
+| `discovery_overloaded` | The page made too many requests for the private browser to follow. | Use **Playlist link** if you have the `.m3u8`. |
+| `queue_full` / `batch_too_large` | The queue holds 200 videos, and you can add 100 at a time. | Clear finished rows, or add fewer links. |
 
 ## 🚧 Known limitations
 
@@ -127,8 +144,8 @@ If the AppImage complains about FUSE, run it with `APPIMAGE_EXTRACT_AND_RUN=1`. 
 - **A player that needs a special click** (a custom "play" overlay, an age gate, a consent wall) won't be pressed. HighVi only starts normal `<video>` elements.
 - **No system or company proxy.** HighVi's own network guard is the only way out. Behind a proxy that blocks direct connections, downloads fail.
 - **Plain `http://` media is refused,** even when the page itself is `https://`.
-- **Linux only** (tested on Ubuntu 26.04, Google Chrome 153/154, yt-dlp 2026.03.17, FFmpeg 8).
-- **One download at a time.** No queue yet.
+- **Linux only.** Tested on Ubuntu 26.04 with Google Chrome 153/154, yt-dlp 2026.03.17 and 2026.08.19, and FFmpeg 8. On Ubuntu 24.04, only installing and starting the `.deb` was checked. On Wayland, only starting up and sharp HiDPI scaling were checked.
+- **Up to four downloads at once,** and only one page in the private browser at a time. The queue is forgotten when HighVi closes.
 - **Very long media URLs (over 8 KiB) seen in the browser are ignored.**
 
 ## 🧠 For developers
@@ -146,7 +163,7 @@ node scripts/check-ui.mjs   # translation parity
 ```text
 crates/highvi-core/   Network guard (egress proxy), discovery, format choice, download job, MP4 mux, safe saving
                       (unit tests + end-to-end tests with real yt-dlp/FFmpeg against a local HTTPS fixture)
-src-tauri/            Tauri commands: start/cancel a job, progress events, open the folder
+src-tauri/            Tauri commands: the download queue, progress events, open the folder
 ui/                   The green window: index.html, styles.css, app.js, i18n.js (English · Tiếng Việt · 日本語), rain.js
 docs/assets/          README banner and screenshots
 ```
