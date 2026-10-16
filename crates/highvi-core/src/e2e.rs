@@ -3006,3 +3006,113 @@ async fn the_highvi_browser_waits_for_the_user_without_blocking_the_queue() {
     assert_no_chrome_left(&fixture).await;
     fixture.assert_no_job_dirs();
 }
+
+/// Measurement, not a pass/fail check: what a browser session costs,
+/// headless (automatic discovery of a script-driven page) and visible (the
+/// HighVi browser), three times each: time to a saved MP4, peak Chrome
+/// processes and their memory, cleanup time, and HighVi's own memory after
+/// repeated sessions. Run alone on an Xvfb:
+/// `HIGHVI_TEST_DISPLAY=:99 cargo test -p highvi-core browser_cost_profile -- --ignored --nocapture`
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "measurement; run alone"]
+async fn browser_cost_profile() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    fixture
+        .server
+        .route("page.test/fast", Route::html(&late_player("Fast", 300)));
+    const PAGE_KIB: u64 = 4;
+    let chrome = |output: &Path| {
+        let needle = output.to_string_lossy().into_owned();
+        let mut count = 0;
+        let mut rss_kib = 0;
+        for entry in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+            let Ok(cmdline) = std::fs::read(entry.path().join("cmdline")) else {
+                continue;
+            };
+            let cmdline = String::from_utf8_lossy(&cmdline);
+            if cmdline.contains(&needle) && cmdline.contains("chrome") {
+                count += 1;
+                if let Ok(statm) = std::fs::read_to_string(entry.path().join("statm")) {
+                    let pages: u64 = statm
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("0")
+                        .parse()
+                        .unwrap_or(0);
+                    rss_kib += pages * PAGE_KIB;
+                }
+            }
+        }
+        (count, rss_kib)
+    };
+    let own_rss = || {
+        let statm = std::fs::read_to_string("/proc/self/statm").unwrap();
+        statm
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            * PAGE_KIB
+    };
+    println!(
+        "mode         run  total_s  launch_s  chrome_procs  chrome_MiB  cleanup_ms  highvi_MiB"
+    );
+    for (label, discovery) in [
+        ("headless", crate::Discovery::Automatic),
+        ("visible", crate::Discovery::Interactive),
+    ] {
+        for run in 1..=3 {
+            let output = fixture.output_dir.clone();
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let sampler = {
+                let stop = Arc::clone(&stop);
+                tokio::spawn(async move {
+                    let started = Instant::now();
+                    let (mut launch, mut peak, mut peak_rss) = (None, 0, 0);
+                    while !stop.load(std::sync::atomic::Ordering::SeqCst) {
+                        let (count, rss) = chrome(&output);
+                        if count > 0 && launch.is_none() {
+                            launch = Some(started.elapsed());
+                        }
+                        peak = peak.max(count);
+                        peak_rss = peak_rss.max(rss);
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    (launch, peak, peak_rss)
+                })
+            };
+            let started = Instant::now();
+            let (result, _) = fixture
+                .run_mode(
+                    &fixture.environment(),
+                    page("https://page.test/fast"),
+                    discovery,
+                    None,
+                )
+                .await;
+            let total = started.elapsed();
+            let saved = result.unwrap_or_else(|error| panic!("{label}: {error:?}"));
+            let ended = Instant::now();
+            while chrome(&fixture.output_dir).0 > 0 && ended.elapsed() < Duration::from_secs(10) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let cleanup = ended.elapsed();
+            stop.store(true, std::sync::atomic::Ordering::SeqCst);
+            let (launch, peak, peak_rss) = sampler.await.unwrap();
+            let _ = std::fs::remove_file(&saved.saved_to);
+            println!(
+                "{label:<12} {run:>3}  {:>7.1}  {:>8.1}  {peak:>12}  {:>10}  {:>10}  {:>10}",
+                total.as_secs_f64(),
+                launch.map_or(f64::NAN, |at| at.as_secs_f64()),
+                peak_rss / 1024,
+                cleanup.as_millis(),
+                own_rss() / 1024
+            );
+        }
+    }
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
