@@ -71,11 +71,13 @@ When a page refuses HighVi's hidden browser, or its player needs you to press pl
 
 1. The window is a fresh, private Chrome profile made for this one page. It is not your browser: no history, logins, cookies or extensions, and it is deleted afterwards.
 2. Use the page normally and start the video. HighVi watches the window's network traffic for the video stream. No DevTools, no copying links.
-3. As soon as a stream passes HighVi's checks, the window closes and the download continues in the queue as usual.
+3. As soon as a stream passes HighVi's checks, the window closes and the download continues in the queue as usual. An advert or preview that fails them does not close it.
 
-- Every request still goes through HighVi's network guard (public `https://` only), with Chrome's sandbox on.
-- The window waits up to 10 minutes, and only one HighVi browser runs at a time. Other downloads keep going.
+- The window's web traffic still goes through HighVi's network guard (public `https://` only), with Chrome's sandbox on. Links it would hand to other apps (`mailto:`, `magnet:`, …) go nowhere, and file uploads are off.
+- HighVi never presses play or clicks for you in the window.
+- The window waits up to 10 minutes. Only one HighVi browser runs at a time: if another page is using it, the window opens when it is free. Downloads that don't need the browser keep going.
 - Closing the window ends the attempt (`browser_closed`). **Cancel** works too.
+- It is a normal desktop window: it shares your clipboard like any app, and on X11 (not Wayland), apps on the same display can see each other's windows.
 
 > [!NOTE]
 > A site can still refuse a visible browser, or ask you to prove you are human. HighVi never answers such checks for you. If the site lets you through, it is because you were allowed to, not because HighVi got around anything.

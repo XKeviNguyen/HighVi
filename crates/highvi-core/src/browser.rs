@@ -186,6 +186,14 @@ impl Ended {
     }
 }
 
+/// Checks the playlists a visible window loaded (best first, with the page
+/// title) while it stays open; `Some` ends the session with that result.
+/// The future may borrow only what outlives the session, not the function.
+pub type Check<'a, T> = dyn FnMut(Vec<Candidate>, Option<String>) -> CheckFuture<'a, T> + Send + 'a;
+/// The answer of a [`Check`].
+pub type CheckFuture<'a, T> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Option<T>> + Send + 'a>>;
+
 pub struct BrowserRun<'a> {
     pub chrome: &'a Path,
     pub page: &'a Url,
@@ -267,10 +275,15 @@ pub fn find_browser() -> Option<std::path::PathBuf> {
     .find_map(crate::find_executable)
 }
 
-pub async fn discover_in_browser(
+/// Runs one browser session. In a visible window, `check` is given each new
+/// set of playlists (best first) and the page title while the window stays
+/// open; the session ends when it returns `Some`. Headless sessions never
+/// call it: they end once playlists settle, and the caller checks them.
+pub async fn discover_in_browser<T>(
     run: BrowserRun<'_>,
     cancel: &mut CancelToken,
-) -> Result<BrowserFinding, PublicError> {
+    check: &mut Check<'_, T>,
+) -> Result<(BrowserFinding, Option<T>), PublicError> {
     // Tests never use the desktop HighVi happens to run on: only a display
     // they name (an Xvfb), so no window opens on someone's screen.
     #[cfg(not(test))]
@@ -287,6 +300,9 @@ pub async fn discover_in_browser(
     };
     let profile = run.work_dir.join("chrome-profile");
     write_profile_preferences(&profile)
+        .await
+        .map_err(|_| browser_failed())?;
+    write_launch_guards(&profile)
         .await
         .map_err(|_| browser_failed())?;
     if display.is_some() {
@@ -313,21 +329,30 @@ pub async fn discover_in_browser(
     };
     let bounded = timeout(
         STARTUP_TIMEOUT + budget + Duration::from_secs(10),
-        observe(&mut cdp, run.page, run.mode, budget),
+        observe(&mut cdp, run.page, run.mode, budget, check),
     );
     let mut result = tokio::select! {
         result = bounded => result.unwrap_or_else(|_| Err(browser_failed())),
         () = cancel.cancelled() => Err(PublicError::new("cancelled", "The download was cancelled.")),
     };
-    // A window closed while HighVi was still setting it up: Chrome exited
-    // cleanly, which a crash does not.
-    if run.mode == Mode::Interactive
-        && result
-            .as_ref()
-            .is_err_and(|error| error.code == "browser_failed")
-        && matches!(child.try_wait(), Ok(Some(status)) if status.success())
-    {
-        result = Err(browser_closed());
+    if run.mode == Mode::Interactive {
+        // Closed by the user only if Chrome exited cleanly; a crash or a
+        // kill (non-zero status, signal) is a failure. A window closed
+        // while HighVi was still setting it up counts as closed too.
+        let ended_closed =
+            matches!(&result, Ok((finding, None)) if finding.page.ended == Ended::Closed);
+        let setup_failed = matches!(&result, Err(error) if error.code == "browser_failed");
+        if ended_closed || setup_failed {
+            let clean = matches!(
+                timeout(Duration::from_secs(2), child.wait()).await,
+                Ok(Ok(status)) if status.success()
+            );
+            if setup_failed && clean {
+                result = Err(browser_closed());
+            } else if ended_closed && !clean {
+                result = Err(browser_failed());
+            }
+        }
     }
     drop(cdp);
     kill_group(&mut child).await;
@@ -347,6 +372,57 @@ async fn write_profile_preferences(profile: &Path) -> io::Result<()> {
         }
     });
     tokio::fs::write(default.join("Preferences"), preferences.to_string()).await
+}
+
+/// Programs Chrome hands links it cannot open itself to (`mailto:`,
+/// `magnet:`, …). A page must not start desktop apps, which would reach the
+/// network outside the egress guard: these stand-ins, first on Chrome's
+/// `PATH`, refuse everything.
+const LAUNCH_GUARDS: &[&str] = &[
+    "xdg-open",
+    "xdg-email",
+    "xdg-mime",
+    "xdg-settings",
+    "gio",
+    "gvfs-open",
+    "gnome-open",
+    "kde-open",
+    "kde-open5",
+    "kfmclient",
+    "exo-open",
+    "sensible-browser",
+    "x-www-browser",
+    "www-browser",
+];
+
+async fn write_launch_guards(profile: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = profile.join("bin");
+    tokio::fs::create_dir_all(&bin).await?;
+    for name in LAUNCH_GUARDS {
+        let path = bin.join(name);
+        tokio::fs::write(&path, "#!/bin/sh\nexit 1\n").await?;
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).await?;
+    }
+    Ok(())
+}
+
+/// A browser installed as a snap (`/snap/bin/chromium` is a link to
+/// `/usr/bin/snap`).
+fn is_snap(chrome: &Path) -> bool {
+    chrome.starts_with("/snap/")
+        || std::fs::canonicalize(chrome)
+            .is_ok_and(|real| real.starts_with("/snap/") || real == Path::new("/usr/bin/snap"))
+}
+
+/// Chrome's `PATH`: the stand-ins first, then HighVi's own.
+fn guarded_path(profile: &Path, inherited: Option<OsString>) -> OsString {
+    let mut path = profile.join("bin").into_os_string();
+    if let Some(inherited) = inherited.filter(|inherited| !inherited.is_empty()) {
+        path.push(":");
+        path.push(inherited);
+    }
+    path
 }
 
 pub(crate) fn browser_unavailable() -> PublicError {
@@ -456,20 +532,26 @@ fn launch(
         .stderr(Stdio::null())
         .env_clear()
         .envs(
-            ["PATH", "LANG", "LC_ALL", "TMPDIR"]
+            ["LANG", "LC_ALL", "TMPDIR"]
                 .into_iter()
                 .filter_map(|name| std::env::var_os(name).map(|value| (name, value))),
         )
+        .env("PATH", guarded_path(profile, std::env::var_os("PATH")))
         .env("HOME", profile)
         .env("XDG_CONFIG_HOME", profile.join("config"))
         .env("XDG_CACHE_HOME", profile.join("cache"))
         .args(chrome_args(run, profile, display));
     if let Some(display) = display {
-        command
-            .envs(display.env.iter().map(|(name, value)| (*name, value)))
-            .env("XDG_RUNTIME_DIR", profile.join("run"))
-            // No session bus: no keyring, portals or other desktop services.
-            .env("DBUS_SESSION_BUS_ADDRESS", "disabled:");
+        command.envs(display.env.iter().map(|(name, value)| (*name, value)));
+        // No session bus: no keyring, portals or other desktop services.
+        // A snap is the exception: snapd needs the user's session to start
+        // the app at all, so a snap gets what a headless one does (neither
+        // variable), and its confinement decides what it may reach.
+        if !is_snap(run.chrome) {
+            command
+                .env("XDG_RUNTIME_DIR", profile.join("run"))
+                .env("DBUS_SESSION_BUS_ADDRESS", "disabled:");
+        }
     }
     // Chrome also exits when its pipe closes; this covers the gap (a snap's
     // setuid launcher clears the setting, so both are kept).
@@ -764,6 +846,19 @@ impl RequestTracker {
     }
 
     /// Stops tracking `key` and returns what was known about it.
+    /// Drops everything a session that went away was tracking.
+    fn forget_session(&mut self, session: &str) {
+        let mut freed = 0;
+        self.requests.retain(|(owner, _), request| {
+            let keep = owner != session;
+            if !keep {
+                freed += request.url.len();
+            }
+            keep
+        });
+        self.url_bytes -= freed;
+    }
+
     fn finish(&mut self, key: &(String, String)) -> Option<Request> {
         let request = self.requests.remove(key)?;
         self.url_bytes -= request.url.len();
@@ -796,12 +891,13 @@ struct Observation {
     seen: HashSet<String>,
 }
 
-async fn observe(
+async fn observe<T>(
     cdp: &mut Cdp,
     page: &Url,
     mode: Mode,
     budget: Duration,
-) -> Result<BrowserFinding, PublicError> {
+    check: &mut Check<'_, T>,
+) -> Result<(BrowserFinding, Option<T>), PublicError> {
     let interactive = mode == Mode::Interactive;
     let target = timeout(
         STARTUP_TIMEOUT,
@@ -860,6 +956,12 @@ async fn observe(
     for (method, params) in [
         ("Network.enable", json!({})),
         ("Page.enable", json!({})),
+        // No native file dialog: a page must not get a window onto the
+        // user's files. (The event it sends instead is ignored.)
+        (
+            "Page.setInterceptFileChooserDialog",
+            json!({ "enabled": true }),
+        ),
         (
             "Target.setAutoAttach",
             json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true }),
@@ -869,6 +971,16 @@ async fn observe(
             .await
             .ok_or_else(browser_failed)?;
     }
+    // Popups and new tabs are pages of their own: hear about them, so a
+    // player that opens in one is watched too.
+    cdp.call(
+        None,
+        "Target.setDiscoverTargets",
+        json!({ "discover": true }),
+    )
+    .await
+    .ok_or_else(browser_failed)?;
+    let mut known_pages: HashSet<String> = HashSet::from([target_id.clone()]);
     cdp.send(
         Some(&main),
         "Page.navigate",
@@ -895,6 +1007,10 @@ async fn observe(
     let mut loaded_at: Option<Instant> = None;
     let mut played_at: Option<Instant> = None;
     let mut last_found: Option<Instant> = None;
+    // Visible window: playlists already checked and rejected, and the
+    // first that passed.
+    let mut checked: HashSet<String> = HashSet::new();
+    let mut accepted: Option<T> = None;
 
     loop {
         let now = Instant::now();
@@ -905,8 +1021,32 @@ async fn observe(
             && now >= found + SETTLE
             && pending_bodies.is_empty()
         {
-            report.ended = Ended::Settled;
-            break;
+            if !interactive {
+                report.ended = Ended::Settled;
+                break;
+            }
+            // The window stays open while new playlists are checked: an
+            // advert or preview may come first, and the user may still be
+            // starting the real video.
+            last_found = None;
+            let fresh: Vec<Candidate> = rank(&observation.playlists)
+                .0
+                .into_iter()
+                .filter(|candidate| checked.insert(candidate.url.as_str().to_string()))
+                .collect();
+            if !fresh.is_empty() {
+                let title = page_title(cdp, &main).await;
+                if let Some(found) = check(fresh, title).await {
+                    accepted = Some(found);
+                    report.ended = Ended::Settled;
+                    break;
+                }
+                // Rejected: the window keeps going, with fresh body budgets
+                // for what the user does next.
+                playlist_fetches = 0;
+                sniff_fetches = 0;
+            }
+            continue;
         }
         let nothing_yet = observation.playlists.is_empty() && pending_bodies.is_empty();
         // The user may need minutes to get the video playing.
@@ -919,7 +1059,10 @@ async fn observe(
             break;
         }
         let play_at = loaded_at.map_or(started + PLAY_WITHOUT_LOAD, |at| at + PLAY_AFTER_LOAD);
-        if played_at.is_none() && nothing_yet && now >= play_at {
+        // Only headless sessions start players, with a synthetic gesture.
+        // In a visible window the user does: a gesture HighVi made would
+        // let the page use it (clipboard, external links) without a click.
+        if !interactive && played_at.is_none() && nothing_yet && now >= play_at {
             played_at = Some(now);
             for session in &sessions {
                 let _ = cdp
@@ -934,7 +1077,7 @@ async fn observe(
         let wake = [
             Some(deadline),
             last_found.map(|found| found + SETTLE),
-            if played_at.is_none() {
+            if played_at.is_none() && !interactive {
                 Some(play_at)
             } else {
                 None
@@ -1009,6 +1152,13 @@ async fn observe(
                         let _ = cdp
                             .send(
                                 Some(&child),
+                                "Page.setInterceptFileChooserDialog",
+                                json!({ "enabled": true }),
+                            )
+                            .await;
+                        let _ = cdp
+                            .send(
+                                Some(&child),
                                 "Target.setAutoAttach",
                                 json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true }),
                             )
@@ -1019,6 +1169,31 @@ async fn observe(
                 let _ = cdp
                     .send(Some(&child), "Runtime.runIfWaitingForDebugger", json!({}))
                     .await;
+            }
+            "Target.targetCreated" => {
+                let info = &params["targetInfo"];
+                if info["type"].as_str() == Some("page")
+                    && let Some(id) = info["targetId"].as_str()
+                    && sessions.len() < MAX_SESSIONS
+                    && known_pages.insert(id.to_string())
+                {
+                    let _ = cdp
+                        .send(
+                            None,
+                            "Target.attachToTarget",
+                            json!({ "targetId": id, "flatten": true }),
+                        )
+                        .await;
+                }
+            }
+            "Target.detachedFromTarget" => {
+                // A frame, worker or tab went away: stop counting it.
+                if let Some(gone) = params["sessionId"].as_str()
+                    && gone != main
+                {
+                    sessions.retain(|session| session != gone);
+                    requests.forget_session(gone);
+                }
             }
             "Page.loadEventFired" if session == main => {
                 loaded_at.get_or_insert_with(Instant::now);
@@ -1158,10 +1333,31 @@ async fn observe(
         }
     }
 
-    let title = timeout(
+    let title = page_title(cdp, &main).await;
+
+    report.events_dropped = cdp.dropped();
+    report.events_oversized = cdp.oversized();
+    report.loaded = loaded_at.is_some();
+    report.played = played_at.is_some();
+    report.playlists = observation.playlists.len();
+    let (candidates, drm_only) = rank(&observation.playlists);
+    Ok((
+        BrowserFinding {
+            candidates,
+            title,
+            drm_only,
+            page: report,
+        },
+        accepted,
+    ))
+}
+
+/// The main document's title, trimmed and bounded.
+async fn page_title(cdp: &mut Cdp, main: &str) -> Option<String> {
+    timeout(
         Duration::from_secs(3),
         cdp.call(
-            Some(&main),
+            Some(main),
             "Runtime.evaluate",
             json!({ "expression": "document.title", "returnByValue": true }),
         ),
@@ -1177,20 +1373,7 @@ async fn observe(
             .take(MAX_TITLE_CHARS)
             .collect::<String>()
     })
-    .filter(|title| !title.is_empty());
-
-    report.events_dropped = cdp.dropped();
-    report.events_oversized = cdp.oversized();
-    report.loaded = loaded_at.is_some();
-    report.played = played_at.is_some();
-    report.playlists = observation.playlists.len();
-    let (candidates, drm_only) = rank(&observation.playlists);
-    Ok(BrowserFinding {
-        candidates,
-        title,
-        drm_only,
-        page: report,
-    })
+    .filter(|title| !title.is_empty())
 }
 
 fn header<'a>(headers: &'a Value, name: &str) -> Option<&'a str> {
@@ -1710,6 +1893,45 @@ mod tests {
             assert_eq!(args.last().unwrap(), "about:blank");
             assert!(!args.iter().any(|arg| arg.contains("site.example")));
         }
+    }
+
+    #[tokio::test]
+    async fn links_for_desktop_apps_go_nowhere() {
+        let profile = crate::filesystem::temp_directory("guards");
+        write_launch_guards(&profile).await.unwrap();
+        let path = guarded_path(&profile, Some("/usr/bin:/bin".into()));
+        assert_eq!(
+            path,
+            OsString::from(format!("{}/bin:/usr/bin:/bin", profile.display()))
+        );
+        assert_eq!(
+            guarded_path(&profile, None),
+            profile.join("bin").into_os_string()
+        );
+        for name in LAUNCH_GUARDS {
+            let status = std::process::Command::new(profile.join("bin").join(name))
+                .arg("mailto:someone@example.com")
+                .status()
+                .unwrap();
+            assert!(!status.success(), "{name}");
+        }
+        std::fs::remove_dir_all(profile).unwrap();
+    }
+
+    #[test]
+    fn a_session_that_went_away_frees_what_it_tracked() {
+        let mut tracker = RequestTracker::default();
+        for (session, id) in [("a", "1"), ("a", "2"), ("b", "1")] {
+            tracker.start(
+                (session.to_string(), id.to_string()),
+                "https://c.example/x.m3u8",
+                None,
+                "Fetch",
+            );
+        }
+        tracker.forget_session("a");
+        assert_eq!(tracker.requests.len(), 1);
+        assert_eq!(tracker.url_bytes, "https://c.example/x.m3u8".len());
     }
 
     #[test]

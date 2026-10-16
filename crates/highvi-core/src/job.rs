@@ -6,7 +6,9 @@
 
 use crate::{
     PublicError, SourceKind, ToolSignals, ValidatedSource,
-    browser::{BrowserFinding, BrowserRun, Ended, Mode, discover_in_browser},
+    browser::{
+        BrowserFinding, BrowserRun, Candidate, Check, CheckFuture, Ended, Mode, discover_in_browser,
+    },
     classify::{FetchTarget, signals_from_output},
     diagnostics::Diagnostics,
     egress::{EgressProxy, EgressStats, RefusalCounts, Resolver},
@@ -561,6 +563,11 @@ async fn discover(
         return Err(error);
     }
 
+    // Headless: the session ends once playlists settle; they are checked
+    // after Chrome is gone.
+    let mut later = |_: Vec<Candidate>, _: Option<String>| -> CheckFuture<'static, ()> {
+        Box::pin(async { None })
+    };
     let finding = match browse(
         env,
         job,
@@ -570,10 +577,11 @@ async fn discover(
         Mode::Headless,
         cancel,
         report,
+        &mut later,
     )
     .await
     {
-        Ok(finding) => finding,
+        Ok((finding, _)) => finding,
         // No browser installed: the original explanation is the useful one.
         Err(browser) if browser.code == "browser_unavailable" => return Err(error),
         Err(browser) => return Err(browser),
@@ -585,7 +593,16 @@ async fn discover(
         return Err(empty_browser_result(&finding, Mode::Headless));
     }
     check_candidates(
-        env, job, &proxy_url, proxy, finding, error, cancel, report, recorder,
+        env,
+        job,
+        &proxy_url,
+        proxy,
+        finding.candidates,
+        finding.title,
+        error,
+        cancel,
+        report,
+        recorder,
     )
     .await
 }
@@ -593,7 +610,7 @@ async fn discover(
 /// One isolated browser session, while holding the browser (one job at a
 /// time). Chrome has exited and its profile is gone when this returns.
 #[allow(clippy::too_many_arguments)]
-async fn browse(
+async fn browse<T>(
     env: &JobEnvironment,
     job: &JobDir,
     proxy_url: &str,
@@ -602,7 +619,8 @@ async fn browse(
     mode: Mode,
     cancel: &mut CancelToken,
     report: &(dyn Fn(JobUpdate) + Send + Sync),
-) -> Result<BrowserFinding, PublicError> {
+    check: &mut Check<'_, T>,
+) -> Result<(BrowserFinding, Option<T>), PublicError> {
     report(JobUpdate::stage(Stage::WaitingForBrowser));
     let browser_permit = tokio::select! {
         permit = env.shared.browsers.acquire() => permit.map_err(|_| crate::browser::browser_failed())?,
@@ -624,6 +642,7 @@ async fn browse(
             insecure_tls: env.fixture.is_some(),
         },
         cancel,
+        check,
     )
     .await;
     // The profile holds whatever the page stored; it is not needed again.
@@ -633,8 +652,9 @@ async fn browse(
     finding
 }
 
-/// A visible window the user browses in; the first stream that passes the
-/// same checks as automatic discovery is downloaded.
+/// A visible window the user browses in. Each new set of playlists it
+/// loads is checked while the window stays open (an advert or preview may
+/// come before the real video); the first that passes is downloaded.
 #[allow(clippy::too_many_arguments)]
 async fn discover_in_window(
     env: &JobEnvironment,
@@ -647,7 +667,38 @@ async fn discover_in_window(
     report: &(dyn Fn(JobUpdate) + Send + Sync),
     recorder: &Mutex<Diagnostics>,
 ) -> Result<Discovered, PublicError> {
-    let finding = browse(
+    let checking = cancel.clone();
+    let rejected: Mutex<Option<PublicError>> = Mutex::new(None);
+    let mut check = |candidates: Vec<Candidate>,
+                     title: Option<String>|
+     -> CheckFuture<'_, Result<Discovered, PublicError>> {
+        let mut token = checking.clone();
+        let rejected = &rejected;
+        Box::pin(async move {
+            let fallback = PublicError::new(
+                "no_media_found",
+                "The HighVi browser saw a video stream, but none of it could be downloaded.",
+            );
+            match check_candidates(
+                env, job, proxy_url, proxy, candidates, title, fallback, &mut token, report,
+                recorder,
+            )
+            .await
+            {
+                Ok(found) => Some(Ok(found)),
+                Err(error) if error.code == "cancelled" => Some(Err(error)),
+                Err(error) => {
+                    // Not this one: keep watching the window.
+                    report(JobUpdate::stage(Stage::WaitingForUser));
+                    *rejected
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(error);
+                    None
+                }
+            }
+        })
+    };
+    let (finding, accepted) = browse(
         env,
         job,
         proxy_url,
@@ -656,22 +707,24 @@ async fn discover_in_window(
         Mode::Interactive,
         cancel,
         report,
+        &mut check,
     )
     .await?;
     record(recorder, |diagnostics| {
         diagnostics.page(finding.page.clone())
     });
-    if finding.candidates.is_empty() {
-        return Err(empty_browser_result(&finding, Mode::Interactive));
+    match accepted {
+        Some(result) => result,
+        // Closed, or out of time: say so, even if some streams were seen
+        // and rejected on the way.
+        None if matches!(finding.page.ended, Ended::Closed | Ended::Deadline) => {
+            Err(empty_browser_result(&finding, Mode::Interactive))
+        }
+        None => Err(rejected
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|| empty_browser_result(&finding, Mode::Interactive))),
     }
-    let fallback = PublicError::new(
-        "no_media_found",
-        "The HighVi browser saw a video stream, but none of it could be downloaded.",
-    );
-    check_candidates(
-        env, job, proxy_url, proxy, finding, fallback, cancel, report, recorder,
-    )
-    .await
 }
 
 /// Each playlist the browser saw, best first, checked by yt-dlp through
@@ -682,7 +735,8 @@ async fn check_candidates(
     job: &JobDir,
     proxy_url: &str,
     proxy: &EgressProxy,
-    finding: BrowserFinding,
+    candidates: Vec<Candidate>,
+    title: Option<String>,
     error: PublicError,
     cancel: &mut CancelToken,
     report: &(dyn Fn(JobUpdate) + Send + Sync),
@@ -690,7 +744,7 @@ async fn check_candidates(
 ) -> Result<Discovered, PublicError> {
     report(JobUpdate::stage(Stage::Discovering));
     let mut last_error = error;
-    for candidate in finding.candidates {
+    for candidate in candidates {
         record(recorder, Diagnostics::candidate_checked);
         let checked = probe(
             env,
@@ -706,7 +760,7 @@ async fn check_candidates(
         match checked {
             Ok(mut media) => {
                 // yt-dlp only sees the playlist, whose name is meaningless.
-                if let Some(title) = &finding.title {
+                if let Some(title) = &title {
                     media.title.clone_from(title);
                     media.suggested_filename = crate::suggested_filename(Some(title), None);
                 }

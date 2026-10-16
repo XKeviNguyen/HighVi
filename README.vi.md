@@ -71,11 +71,13 @@ Khi một trang chặn trình duyệt ẩn của HighVi, hoặc trình phát c�
 
 1. Cửa sổ dùng một hồ sơ Chrome mới tinh, riêng cho đúng trang này. Đây không phải trình duyệt của bạn: không lịch sử, không đăng nhập, không cookie, không tiện ích, và bị xóa sau khi xong.
 2. Dùng trang như bình thường và bấm phát video. HighVi theo dõi lưu lượng mạng của cửa sổ để tìm luồng video. Không cần DevTools, không cần chép link.
-3. Ngay khi một luồng video qua được các bước kiểm tra của HighVi, cửa sổ đóng lại và việc tải tiếp tục trong hàng chờ như bình thường.
+3. Ngay khi một luồng video qua được các bước kiểm tra của HighVi, cửa sổ đóng lại và việc tải tiếp tục trong hàng chờ như bình thường. Quảng cáo hay đoạn xem trước không qua được kiểm tra thì không làm cửa sổ đóng.
 
-- Mọi request vẫn đi qua lớp bảo vệ mạng của HighVi (chỉ địa chỉ `https://` công khai), và sandbox của Chrome vẫn bật.
-- Cửa sổ chờ tối đa 10 phút, và mỗi lần chỉ có một trình duyệt HighVi. Các video khác vẫn tải tiếp.
+- Lưu lượng web của cửa sổ vẫn đi qua lớp bảo vệ mạng của HighVi (chỉ địa chỉ `https://` công khai), và sandbox của Chrome vẫn bật. Link mà nó định chuyển cho ứng dụng khác (`mailto:`, `magnet:`, …) sẽ không đi đâu cả, và tải file lên bị tắt.
+- HighVi không bao giờ tự bấm phát hay bấm gì thay bạn trong cửa sổ.
+- Cửa sổ chờ tối đa 10 phút. Mỗi lần chỉ có một trình duyệt HighVi: nếu trang khác đang dùng, cửa sổ sẽ mở khi trình duyệt rảnh. Các video không cần trình duyệt vẫn tải tiếp.
 - Đóng cửa sổ là kết thúc lần thử đó (`browser_closed`). Nút **Hủy** cũng dùng được.
+- Đây là một cửa sổ desktop bình thường: nó dùng chung clipboard như mọi ứng dụng, và trên X11 (không phải Wayland), các ứng dụng trên cùng màn hình có thể thấy cửa sổ của nhau.
 
 > [!NOTE]
 > Trang web vẫn có thể từ chối cả trình duyệt hiện ra, hoặc bắt bạn chứng minh mình là người. HighVi không bao giờ trả lời các bước kiểm tra đó thay bạn. Nếu trang cho bạn vào, đó là vì bạn được phép, chứ không phải vì HighVi lách qua được gì.

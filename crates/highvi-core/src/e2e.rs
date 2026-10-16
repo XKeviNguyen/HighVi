@@ -190,6 +190,9 @@ pub(crate) struct Route {
     pub for_headless: Option<Arc<Route>>,
     /// Send the body in pieces of this size with this pause between them.
     pub trickle: Option<(usize, Duration)>,
+    /// Answer 403 to clients that are not browsers (no `Sec-Fetch-Dest`),
+    /// as media servers bound to a browser session do.
+    pub browser_only: bool,
 }
 
 impl Route {
@@ -204,6 +207,14 @@ impl Route {
             headers: Vec::new(),
             for_headless: None,
             trickle: None,
+            browser_only: false,
+        }
+    }
+
+    pub fn browser_only(self) -> Self {
+        Self {
+            browser_only: true,
+            ..self
         }
     }
 
@@ -429,6 +440,7 @@ async fn serve(
     let mut host = String::new();
     let mut referer = None;
     let mut headless = false;
+    let mut browser = false;
     for line in lines {
         if let Some((name, value)) = line.split_once(':') {
             match name.trim().to_ascii_lowercase().as_str() {
@@ -442,6 +454,9 @@ async fn serve(
                 }
                 "referer" => referer = Some(value.trim().to_string()),
                 "user-agent" => headless = value.contains("HeadlessChrome"),
+                // Browsers send it; yt-dlp (which sends Sec-Fetch-Mode)
+                // does not.
+                "sec-fetch-dest" => browser = true,
                 _ => {}
             }
         }
@@ -471,6 +486,10 @@ async fn serve(
             for_headless: Some(variant),
             ..
         }) if headless => (*variant).clone(),
+        Some(route) if route.browser_only && !browser => Route {
+            status: 403,
+            ..Route::ok("text/plain", "browsers only")
+        },
         Some(route) => route,
         None => Route {
             status: 404,
@@ -3115,4 +3134,184 @@ async fn browser_cost_profile() {
     }
     assert_no_chrome_left(&fixture).await;
     fixture.assert_no_job_dirs();
+}
+
+/// Codex P1: a playlist that fails HighVi's checks (here one only the
+/// browser itself may load, like an advert or a preview) comes first. The
+/// window must stay open, keep watching, and take the real video the user
+/// starts later.
+#[tokio::test]
+async fn the_highvi_browser_keeps_watching_after_a_rejected_stream() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "media.test/teaser/master.m3u8",
+        Route::playlist(SPLIT_MASTER_ABSOLUTE).browser_only(),
+    );
+    fixture.server.route(
+        "page.test/teaser",
+        Route::html(
+            "<!doctype html><title>Real video</title><script>\
+             fetch('https://media.test/teaser/master.m3u8').then(r => r.text());\
+             setTimeout(() => fetch('https://media.test/muxed/master.m3u8'), 8000);\
+             </script>",
+        ),
+    );
+    let (result, updates) = fixture
+        .run_mode(
+            &fixture.environment(),
+            page("https://page.test/teaser"),
+            crate::Discovery::Interactive,
+            None,
+        )
+        .await;
+    let report = fixture.last_report.lock().unwrap().clone();
+    let outcome = result.unwrap_or_else(|error| panic!("{error:?}\n{report}"));
+    assert_eq!(outcome.title, "Real video");
+    assert!(fixture.inspect(&outcome.saved_to).2);
+    // Checked once while waiting, then back to waiting for the user.
+    let stages: Vec<Stage> = updates.iter().map(|update| update.stage).collect();
+    let back = stages
+        .windows(2)
+        .any(|pair| pair == [Stage::Discovering, Stage::WaitingForUser]);
+    assert!(back, "{stages:?}");
+    assert!(report.contains("candidates checked 2"), "{report}");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// Breaker M1/M2: HighVi never presses play in a visible window. A gesture
+/// it made would let the page use it without a click (writing the user's
+/// clipboard, handing links to desktop apps). Headless sessions still do.
+#[tokio::test]
+async fn the_highvi_browser_never_acts_for_the_user() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/hooked",
+        Route::html(
+            "<!doctype html><title>Hooked</title><video></video><script>\
+             HTMLMediaElement.prototype.play = function () {\
+               fetch('https://media.test/played'); return Promise.resolve();\
+             };</script>",
+        ),
+    );
+    let played = |fixture: &Fixture| {
+        fixture
+            .server
+            .hits()
+            .iter()
+            .any(|hit| hit.path == "/played")
+    };
+    let (headless, _) = fixture.run(page("https://page.test/hooked")).await;
+    assert!(headless.is_err());
+    assert!(
+        played(&fixture),
+        "headless discovery no longer starts players"
+    );
+    fixture.server.hits_log.list.lock().unwrap().clear();
+
+    let mut environment = fixture.environment();
+    environment.limits.interactive_budget = Duration::from_secs(20);
+    let (result, _) = fixture
+        .run_mode(
+            &environment,
+            page("https://page.test/hooked"),
+            crate::Discovery::Interactive,
+            None,
+        )
+        .await;
+    assert_code(&result, "interactive_timeout");
+    assert!(
+        !played(&fixture),
+        "HighVi pressed play in the visible window"
+    );
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// Codex P2: a window that crashes or is killed is a failure, not
+/// "closed by the user".
+#[tokio::test]
+async fn a_killed_highvi_browser_is_a_failure_not_a_close() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/doomed",
+        Route::html("<!doctype html><title>Doomed</title><p>no video</p>"),
+    );
+    let killer = {
+        let output = fixture.output_dir.clone();
+        let hits = Arc::clone(&fixture.server.hits_log);
+        tokio::spawn(async move {
+            for _ in 0..600 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                let shown = hits
+                    .list
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|hit| hit.host == "page.test");
+                let pids = chrome_browser_pids_in(&output);
+                if shown && !pids.is_empty() {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    for pid in pids {
+                        // SAFETY: SIGKILL to the test's own Chrome.
+                        unsafe { libc::kill(pid, libc::SIGKILL) };
+                    }
+                    return true;
+                }
+            }
+            false
+        })
+    };
+    let (result, _) = fixture
+        .run_mode(
+            &fixture.environment(),
+            page("https://page.test/doomed"),
+            crate::Discovery::Interactive,
+            None,
+        )
+        .await;
+    assert!(killer.await.unwrap(), "no browser window was seen");
+    assert_code(&result, "browser_failed");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// Breaker M1: links Chrome cannot open itself (`mailto:`, `magnet:`…) go
+/// to HighVi's stand-ins, never to the desktop's apps, even when a page
+/// hijacks the gesture headless discovery uses to start players. Run alone
+/// with a logging fake `xdg-open` on the `PATH` HighVi inherits:
+/// `PATH=<dir with fake xdg-open>:$PATH HIGHVI_TEST_XDG_LOG=<its log> cargo test -p highvi-core a_page_cannot_start_desktop_apps -- --ignored`
+#[tokio::test]
+#[ignore = "needs a logging fake xdg-open on PATH"]
+async fn a_page_cannot_start_desktop_apps() {
+    let Some(log) = std::env::var_os("HIGHVI_TEST_XDG_LOG").map(PathBuf::from) else {
+        panic!("HIGHVI_TEST_XDG_LOG is not set");
+    };
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/mailto",
+        Route::html(
+            "<!doctype html><title>Mail</title><video></video><script>\
+             HTMLMediaElement.prototype.play = function () {\
+               location.href = 'mailto:someone@example.com'; return Promise.resolve();\
+             };</script>",
+        ),
+    );
+    let _ = std::fs::remove_file(&log);
+    let (result, _) = fixture.run(page("https://page.test/mailto")).await;
+    assert!(result.is_err());
+    assert!(
+        !log.exists(),
+        "a desktop handler ran: {:?}",
+        std::fs::read_to_string(&log)
+    );
+    assert_no_chrome_left(&fixture).await;
 }

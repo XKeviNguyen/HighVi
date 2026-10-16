@@ -63,8 +63,9 @@ Extractor-related failures carry a `hint` to update yt-dlp when it is older than
 | What | Limit |
 | --- | --- |
 | yt-dlp metadata | 8 MiB stdout, 60 s |
+| Browser (both modes) | `<profile>/bin` first on Chrome's `PATH`: no-op `xdg-open`, `xdg-email`, `xdg-mime`, `xdg-settings`, `gio`… so links for desktop apps go nowhere; native file chooser intercepted (CDP); downloads denied |
 | Browser discovery | 30 s per page; gives up ~8 s after trying to play; ≤ 48 sessions, ≤ 4 000 tracked requests, ≤ 60 body reads |
-| HighVi browser window | user-started (**Open in HighVi Browser**); waits ≤ 10 min (`JobLimits::interactive_budget`), never gives up early; ends on the first stream that passes, a closed window (`browser_closed`), cancel or the limit (`interactive_timeout`); same flags, proxy, sandbox, profile and limits as headless; environment adds only the display (absolute Wayland socket, or `DISPLAY` + `XAUTHORITY`), a private `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS=disabled:` |
+| HighVi browser window | user-started (**Open in HighVi Browser**); waits ≤ 10 min (`JobLimits::interactive_budget`); new playlists are checked by yt-dlp *while the window stays open* and only a passing one ends it (rejected ones are remembered, body budgets reset); ends otherwise on a closed window (`browser_closed`, only on a clean Chrome exit; a crash or kill is `browser_failed`), cancel or the limit (`interactive_timeout`); never presses play or makes a user gesture; popups and new tabs are attached and watched, detached sessions pruned; same flags, proxy, sandbox, profile and limits as headless; environment adds only the display (absolute Wayland socket, or `DISPLAY` + `XAUTHORITY`), plus a private `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS=disabled:` (a snap gets neither, as headless: snapd needs the session to start it) |
 | Proxy | ≤ 64 tunnels, 8 KiB request head, 10 s head/resolve, 15 s connect, 90 s idle |
 | yt-dlp retries | 3 requests, 5 fragments, 1 extractor |
 | yt-dlp `PATH` | `<job>/bin` with only a link to the real `python3`: no helpers (phantomjs, FFmpeg); JS runtimes off via `--no-js-runtimes` |
