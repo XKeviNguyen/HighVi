@@ -334,6 +334,9 @@ fn launch(run: &BrowserRun<'_>, profile: &Path) -> io::Result<(Child, Cdp)> {
         .env("XDG_CONFIG_HOME", profile.join("config"))
         .env("XDG_CACHE_HOME", profile.join("cache"))
         .args(chrome_args(run, profile));
+    // Chrome also exits when its pipe closes; this covers the gap (a snap's
+    // setuid launcher clears the setting, so both are kept).
+    crate::process::die_with_parent(&mut command);
     // SAFETY: only async-signal-safe calls between fork and exec. The source
     // descriptors are >= 10 (see `pipe_pair`), so neither dup2 can clobber
     // the other's source; dup2 clears close-on-exec on 3 and 4 only.

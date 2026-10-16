@@ -642,11 +642,11 @@ async fn probe(
     recorder: &Mutex<Diagnostics>,
 ) -> Result<MediaInfo, PublicError> {
     let before = stats.counts();
-    let mut command = tool_command(
-        &env.yt_dlp,
-        policy.discovery_args(target),
-        ytdlp_env(job.path()),
-    );
+    let list = job.path().join(crate::ytdlp::SOURCE_LIST);
+    tokio::fs::write(&list, crate::ytdlp::source_list(target))
+        .await
+        .map_err(|_| output_dir_error())?;
+    let mut command = tool_command(&env.yt_dlp, policy.discovery_args(), ytdlp_env(job.path()));
     command.current_dir(job.path());
     let captured = run_captured(
         command,
@@ -655,8 +655,9 @@ async fn probe(
         DISCOVERY_TIMEOUT,
         cancel,
     )
-    .await
-    .map_err(|error| run_error(error, "yt-dlp", "discovery_timeout"))?;
+    .await;
+    let _ = tokio::fs::remove_file(&list).await;
+    let captured = captured.map_err(|error| run_error(error, "yt-dlp", "discovery_timeout"))?;
 
     let signals = signals_from_output(&String::from_utf8_lossy(&captured.stderr.bytes));
     record(recorder, |diagnostics| {

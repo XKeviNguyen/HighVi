@@ -1,7 +1,9 @@
 // Checks the UI catalogue without a browser:
 // - every language has exactly the same keys and {placeholders};
 // - every key used by index.html and app.js exists;
-// - every error code Rust can return has a translation.
+// - every error code Rust can return has a translation;
+// - the READMEs' troubleshooting tables list only real codes, the same
+//   ones in every language.
 // Run from the repository root: node scripts/check-ui.mjs
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -100,10 +102,29 @@ if (codes.size < 10) {
   fail(`found only ${codes.size} Rust error codes; the scan is broken`);
 }
 
+// The READMEs' troubleshooting tables: every code listed must exist in
+// Rust, and the three languages must list the same codes.
+const readmeCodes = {};
+for (const readme of ["README.md", "README.vi.md", "README.ja.md"]) {
+  const listed = new Set();
+  for (const row of readFileSync(readme, "utf8").matchAll(/^\| (`[a-z_]+`(?: \/ `[a-z_]+`)*) \|/gm)) {
+    for (const code of row[1].matchAll(/`([a-z_]+)`/g)) {
+      listed.add(code[1]);
+      if (!codes.has(code[1])) {
+        fail(`${readme} documents ${code[1]}, which Rust no longer returns`);
+      }
+    }
+  }
+  readmeCodes[readme] = [...listed].sort().join(" ");
+}
+if (new Set(Object.values(readmeCodes)).size !== 1) {
+  fail(`README troubleshooting tables differ: ${JSON.stringify(readmeCodes)}`);
+}
+
 if (failures.length) {
   console.error(failures.join("\n"));
   process.exit(1);
 }
 console.log(
-  `ui check ok: ${languages.join("/")} × ${Object.keys(english).length} keys, ${codes.size} Rust error codes`,
+  `ui check ok: ${languages.join("/")} × ${Object.keys(english).length} keys, ${codes.size} Rust error codes, ${readmeCodes["README.md"].split(" ").length} documented`,
 );

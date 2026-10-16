@@ -18,7 +18,9 @@ const JOB_PREFIX: &str = ".highvi-job-";
 const JOB_MARKER: &str = ".highvi-owned-job";
 /// Present in a job directory kept for recovery; cleanup never removes it.
 const KEEP_MARKER: &str = ".highvi-kept";
-const STALE_JOB_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// Long enough to cover a job directory being created and locked; a live
+/// job keeps its marker locked, so its age alone never gets it removed.
+const STALE_JOB_AGE: Duration = Duration::from_secs(10 * 60);
 const MAX_NAME_ATTEMPTS: u32 = 1_000;
 static JOB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -254,6 +256,16 @@ impl Drop for JobDir {
 /// prefix and a regular marker file that no live process holds locked,
 /// untouched for a day, are removed, and symlinks are never followed.
 pub async fn cleanup_stale_jobs(parent: &Path) {
+    // Never through a symlinked or missing output directory: that could
+    // remove directories somewhere else. Only a process running as the
+    // user could swap the folder between this check and the removals, and
+    // such a process can delete these files itself; what is removed is
+    // still limited to unlocked, stale job directories carrying HighVi's
+    // marker.
+    match tokio::fs::symlink_metadata(parent).await {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        _ => return,
+    }
     let Ok(mut entries) = tokio::fs::read_dir(parent).await else {
         return;
     };
@@ -465,6 +477,25 @@ mod tests {
         cleanup_stale_jobs(&parent).await;
         assert!(!crashed.exists());
         fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_cleanup_never_follows_a_symlinked_output_directory() {
+        let elsewhere = temp_directory("elsewhere");
+        let crashed = elsewhere.join(format!("{JOB_PREFIX}1-2-3"));
+        fs::create_dir(&crashed).unwrap();
+        fs::write(crashed.join(JOB_MARKER), b"").unwrap();
+        age(&crashed);
+        let parent = temp_directory("linked");
+        let link = parent.join("HighVi");
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        cleanup_stale_jobs(&link).await;
+        assert!(
+            crashed.exists(),
+            "cleanup followed a symlinked output directory"
+        );
+        fs::remove_dir_all(parent).unwrap();
+        fs::remove_dir_all(elsewhere).unwrap();
     }
 
     #[tokio::test]
