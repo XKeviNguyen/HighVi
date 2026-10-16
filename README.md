@@ -17,6 +17,18 @@
   <p><code>&gt; wake up... the video is waiting_</code></p>
 </div>
 
+<div align="center">
+
+<a href="https://github.com/XKeviNguyen/HighVi/releases/download/v0.1.0/HighVi_0.1.0_amd64.deb"><img src="https://img.shields.io/badge/Download%20HighVi%200.1.0%20(.deb)-00ff41?style=for-the-badge&logo=ubuntu&logoColor=000000&labelColor=00ff41&color=000000" alt="Download HighVi 0.1.0 .deb" /></a>
+
+<sub>Ubuntu 24.04 / 26.04, 64-bit · <a href="https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.0">all files of this release</a> (also an AppImage)</sub>
+
+</div>
+
+```bash
+sudo apt install ./HighVi_0.1.0_amd64.deb    # in the folder you downloaded it to
+```
+
 ## 🟩 What is HighVi?
 
 Lots of videos on the internet aren't one big file. They're chopped into **lots of tiny pieces**, and a small list called a **playlist** (a file ending in `.m3u8`) says where every piece lives. Think of it as a **treasure map**.
@@ -179,12 +191,12 @@ npm run build   # make a .deb and an AppImage
 
 ## 📦 Install, upgrade, remove
 
-There is no published release yet; build the packages yourself (see **Get started**).
+Download the `.deb` (or the AppImage) from the [v0.1.0 release](https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.0), or build the packages yourself (see **Get started**).
 
 **Install the `.deb`** (Ubuntu/Debian; it also installs `yt-dlp` and FFmpeg):
 
 ```bash
-sudo apt install ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+sudo apt install ./HighVi_0.1.0_amd64.deb
 ```
 
 On Ubuntu 24.04, also install a newer `yt-dlp` with pipx (see **Get started**). For pages whose player is built with JavaScript, and for **Open in HighVi Browser**, install Google Chrome or Chromium; Ubuntu's Chromium snap works.
@@ -192,7 +204,7 @@ On Ubuntu 24.04, also install a newer `yt-dlp` with pipx (see **Get started**). 
 **Upgrade** to a newer build: install the new `.deb` the same way. If the version number did not change, add `--reinstall`, or apt keeps the old one:
 
 ```bash
-sudo apt install --reinstall ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+sudo apt install --reinstall ./HighVi_0.1.0_amd64.deb
 ```
 
 **Remove**: `sudo apt remove high-vi`. Your videos in `~/Downloads/HighVi` are kept.
@@ -200,8 +212,8 @@ sudo apt install --reinstall ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
 **AppImage** (needs `yt-dlp` and FFmpeg on your `PATH`):
 
 ```bash
-chmod +x target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
-./target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
+chmod +x HighVi_0.1.0_amd64.AppImage
+./HighVi_0.1.0_amd64.AppImage
 ```
 
 If it complains about FUSE, run it with `APPIMAGE_EXTRACT_AND_RUN=1`.

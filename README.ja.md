@@ -17,6 +17,18 @@
   <p><code>&gt; 目をさませ…… 動画が待っている_</code></p>
 </div>
 
+<div align="center">
+
+<a href="https://github.com/XKeviNguyen/HighVi/releases/download/v0.1.0/HighVi_0.1.0_amd64.deb"><img src="https://img.shields.io/badge/HighVi%200.1.0%20%E3%82%92%E3%83%80%E3%82%A6%E3%83%B3%E3%83%AD%E3%83%BC%E3%83%89%20(.deb)-00ff41?style=for-the-badge&logo=ubuntu&logoColor=000000&labelColor=00ff41&color=000000" alt="Download HighVi 0.1.0 .deb" /></a>
+
+<sub>Ubuntu 24.04 / 26.04、64 ビット · <a href="https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.0">このリリースのすべてのファイル</a>（AppImage もあります）</sub>
+
+</div>
+
+```bash
+sudo apt install ./HighVi_0.1.0_amd64.deb    # ダウンロードしたフォルダーで
+```
+
 ## 🟩 HighVi って なに？
 
 インターネットの動画の多くは、ひとつの大きなファイルではありません。**小さなかけら**にたくさん分かれていて、どのかけらがどこにあるかは **プレイリスト**（`.m3u8` で終わるファイル）という小さなリストに書いてあります。いわば **宝の地図** です。
@@ -179,12 +191,12 @@ npm run build   # .deb と AppImage を作る
 
 ## 📦 インストール・アップグレード・アンインストール
 
-まだ公開されたリリースはありません。自分でパッケージを作ってください（**はじめかた** を見てください）。
+[v0.1.0 のリリース](https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.0) から `.deb`（または AppImage）をダウンロードするか、自分でパッケージを作ってください（**はじめかた** を見てください）。
 
 **`.deb` を入れる**（Ubuntu/Debian。`yt-dlp` と FFmpeg もいっしょに入ります）：
 
 ```bash
-sudo apt install ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+sudo apt install ./HighVi_0.1.0_amd64.deb
 ```
 
 Ubuntu 24.04 では、新しい `yt-dlp` も pipx で入れてください（**はじめかた** を見てください）。JavaScript でプレーヤーを作るページと **HighVi のブラウザーでひらく** のために、Google Chrome か Chromium を入れてください。Ubuntu の snap 版 Chromium でも動きます。
@@ -192,7 +204,7 @@ Ubuntu 24.04 では、新しい `yt-dlp` も pipx で入れてください（**�
 **アップグレード**：新しい `.deb` を同じように入れます。バージョン番号が変わっていないときは `--reinstall` をつけてください。つけないと apt は古いほうをのこします：
 
 ```bash
-sudo apt install --reinstall ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
+sudo apt install --reinstall ./HighVi_0.1.0_amd64.deb
 ```
 
 **アンインストール**：`sudo apt remove high-vi`。`~/Downloads/HighVi` の動画は残ります。
@@ -200,8 +212,8 @@ sudo apt install --reinstall ./target/release/bundle/deb/HighVi_0.1.0_amd64.deb
 **AppImage**（`yt-dlp` と FFmpeg が `PATH` にあること）：
 
 ```bash
-chmod +x target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
-./target/release/bundle/appimage/HighVi_0.1.0_amd64.AppImage
+chmod +x HighVi_0.1.0_amd64.AppImage
+./HighVi_0.1.0_amd64.AppImage
 ```
 
 FUSE のエラーが出るときは `APPIMAGE_EXTRACT_AND_RUN=1` をつけて動かしてください。
