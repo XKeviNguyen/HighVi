@@ -156,8 +156,30 @@ pub struct Captured {
     pub stderr: CappedOutput,
 }
 
-/// A command with no shell, no stdin, a cleared environment (plus `env`), and
-/// its own process group.
+/// Makes the child die with HighVi: after a crash or SIGKILL, a tool must
+/// not keep transferring on its own. Runs between fork and exec. The kernel
+/// ties the signal to the spawning *thread*, so tools are only started from
+/// the runtime's worker threads, never from `spawn_blocking`.
+pub(crate) fn die_with_parent(command: &mut Command) {
+    let parent = libc::pid_t::try_from(std::process::id()).unwrap_or(0);
+    // SAFETY: prctl and getppid are async-signal-safe and touch no memory
+    // shared with the parent.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // HighVi died before the setting took effect.
+            if libc::getppid() != parent {
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            Ok(())
+        });
+    }
+}
+
+/// A command with no shell, no stdin, a cleared environment (plus `env`), its
+/// own process group, and a lifetime tied to HighVi's.
 pub fn tool_command<'a>(
     program: &Path,
     args: impl IntoIterator<Item = impl AsRef<OsStr>>,
@@ -173,6 +195,7 @@ pub fn tool_command<'a>(
         .env_clear()
         .envs(env)
         .args(args);
+    die_with_parent(&mut command);
     command
 }
 
@@ -616,6 +639,48 @@ mod tests {
         assert!(ok);
         lines.sort();
         assert_eq!(lines, ["last", "one", "two"]);
+    }
+
+    #[test]
+    fn a_tool_dies_with_the_thread_that_started_it() {
+        // HighVi's death is the same signal as its spawning thread's: the
+        // kernel sends SIGKILL to the child.
+        let pid = std::thread::spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let mut command = tool_command(
+                    Path::new("/bin/sleep"),
+                    ["30"],
+                    Vec::<(&str, std::ffi::OsString)>::new(),
+                );
+                command.kill_on_drop(false);
+                command.spawn().unwrap().id().unwrap()
+            })
+        })
+        .join()
+        .unwrap();
+        let alive = || {
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+                !stat
+                    .rsplit(')')
+                    .next()
+                    .unwrap_or("")
+                    .trim_start()
+                    .starts_with('Z')
+            })
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while alive() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if alive() {
+            // SAFETY: plain kill of the child this test started.
+            unsafe { libc::kill(libc::pid_t::try_from(pid).unwrap(), libc::SIGKILL) };
+            panic!("the tool outlived the thread that started it");
+        }
     }
 
     #[tokio::test]

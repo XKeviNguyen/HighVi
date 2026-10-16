@@ -256,6 +256,12 @@ impl Drop for JobDir {
 /// prefix and a regular marker file that no live process holds locked,
 /// untouched for a day, are removed, and symlinks are never followed.
 pub async fn cleanup_stale_jobs(parent: &Path) {
+    // Never through a symlinked or missing output directory: that could
+    // remove directories somewhere else.
+    match tokio::fs::symlink_metadata(parent).await {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        _ => return,
+    }
     let Ok(mut entries) = tokio::fs::read_dir(parent).await else {
         return;
     };
@@ -467,6 +473,25 @@ mod tests {
         cleanup_stale_jobs(&parent).await;
         assert!(!crashed.exists());
         fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_cleanup_never_follows_a_symlinked_output_directory() {
+        let elsewhere = temp_directory("elsewhere");
+        let crashed = elsewhere.join(format!("{JOB_PREFIX}1-2-3"));
+        fs::create_dir(&crashed).unwrap();
+        fs::write(crashed.join(JOB_MARKER), b"").unwrap();
+        age(&crashed);
+        let parent = temp_directory("linked");
+        let link = parent.join("HighVi");
+        std::os::unix::fs::symlink(&elsewhere, &link).unwrap();
+        cleanup_stale_jobs(&link).await;
+        assert!(
+            crashed.exists(),
+            "cleanup followed a symlinked output directory"
+        );
+        fs::remove_dir_all(parent).unwrap();
+        fs::remove_dir_all(elsewhere).unwrap();
     }
 
     #[tokio::test]
