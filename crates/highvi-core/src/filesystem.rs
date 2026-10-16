@@ -18,7 +18,9 @@ const JOB_PREFIX: &str = ".highvi-job-";
 const JOB_MARKER: &str = ".highvi-owned-job";
 /// Present in a job directory kept for recovery; cleanup never removes it.
 const KEEP_MARKER: &str = ".highvi-kept";
-const STALE_JOB_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+/// Long enough to cover a job directory being created and locked; a live
+/// job keeps its marker locked, so its age alone never gets it removed.
+const STALE_JOB_AGE: Duration = Duration::from_secs(10 * 60);
 const MAX_NAME_ATTEMPTS: u32 = 1_000;
 static JOB_COUNTER: AtomicU64 = AtomicU64::new(0);
 

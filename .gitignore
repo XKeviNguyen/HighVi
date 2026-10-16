@@ -16,3 +16,5 @@ cookies.txt
 *.cookies
 .netrc
 /.ledger/
+*.info.json
+.highvi-job-*/

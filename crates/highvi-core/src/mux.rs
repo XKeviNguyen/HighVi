@@ -96,6 +96,12 @@ pub fn mux_args(video: &MuxInput, audio: Option<&MuxInput>, output: &Path) -> Ve
         audio_map,
         "-c",
         "copy",
+        // Tags and chapters in a source file (comments, per-user
+        // watermarks, URLs) are not carried into the saved video.
+        "-map_metadata",
+        "-1",
+        "-map_chapters",
+        "-1",
         "-movflags",
         "+faststart",
         "-f",

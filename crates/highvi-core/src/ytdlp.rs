@@ -18,6 +18,10 @@ use url::Url;
 
 /// File names inside the job directory.
 pub const INFO_JSON: &str = "info.json";
+/// Holds the one URL a metadata run reads (`--batch-file`), inside the
+/// private job directory: a URL in the arguments would be readable by any
+/// local user through `/proc/<pid>/cmdline`, signed tokens included.
+pub const SOURCE_LIST: &str = "source.txt";
 /// The directory that is yt-dlp's entire `PATH`.
 pub const TOOL_BIN: &str = "bin";
 /// Never created. Pointing `--ffmpeg-location` here disables FFmpeg in yt-dlp.
@@ -59,6 +63,11 @@ pub const YT_DLP_HERMETIC_ARGS: &[&str] = &[
     "never",
 ];
 
+/// The contents of [`SOURCE_LIST`] for `target`.
+pub fn source_list(target: &Url) -> String {
+    format!("{target}\n")
+}
+
 /// Settings shared by every yt-dlp run of one job.
 pub struct YtDlpPolicy<'a> {
     pub proxy_url: &'a str,
@@ -99,15 +108,16 @@ impl YtDlpPolicy<'_> {
         args
     }
 
-    /// Metadata-only run. The URL follows `--` so it is never an option.
-    pub fn discovery_args(&self, target: &Url) -> Vec<OsString> {
+    /// Metadata-only run. The URL is read from [`SOURCE_LIST`] in the
+    /// working directory (see [`source_list`]), never from the arguments,
+    /// so it can neither be read by other users nor parsed as an option.
+    pub fn discovery_args(&self) -> Vec<OsString> {
         let mut args = self.base_args();
         push_all(
             &mut args,
             &["--dump-single-json", "--no-playlist", "--skip-download"],
         );
-        args.push("--".into());
-        args.push(target.as_str().into());
+        args.push(format!("--batch-file={SOURCE_LIST}").into());
         args
     }
 
@@ -199,9 +209,8 @@ mod tests {
 
     #[test]
     fn every_run_is_hermetic_proxied_and_has_no_ffmpeg() {
-        let target = Url::parse("https://site.example/w").unwrap();
         for args in [
-            strings(&policy(None).discovery_args(&target)),
+            strings(&policy(None).discovery_args()),
             strings(&policy(None).download_args("hls-1", "video")),
         ] {
             assert_eq!(&args[..YT_DLP_HERMETIC_ARGS.len()], YT_DLP_HERMETIC_ARGS);
@@ -227,24 +236,31 @@ mod tests {
     }
 
     #[test]
-    fn url_is_the_last_argument_after_a_separator() {
-        let target = Url::parse("https://site.example/-watch?q=--exec").unwrap();
-        let args = strings(&policy(Some("https://site.example/")).discovery_args(&target));
-        assert_eq!(&args[args.len() - 2..], ["--", target.as_str()]);
+    fn the_url_is_read_from_a_file_never_from_the_arguments() {
+        let target = Url::parse("https://site.example/-watch?token=s3cret&q=--exec").unwrap();
+        let args = strings(&policy(Some("https://site.example/")).discovery_args());
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg.contains("s3cret") || arg.contains("-watch"))
+        );
+        assert_eq!(args.last().unwrap(), &format!("--batch-file={SOURCE_LIST}"));
+        // One line: yt-dlp treats lines starting with #, ; or ] as comments,
+        // and a parsed URL always starts with its scheme.
+        assert_eq!(source_list(&target), format!("{target}\n"));
     }
 
     #[test]
     fn referer_is_one_header_argument() {
-        let target = Url::parse("https://cdn.example/a.m3u8").unwrap();
         let policy = policy(Some("https://site.example/"));
         for args in [
-            strings(&policy.discovery_args(&target)),
+            strings(&policy.discovery_args()),
             strings(&policy.download_args("hls-1", "video")),
         ] {
             let index = args.iter().position(|arg| arg == "--add-headers").unwrap();
             assert_eq!(args[index + 1], "Referer:https://site.example/");
         }
-        let none = strings(&self::policy(None).discovery_args(&target));
+        let none = strings(&self::policy(None).discovery_args());
         assert!(!none.iter().any(|arg| arg == "--add-headers"));
     }
 

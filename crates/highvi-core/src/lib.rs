@@ -29,7 +29,7 @@ pub use browser::find_browser;
 pub use classify::{ToolSignals, classify_tool_failure};
 pub use diagnostics::Diagnostics;
 pub use error::{Hint, PublicError};
-pub use filesystem::prepare_output_dir;
+pub use filesystem::{cleanup_stale_jobs, prepare_output_dir};
 pub use job::{
     JobEnvironment, JobLimits, JobOutcome, JobUpdate, MAX_BROWSERS, MAX_MUXES, SharedResources,
     Stage, find_executable, run_job,

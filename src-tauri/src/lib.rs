@@ -1,8 +1,8 @@
 use highvi_core::{
     AddReport, JobEnvironment, MINIMUM_YT_DLP, ProgressEvent, PublicError, QueueEvents,
     QueueSnapshot, RECOMMENDED_YT_DLP, Report, Runner, Scheduler, SharedResources, SourceRequest,
-    YtDlpVersion, find_browser, find_executable, prepare_output_dir, resolve_python, run_job,
-    yt_dlp_version,
+    YtDlpVersion, cleanup_stale_jobs, find_browser, find_executable, prepare_output_dir,
+    resolve_python, run_job, yt_dlp_version,
 };
 use serde::Serialize;
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -277,6 +277,11 @@ pub fn run() {
                 Arc::new(WebviewEvents(handle.clone())),
             );
             app.manage(AppState { queue });
+            // Job directories left by a crash (they can hold media URLs)
+            // are removed at start, not only when the next job starts.
+            if let Ok(directory) = output_dir(&handle) {
+                tauri::async_runtime::spawn(async move { cleanup_stale_jobs(&directory).await });
+            }
             exit_on_termination_signals(handle);
             Ok(())
         })

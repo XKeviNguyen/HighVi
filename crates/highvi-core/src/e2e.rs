@@ -1723,7 +1723,14 @@ async fn yt_dlp_cannot_see_helper_programs() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("[debug] exe versions: none"), "{stderr}");
     assert!(stderr.contains("JS runtimes: none"), "{stderr}");
-    assert!(stderr.contains("Unable to connect to proxy"), "{stderr}");
+    // It tried the proxy (nothing listens there). The wording depends on
+    // yt-dlp's HTTP handler: `requests` (yt-dlp[default]) or plain urllib.
+    assert!(
+        stderr.contains("Unable to connect to proxy")
+            || (stderr.contains("Request Handlers: urllib")
+                && stderr.contains("Connection refused")),
+        "{stderr}"
+    );
     let _ = std::fs::remove_dir_all(&job);
 }
 
@@ -2491,5 +2498,141 @@ async fn an_imitated_usage_error_does_not_mean_too_old() {
     let error = result.unwrap_err();
     assert_ne!(error.code, "ytdlp_too_old");
     fixture.assert_no_job_dirs();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A signed URL never appears in yt-dlp's arguments, where any local user
+/// could read it through /proc: yt-dlp reads it from a file in the private
+/// job directory, which is removed again.
+#[tokio::test]
+async fn a_signed_url_is_never_in_yt_dlp_arguments() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let directory = temp_directory("argv-ytdlp");
+    let log = directory.join("seen");
+    let fake = directory.join("yt-dlp");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\n\
+             for arg in \"$@\"; do [ \"$arg\" = --version ] && {{ echo 2026.09.01; exit 0; }}; done\n\
+             IFS= read -r list < source.txt\n\
+             {{ echo \"ARGS $*\"; echo \"LIST $list\"; }} >> '{}'\n\
+             exit 1\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut environment = fixture.environment();
+    environment.yt_dlp = fake;
+    let (result, _) = fixture
+        .run_with(
+            &environment,
+            direct("https://media.test/muxed/master.m3u8?token=s3cr3t-sig"),
+            None,
+        )
+        .await;
+    assert!(result.is_err());
+    let seen = std::fs::read_to_string(&log).unwrap();
+    let args: Vec<&str> = seen
+        .lines()
+        .filter(|line| line.starts_with("ARGS "))
+        .collect();
+    assert!(!args.is_empty(), "{seen}");
+    for line in &args {
+        assert!(
+            !line.contains("s3cr3t") && !line.contains("media.test"),
+            "{line}"
+        );
+        assert!(line.contains("--batch-file=source.txt"), "{line}");
+    }
+    assert!(
+        seen.contains("LIST https://media.test/muxed/master.m3u8?token=s3cr3t-sig"),
+        "{seen}"
+    );
+    fixture.assert_no_job_dirs();
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// Tags and chapters inside a downloaded file (a comment, a per-user
+/// watermark, a URL) are not copied into the saved video.
+#[tokio::test]
+async fn source_tags_and_chapters_are_not_saved() {
+    let Some(tools) = tools() else {
+        return;
+    };
+    let directory = temp_directory("mux-tags");
+    let source = directory.join("in.mp4");
+    let chapters = directory.join("chapters.txt");
+    std::fs::write(
+        &chapters,
+        ";FFMETADATA1\ncomment=tok=SECRET\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=500\ntitle=https://cdn.example/?sig=SECRET\n",
+    )
+    .unwrap();
+    let made = std::process::Command::new(&tools.ffmpeg)
+        .args([
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=10:duration=1",
+        ])
+        .args(["-f", "lavfi", "-i", "sine=duration=1"])
+        .arg("-i")
+        .arg(&chapters)
+        .args([
+            "-map",
+            "0",
+            "-map",
+            "1",
+            "-map_metadata",
+            "2",
+            "-map_chapters",
+            "2",
+        ])
+        .args([
+            "-c:v",
+            "libx264",
+            "-c:a",
+            "aac",
+            "-metadata",
+            "description=sig=SECRET",
+        ])
+        .arg(&source)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    let tagged = |path: &std::path::Path| {
+        let out = std::process::Command::new(&tools.ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "format_tags:chapter_tags",
+                "-of",
+                "default",
+            ])
+            .arg(path)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).contains("SECRET")
+    };
+    assert!(tagged(&source), "the fixture must carry the tags");
+    let output = directory.join("out.mp4");
+    let input = crate::mux::MuxInput {
+        path: &source,
+        container: crate::mux::Container::Mp4,
+    };
+    let muxed = std::process::Command::new(&tools.ffmpeg)
+        .args(crate::mux::mux_args(&input, None, &output))
+        .status()
+        .unwrap();
+    assert!(muxed.success());
+    assert!(!tagged(&output), "source tags reached the saved video");
     let _ = std::fs::remove_dir_all(&directory);
 }
