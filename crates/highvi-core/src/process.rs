@@ -5,15 +5,19 @@
 //! the group ID cannot be reused while it is being signalled.
 
 use crate::{CappedOutput, read_capped};
-use std::{ffi::OsStr, path::Path, process::Stdio, time::Duration};
+use std::{collections::VecDeque, ffi::OsStr, path::Path, process::Stdio, time::Duration};
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::{Child, Command},
     sync::{mpsc, watch},
-    time::timeout,
+    time::{Instant, MissedTickBehavior, interval, timeout},
 };
 
 const MAX_LINE_BYTES: usize = 16 * 1024;
+const WATCH_TICK: Duration = Duration::from_secs(1);
+/// Progress samples closer together than this are merged, which bounds the
+/// sample buffer to `window / MIN_SAMPLE_GAP` entries.
+const MIN_SAMPLE_GAP: Duration = Duration::from_millis(250);
 
 /// Requests cancellation of the job that holds the matching [`CancelToken`].
 #[derive(Debug)]
@@ -54,6 +58,96 @@ pub enum RunError {
     Io,
     TimedOut,
     Cancelled,
+    /// Progress stayed below the stall policy's minimum for its window.
+    Stalled,
+    /// The disk's free space fell below the floor.
+    NoSpace,
+}
+
+/// When a transfer counts as stalled: fewer than `min_bytes` of progress in
+/// any `window`. A rate floor, not a silence timer, so a server that sends a
+/// byte every few seconds cannot hold a job forever, while a slow but steady
+/// one is never cut off.
+#[derive(Clone, Copy, Debug)]
+pub struct StallPolicy {
+    pub window: Duration,
+    pub min_bytes: u64,
+}
+
+/// What [`run_streaming`] watches besides the process itself.
+pub struct Watch<'a> {
+    /// Hard limit for the whole run.
+    pub deadline: Duration,
+    pub stall: Option<StallPolicy>,
+    /// Stop when `free()` reports fewer than `floor` bytes.
+    pub disk: Option<DiskFloor<'a>>,
+}
+
+pub struct DiskFloor<'a> {
+    pub free: &'a (dyn Fn() -> Option<u64> + Send + Sync),
+    pub floor: u64,
+}
+
+/// Progress over a sliding window.
+struct Meter {
+    policy: StallPolicy,
+    started: Instant,
+    /// `(when, cumulative bytes)`, oldest first; at most one sample is older
+    /// than the window (the baseline).
+    samples: VecDeque<(Instant, u64)>,
+    /// The tool's last reported counter, and what earlier counters reached
+    /// before it restarted (yt-dlp restarts a transfer the server would not
+    /// resume): bytes moved again are still bytes moved.
+    reported: u64,
+    carried: u64,
+}
+
+impl Meter {
+    fn new(policy: StallPolicy, started: Instant) -> Self {
+        Self {
+            policy,
+            started,
+            samples: VecDeque::new(),
+            reported: 0,
+            carried: 0,
+        }
+    }
+
+    fn observe(&mut self, at: Instant, reported: u64) {
+        if reported < self.reported {
+            self.carried = self.carried.saturating_add(self.reported);
+        }
+        self.reported = reported;
+        let bytes = self.carried.saturating_add(reported);
+        match self.samples.back_mut() {
+            Some((_, last)) if bytes <= *last => return,
+            Some((last_at, last)) if at.duration_since(*last_at) < MIN_SAMPLE_GAP => {
+                *last = bytes;
+            }
+            _ => self.samples.push_back((at, bytes)),
+        }
+        let horizon = at.checked_sub(self.policy.window);
+        while let (Some(horizon), Some((second, _))) = (horizon, self.samples.get(1))
+            && *second <= horizon
+        {
+            self.samples.pop_front();
+        }
+    }
+
+    fn stalled(&self, now: Instant) -> bool {
+        if now.duration_since(self.started) < self.policy.window {
+            return false;
+        }
+        let current = self.samples.back().map_or(0, |(_, bytes)| *bytes);
+        let horizon = now - self.policy.window;
+        let baseline = self
+            .samples
+            .iter()
+            .rev()
+            .find(|(at, _)| *at <= horizon)
+            .map_or(0, |(_, bytes)| *bytes);
+        current.saturating_sub(baseline) < self.policy.min_bytes
+    }
 }
 
 pub struct Captured {
@@ -128,28 +222,34 @@ pub async fn run_captured(
 }
 
 /// Runs to completion, passing each stdout/stderr line (lossily decoded,
-/// oversized lines dropped) to `on_line`. Returns whether it exited with 0.
+/// oversized lines dropped) to `on_line`, which returns the cumulative
+/// progress in bytes when the line reports any. Returns whether the tool
+/// exited with 0; the watch can end the run early, killing its group.
 pub async fn run_streaming(
     mut command: Command,
-    limit: Option<Duration>,
+    watch: Watch<'_>,
     cancel: &mut CancelToken,
-    mut on_line: impl FnMut(&str),
+    mut on_line: impl FnMut(&str, Stream) -> Option<u64>,
 ) -> Result<bool, RunError> {
     let mut child = command.spawn().map_err(RunError::Spawn)?;
     let stdout = child.stdout.take().ok_or(RunError::Io)?;
     let stderr = child.stderr.take().ok_or(RunError::Io)?;
+    let started = Instant::now();
+    let (progress_sender, progress) = watch::channel(0_u64);
 
     let outcome = {
-        let (sender, mut receiver) = mpsc::channel::<String>(256);
+        let (sender, mut receiver) = mpsc::channel::<(Stream, String)>(256);
         let readers = async {
             tokio::join!(
-                read_lines(stdout, sender.clone()),
-                read_lines(stderr, sender)
+                read_lines(stdout, Stream::Stdout, sender.clone()),
+                read_lines(stderr, Stream::Stderr, sender)
             )
         };
         let consumer = async {
-            while let Some(line) = receiver.recv().await {
-                on_line(&line);
+            while let Some((stream, line)) = receiver.recv().await {
+                if let Some(bytes) = on_line(&line, stream) {
+                    progress_sender.send_replace(bytes);
+                }
             }
         };
         let work = async {
@@ -162,31 +262,73 @@ pub async fn run_streaming(
             );
             status
         };
-        let work = async {
-            match limit {
-                Some(limit) => timeout(limit, work).await.ok(),
-                None => Some(work.await),
-            }
-        };
         tokio::select! {
-            result = work => Some(result),
-            () = cancel.cancelled() => None,
+            result = timeout(watch.deadline, work) => result.map_err(|_| RunError::TimedOut),
+            error = watchdog(&watch, started, progress) => Err(error),
+            () = cancel.cancelled() => Err(RunError::Cancelled),
         }
     };
     match outcome {
-        None => {
+        Ok(status) => Ok(status.map_err(|_| RunError::Io)?.success()),
+        Err(error) => {
             kill_group(&mut child).await;
-            Err(RunError::Cancelled)
+            Err(error)
         }
-        Some(None) => {
-            kill_group(&mut child).await;
-            Err(RunError::TimedOut)
-        }
-        Some(Some(status)) => Ok(status.map_err(|_| RunError::Io)?.success()),
     }
 }
 
-async fn read_lines<R: AsyncRead + Unpin>(mut reader: R, sender: mpsc::Sender<String>) {
+/// Resolves with the reason to stop, if the stall policy or the disk floor
+/// is ever violated; otherwise never.
+async fn watchdog(
+    watch: &Watch<'_>,
+    started: Instant,
+    mut progress: watch::Receiver<u64>,
+) -> RunError {
+    if watch.stall.is_none() && watch.disk.is_none() {
+        return std::future::pending().await;
+    }
+    let mut meter = watch.stall.map(|policy| Meter::new(policy, started));
+    let mut tick = interval(WATCH_TICK);
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let mut progress_open = true;
+    loop {
+        tokio::select! {
+            changed = progress.changed(), if progress_open => match changed {
+                Ok(()) => {
+                    let bytes = *progress.borrow_and_update();
+                    if let Some(meter) = meter.as_mut() {
+                        meter.observe(Instant::now(), bytes);
+                    }
+                }
+                Err(_) => progress_open = false,
+            },
+            _ = tick.tick() => {
+                if meter.as_ref().is_some_and(|meter| meter.stalled(Instant::now())) {
+                    return RunError::Stalled;
+                }
+                if let Some(disk) = &watch.disk
+                    && (disk.free)().is_some_and(|free| free < disk.floor)
+                {
+                    return RunError::NoSpace;
+                }
+            }
+        }
+    }
+}
+
+/// Which output a line came from: progress is trusted only from stdout,
+/// where yt-dlp's progress template writes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Stream {
+    Stdout,
+    Stderr,
+}
+
+async fn read_lines<R: AsyncRead + Unpin>(
+    mut reader: R,
+    stream: Stream,
+    sender: mpsc::Sender<(Stream, String)>,
+) {
     let mut chunk = vec![0_u8; 8 * 1024];
     let mut line = Vec::with_capacity(512);
     let mut oversized = false;
@@ -197,7 +339,7 @@ async fn read_lines<R: AsyncRead + Unpin>(mut reader: R, sender: mpsc::Sender<St
         };
         for byte in &chunk[..read] {
             if *byte == b'\n' {
-                if !oversized && sender.send(decode(&line)).await.is_err() {
+                if !oversized && sender.send((stream, decode(&line))).await.is_err() {
                     return;
                 }
                 line.clear();
@@ -213,7 +355,7 @@ async fn read_lines<R: AsyncRead + Unpin>(mut reader: R, sender: mpsc::Sender<St
         }
     }
     if !line.is_empty() && !oversized {
-        let _ = sender.send(decode(&line)).await;
+        let _ = sender.send((stream, decode(&line))).await;
     }
 }
 
@@ -243,6 +385,211 @@ mod tests {
     use super::*;
     use std::time::Instant;
 
+    fn limited(deadline: Duration) -> Watch<'static> {
+        Watch {
+            deadline,
+            stall: None,
+            disk: None,
+        }
+    }
+
+    /// Emits `bytes` cumulative progress every `period`, `count` times.
+    fn progress_script(period: &str, step: u64, count: u32) -> String {
+        format!(
+            "i=0; while [ $i -lt {count} ]; do i=$((i+1)); echo P$((i*{step})); sleep {period}; done"
+        )
+    }
+
+    fn parse(line: &str) -> Option<u64> {
+        line.strip_prefix('P')?.parse().ok()
+    }
+
+    fn stall(window_ms: u64, min_bytes: u64) -> Option<StallPolicy> {
+        Some(StallPolicy {
+            window: Duration::from_millis(window_ms),
+            min_bytes,
+        })
+    }
+
+    #[tokio::test]
+    async fn a_silent_tool_is_stopped_as_stalled_and_its_group_killed() {
+        let (_handle, mut token) = cancel_pair();
+        let marker = std::env::temp_dir().join(format!("highvi-stall-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let script = format!("(sleep 5; touch '{}') & sleep 30", marker.display());
+        let started = std::time::Instant::now();
+        let result = run_streaming(
+            sh(&script),
+            Watch {
+                deadline: Duration::from_secs(60),
+                stall: stall(1_500, 1),
+                disk: None,
+            },
+            &mut token,
+            |line, _| parse(line),
+        )
+        .await;
+        assert!(matches!(result, Err(RunError::Stalled)), "{result:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "{:?}",
+            started.elapsed()
+        );
+        tokio::time::sleep(
+            Duration::from_millis(5_500) - started.elapsed().min(Duration::from_millis(5_500)),
+        )
+        .await;
+        assert!(!marker.exists(), "a grandchild survived the stall kill");
+    }
+
+    #[tokio::test]
+    async fn a_trickle_below_the_rate_floor_is_a_stall() {
+        let (_handle, mut token) = cancel_pair();
+        // 10 bytes every 0.2 s keeps "making progress", but far below
+        // 1 000 bytes per 1.5 s.
+        let result = run_streaming(
+            sh(&progress_script("0.2", 10, 100)),
+            Watch {
+                deadline: Duration::from_secs(60),
+                stall: stall(1_500, 1_000),
+                disk: None,
+            },
+            &mut token,
+            |line, _| parse(line),
+        )
+        .await;
+        assert!(matches!(result, Err(RunError::Stalled)), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn a_slow_but_steady_transfer_and_chatty_output_are_not_stalls() {
+        let (_handle, mut token) = cancel_pair();
+        // 400 bytes every 0.2 s = 3 000 per 1.5 s, above the floor, for 4 s.
+        let ok = run_streaming(
+            sh(&progress_script("0.2", 400, 20)),
+            Watch {
+                deadline: Duration::from_secs(60),
+                stall: stall(1_500, 1_000),
+                disk: None,
+            },
+            &mut token,
+            |line, _| parse(line),
+        )
+        .await
+        .unwrap();
+        assert!(ok);
+        // Lines that are not progress do not count as progress.
+        let result = run_streaming(
+            sh("while true; do echo 'WARNING: retrying'; sleep 0.1; done"),
+            Watch {
+                deadline: Duration::from_secs(60),
+                stall: stall(1_500, 1),
+                disk: None,
+            },
+            &mut token,
+            |line, _| parse(line),
+        )
+        .await;
+        assert!(matches!(result, Err(RunError::Stalled)), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn progress_on_stderr_does_not_count() {
+        let (_handle, mut token) = cancel_pair();
+        let script = format!("({}) 1>&2", progress_script("0.1", 100_000, 100));
+        let result = run_streaming(
+            sh(&script),
+            Watch {
+                deadline: Duration::from_secs(60),
+                stall: stall(1_500, 1),
+                disk: None,
+            },
+            &mut token,
+            |line, stream| (stream == Stream::Stdout).then(|| parse(line)).flatten(),
+        )
+        .await;
+        assert!(matches!(result, Err(RunError::Stalled)), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn the_deadline_and_the_disk_floor_stop_a_run() {
+        let (_handle, mut token) = cancel_pair();
+        let result = run_streaming(
+            sh(&progress_script("0.1", 1_000_000, 1_000)),
+            Watch {
+                deadline: Duration::from_millis(1_500),
+                stall: stall(60_000, 1),
+                disk: None,
+            },
+            &mut token,
+            |line, _| parse(line),
+        )
+        .await;
+        assert!(matches!(result, Err(RunError::TimedOut)), "{result:?}");
+
+        let free = std::sync::atomic::AtomicU64::new(10_000);
+        let probe = || Some(free.load(std::sync::atomic::Ordering::SeqCst));
+        let run = run_streaming(
+            sh(&progress_script("0.1", 1_000, 1_000)),
+            Watch {
+                deadline: Duration::from_secs(60),
+                stall: None,
+                disk: Some(DiskFloor {
+                    free: &probe,
+                    floor: 5_000,
+                }),
+            },
+            &mut token,
+            |line, _| {
+                let bytes = parse(line)?;
+                free.store(
+                    10_000u64.saturating_sub(bytes),
+                    std::sync::atomic::Ordering::SeqCst,
+                );
+                Some(bytes)
+            },
+        );
+        let result = run.await;
+        assert!(matches!(result, Err(RunError::NoSpace)), "{result:?}");
+    }
+
+    #[test]
+    fn the_meter_keeps_a_bounded_window() {
+        let start = tokio::time::Instant::now();
+        let mut meter = Meter::new(
+            StallPolicy {
+                window: Duration::from_secs(10),
+                min_bytes: 100,
+            },
+            start,
+        );
+        for step in 0..10_000_u64 {
+            meter.observe(start + Duration::from_millis(step * 10), step * 1_000);
+        }
+        // 100 s of samples every 10 ms: merged to >= 250 ms apart and pruned
+        // to the last 10 s (plus one baseline).
+        assert!(meter.samples.len() <= 42, "{}", meter.samples.len());
+        let now = start + Duration::from_millis(99_990);
+        assert!(!meter.stalled(now));
+        assert!(meter.stalled(now + Duration::from_secs(11)));
+        // A restarted counter (the transfer began again) keeps counting:
+        // new bytes after the restart are progress, not a stall.
+        let restarted = now + Duration::from_secs(11);
+        meter.observe(restarted, 5);
+        for step in 1..=50_u64 {
+            meter.observe(
+                restarted + Duration::from_millis(step * 300),
+                5 + step * 1_000,
+            );
+        }
+        let later = restarted + Duration::from_secs(15);
+        assert!(
+            !meter.stalled(later),
+            "transfer after a restart looked stalled"
+        );
+        assert!(meter.stalled(later + Duration::from_secs(11)));
+    }
+
     fn sh(script: &str) -> Command {
         tool_command(
             Path::new("/bin/sh"),
@@ -257,9 +604,12 @@ mod tests {
         let mut lines = Vec::new();
         let ok = run_streaming(
             sh("echo one; echo two >&2; head -c 20000 /dev/zero | tr '\\0' x; echo; printf 'last\\r'"),
-            Some(Duration::from_secs(10)),
+            limited(Duration::from_secs(10)),
             &mut token,
-            |line| lines.push(line.to_string()),
+            |line, _| {
+                lines.push(line.to_string());
+                None
+            },
         )
         .await
         .unwrap();
@@ -278,11 +628,17 @@ mod tests {
             marker.display()
         );
         let started = Instant::now();
-        let run = run_streaming(sh(&script), None, &mut token, |line| {
-            if line == "started" {
-                handle.cancel();
-            }
-        });
+        let run = run_streaming(
+            sh(&script),
+            limited(Duration::from_secs(60)),
+            &mut token,
+            |line, _| {
+                if line == "started" {
+                    handle.cancel();
+                }
+                None
+            },
+        );
         assert!(matches!(run.await, Err(RunError::Cancelled)));
         assert!(started.elapsed() < Duration::from_secs(2));
         tokio::time::sleep(Duration::from_millis(2500)).await;

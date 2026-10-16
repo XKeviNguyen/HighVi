@@ -11,18 +11,22 @@ use crate::{
     diagnostics::Diagnostics,
     egress::{EgressProxy, EgressStats, RefusalCounts, Resolver},
     filesystem::{
-        JobDir, cleanup_stale_jobs, output_dir_error, prepare_output_dir, publish_unique,
+        DiskBudget, JobDir, Reservation, cleanup_stale_jobs, free_bytes, output_dir_error,
+        prepare_output_dir, publish_unique,
     },
     formats::{MediaInfo, select_media},
     mux::{MuxInput, SNIFF_BYTES, mux_args, sniff},
-    process::{CancelToken, RunError, run_captured, run_streaming, tool_command},
+    process::{
+        CancelToken, DiskFloor, RunError, StallPolicy, Stream, Watch, run_captured, run_streaming,
+        tool_command,
+    },
     tools::{extractor_related, resolve_python, today, update_advice},
     ytdlp::{INFO_JSON, YtDlpPolicy, prepare_tool_path, ytdlp_env},
 };
 use serde::Serialize;
 use std::{
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::io::AsyncReadExt;
@@ -32,6 +36,38 @@ const MAX_DIAGNOSTIC_BYTES: usize = 256 * 1024;
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 const MUX_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const OUTPUT_FILE: &str = "output.mp4";
+const MIB: u64 = 1024 * 1024;
+/// 16 TiB: no single track is larger.
+const MAX_PROGRESS_BYTES: u64 = 16 * 1024 * 1024 * MIB;
+
+/// Limits on one job's transfers and disk use.
+#[derive(Clone, Copy, Debug)]
+pub struct JobLimits {
+    /// A track download that makes less progress than this is stopped.
+    pub stall: StallPolicy,
+    /// Longest a single track download may run.
+    pub track_deadline: Duration,
+    /// Free space the disk keeps while HighVi writes; a download stops
+    /// rather than fill it.
+    pub disk_floor: u64,
+}
+
+impl Default for JobLimits {
+    fn default() -> Self {
+        Self {
+            // 64 KiB in 2 minutes (≈ 0.5 KB/s): far below any usable
+            // connection, far above a server trickling bytes to hold a job.
+            stall: StallPolicy {
+                window: Duration::from_secs(120),
+                min_bytes: 64 * 1024,
+            },
+            // The stall policy is what catches stuck transfers; this only
+            // bounds a job that keeps crawling (about 20 GB at 0.25 MB/s).
+            track_deadline: Duration::from_secs(24 * 60 * 60),
+            disk_floor: 512 * MIB,
+        }
+    }
+}
 
 /// What a job needs from the machine it runs on.
 pub struct JobEnvironment {
@@ -44,8 +80,13 @@ pub struct JobEnvironment {
     pub python: Option<PathBuf>,
     /// The fixed output directory, e.g. `~/Downloads/HighVi`.
     pub output_dir: PathBuf,
+    pub limits: JobLimits,
+    /// Shared by every job that writes to `output_dir`.
+    pub disk: Arc<DiskBudget>,
     #[cfg(test)]
     pub(crate) fixture: Option<Resolver>,
+    #[cfg(test)]
+    pub(crate) free_space: Option<Arc<dyn Fn() -> Option<u64> + Send + Sync>>,
 }
 
 impl JobEnvironment {
@@ -61,9 +102,22 @@ impl JobEnvironment {
             chrome,
             python: find_executable("python3"),
             output_dir,
+            limits: JobLimits::default(),
+            disk: Arc::default(),
             #[cfg(test)]
             fixture: None,
+            #[cfg(test)]
+            free_space: None,
         }
+    }
+
+    /// Free bytes in the output directory's filesystem, if known.
+    fn free_space(&self) -> Option<u64> {
+        #[cfg(test)]
+        if let Some(free_space) = &self.free_space {
+            return free_space();
+        }
+        free_bytes(&self.output_dir)
     }
 
     fn resolver(&self) -> Resolver {
@@ -216,7 +270,7 @@ async fn run(
     let tunnels = proxy.stats().tunnels();
     record(recorder, |diagnostics| diagnostics.egress(tunnels, refused));
     drop(proxy);
-    let media = result?;
+    let (media, _reservation) = result?;
     // The info JSON holds the media URLs, which may be signed; nothing after
     // this point needs it, and a kept recovery directory must not hold it.
     let _ = tokio::fs::remove_file(job.path().join(INFO_JSON)).await;
@@ -274,7 +328,7 @@ async fn fetch(
     cancel: &mut CancelToken,
     report: &(dyn Fn(JobUpdate) + Send + Sync),
     recorder: &Mutex<Diagnostics>,
-) -> Result<MediaInfo, PublicError> {
+) -> Result<(MediaInfo, Reservation), PublicError> {
     let proxy_url = proxy.url();
     let discovered = Box::pin(discover(env, job, proxy, source, cancel, report, recorder)).await?;
     let media = discovered.media;
@@ -285,6 +339,17 @@ async fn fetch(
         title: Some(media.title.clone()),
         ..JobUpdate::stage(Stage::Discovering)
     });
+    // The tracks and the muxed copy exist together for a moment: twice the
+    // estimate. An unknown size reserves nothing; the floor still applies
+    // while downloading.
+    let needed = media
+        .estimated_bytes
+        .map_or(0, |bytes| bytes.saturating_mul(2));
+    let free = env.free_space().unwrap_or(u64::MAX);
+    let reservation = env
+        .disk
+        .reserve(free, needed, env.limits.disk_floor)
+        .ok_or_else(|| no_space_error(Some(needed), free))?;
     tokio::fs::write(job.path().join(INFO_JSON), &media.info_json)
         .await
         .map_err(|_| output_dir_error())?;
@@ -318,7 +383,7 @@ async fn fetch(
         ))
         .await?;
     }
-    Ok(media)
+    Ok((media, reservation))
 }
 
 /// What discovery settled on, and the Referer its media needs.
@@ -473,6 +538,10 @@ fn empty_browser_result(finding: &BrowserFinding) -> PublicError {
             "media_discovery_timeout",
             "The page did not arrive in the isolated browser in time, so no video could be found.",
         ),
+        _ if page.events_dropped > 0 || page.untracked_requests > 0 => PublicError::new(
+            "discovery_overloaded",
+            "The page sent more network activity than HighVi watches safely, and no video stream was found in what it could watch.",
+        ),
         _ => PublicError::new(
             "no_media_found",
             "HighVi opened the page in an isolated browser, but no video stream appeared.",
@@ -559,14 +628,41 @@ async fn download_track(
     );
     command.current_dir(job.path());
     let mut signals = ToolSignals::default();
-    let success = run_streaming(command, None, cancel, |line| {
-        match parse_progress_line(line, stage) {
-            Some(update) => report(update),
-            None => signals.observe(line),
+    let free = || env.free_space();
+    let watch = Watch {
+        deadline: env.limits.track_deadline,
+        stall: Some(env.limits.stall),
+        disk: Some(DiskFloor {
+            free: &free,
+            floor: env.limits.disk_floor,
+        }),
+    };
+    let success = run_streaming(command, watch, cancel, |line, stream| {
+        // The progress template writes to stdout; a look-alike on stderr
+        // (remote text in an error) must not move the stall meter.
+        match parse_progress_line(line, stage).filter(|_| stream == Stream::Stdout) {
+            Some((update, bytes)) => {
+                report(update);
+                bytes
+            }
+            None => {
+                signals.observe(line);
+                None
+            }
         }
     })
     .await
-    .map_err(|error| run_error(error, "yt-dlp", "network_timeout"))?;
+    .map_err(|error| match error {
+        RunError::Stalled => stalled_error(&env.limits),
+        RunError::TimedOut => PublicError::new(
+            "download_timeout",
+            format!(
+                "The download took longer than HighVi allows for one track ({} hours).",
+                env.limits.track_deadline.as_secs() / 3600
+            ),
+        ),
+        error => run_error(error, "yt-dlp", "download_timeout"),
+    })?;
     record(recorder, |diagnostics| {
         diagnostics.signals(signals.labels())
     });
@@ -599,6 +695,21 @@ async fn mux(
         }),
         None => None,
     };
+    let mut inputs = 0;
+    for path in [Some(&video_path), audio_path.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        inputs += tokio::fs::metadata(path)
+            .await
+            .map_or(0, |metadata| metadata.len());
+    }
+    let needed = mux_space_needed(inputs);
+    if let Some(free) = env.free_space()
+        && free < needed.saturating_add(env.limits.disk_floor)
+    {
+        return Err(no_space_error(Some(needed), free));
+    }
     let output = job.path().join(OUTPUT_FILE);
     let env_vars = ["PATH", "LANG"]
         .into_iter()
@@ -609,20 +720,31 @@ async fn mux(
         env_vars,
     );
     command.current_dir(job.path());
-    let captured = run_captured(
-        command,
-        64 * 1024,
-        MAX_DIAGNOSTIC_BYTES,
-        MUX_TIMEOUT,
-        cancel,
-    )
-    .await
-    .map_err(|error| run_error(error, "FFmpeg", "mux_failed"))?;
+    // Watched like a download: the output can outgrow its inputs, and other
+    // programs use the disk too, so the floor is enforced while it writes.
+    let free = || env.free_space();
+    let watch = Watch {
+        deadline: MUX_TIMEOUT,
+        stall: None,
+        disk: Some(DiskFloor {
+            free: &free,
+            floor: env.limits.disk_floor,
+        }),
+    };
+    let success = run_streaming(command, watch, cancel, |_, _| None)
+        .await
+        .map_err(|error| match error {
+            RunError::NoSpace => no_space_error(None, u64::MAX),
+            error => run_error(error, "FFmpeg", "mux_failed"),
+        })?;
     let written = tokio::fs::symlink_metadata(&output)
         .await
         .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0);
-    if !captured.success || !written {
-        return Err(mux_error());
+    if !success || !written {
+        return Err(match env.free_space() {
+            Some(free) if free < env.limits.disk_floor => no_space_error(None, free),
+            _ => mux_error(),
+        });
     }
     for path in [Some(&video_path), audio_path.as_ref()]
         .into_iter()
@@ -679,6 +801,41 @@ fn cancelled_error() -> PublicError {
     PublicError::new("cancelled", "The download was cancelled.")
 }
 
+fn stalled_error(limits: &JobLimits) -> PublicError {
+    PublicError::new(
+        "download_stalled",
+        format!(
+            "The download stopped making progress (less than {} KiB in {} seconds), so HighVi stopped it.",
+            limits.stall.min_bytes / 1024,
+            limits.stall.window.as_secs()
+        ),
+    )
+}
+
+/// Space a mux needs: about its inputs, plus a margin for container
+/// overhead, so the disk watch does not stop it just before it finishes.
+fn mux_space_needed(inputs: u64) -> u64 {
+    inputs.saturating_add(inputs / 16)
+}
+
+fn no_space_error(needed: Option<u64>, free: u64) -> PublicError {
+    let need = needed
+        .filter(|needed| *needed > 0)
+        .map(|needed| format!(" This video needs about {} MiB;", needed.div_ceil(MIB)))
+        .unwrap_or_default();
+    let free = if free == u64::MAX {
+        String::new()
+    } else {
+        format!(" {} MiB is free.", free / MIB)
+    };
+    PublicError::new(
+        "insufficient_disk_space",
+        format!(
+            "There is not enough free disk space for this download.{need}{free} HighVi keeps some space free so the computer keeps working."
+        ),
+    )
+}
+
 fn mux_error() -> PublicError {
     PublicError::new(
         "mux_failed",
@@ -730,22 +887,38 @@ fn run_error(error: RunError, tool: &str, timeout_code: &str) -> PublicError {
                 "Media discovery timed out after 60 seconds.",
             ),
             "mux_failed" => mux_error(),
-            _ => PublicError::new("network_timeout", "The media host did not respond in time."),
+            _ => PublicError::new(
+                "download_timeout",
+                "The download took longer than HighVi allows for one track.",
+            ),
         },
+        RunError::Stalled => stalled_error(&JobLimits::default()),
+        RunError::NoSpace => no_space_error(None, u64::MAX),
     }
 }
 
-fn parse_progress_line(line: &str, stage: Stage) -> Option<JobUpdate> {
+/// A progress update and the cumulative bytes downloaded, from a line in
+/// HighVi's own progress template.
+fn parse_progress_line(line: &str, stage: Stage) -> Option<(JobUpdate, Option<u64>)> {
     let raw = line.strip_prefix("HIGHVI_PROGRESS|")?;
-    let mut fields = raw.splitn(4, '|');
+    let mut fields = raw.splitn(5, '|');
     let _status = fields.next();
-    Some(JobUpdate {
+    let update = JobUpdate {
         stage,
         title: None,
         percent: clean_progress_value(fields.next()),
         speed: clean_progress_value(fields.next()),
         eta: clean_progress_value(fields.next()),
-    })
+    };
+    // yt-dlp prints integers, or floats for some downloaders.
+    let bytes = fields
+        .next()
+        .map(str::trim)
+        .and_then(|value| value.split('.').next())
+        .and_then(|value| value.parse::<u64>().ok())
+        // Absurd values are ignored rather than trusted.
+        .filter(|bytes| *bytes <= MAX_PROGRESS_BYTES);
+    Some((update, bytes))
 }
 
 fn clean_progress_value(value: Option<&str>) -> Option<String> {
@@ -783,21 +956,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_mux_reserves_a_margin_above_its_inputs() {
+        // An output a few percent larger than its inputs still fits.
+        let inputs = 1_000 * MIB;
+        assert!(mux_space_needed(inputs) >= inputs + inputs / 20);
+        assert_eq!(mux_space_needed(u64::MAX), u64::MAX);
+    }
+
+    #[test]
     fn parses_only_structured_progress_lines() {
-        let progress = parse_progress_line(
-            "HIGHVI_PROGRESS|downloading| 42.1%|2.3MiB/s|00:12",
+        let (progress, bytes) = parse_progress_line(
+            "HIGHVI_PROGRESS|downloading| 42.1%|2.3MiB/s|00:12|1048576",
             Stage::DownloadingVideo,
         )
         .unwrap();
+        assert_eq!(bytes, Some(1_048_576));
         assert_eq!(progress.stage, Stage::DownloadingVideo);
         assert_eq!(progress.percent.as_deref(), Some("42.1%"));
         assert_eq!(progress.speed.as_deref(), Some("2.3MiB/s"));
         assert_eq!(progress.eta.as_deref(), Some("00:12"));
-        let unknown = parse_progress_line(
-            "HIGHVI_PROGRESS|downloading|NA|Unknown|NA",
+        let (unknown, bytes) = parse_progress_line(
+            "HIGHVI_PROGRESS|downloading|NA|Unknown|NA|NA",
             Stage::DownloadingAudio,
         )
         .unwrap();
+        assert_eq!(bytes, None);
+        let (_, fractional) = parse_progress_line(
+            "HIGHVI_PROGRESS|downloading|1%|NA|NA|2048.0",
+            Stage::DownloadingAudio,
+        )
+        .unwrap();
+        assert_eq!(fractional, Some(2048));
         assert_eq!(unknown.percent, None);
         assert_eq!(unknown.speed, None);
         assert!(

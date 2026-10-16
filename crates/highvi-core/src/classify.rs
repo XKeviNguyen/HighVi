@@ -58,6 +58,7 @@ impl ToolSignals {
 #[derive(Debug, Default)]
 struct Signals {
     drm: bool,
+    no_space: bool,
     authentication: bool,
     firewall_block: bool,
     forbidden: bool,
@@ -73,6 +74,7 @@ struct Signals {
 impl Signals {
     fn observe(&mut self, lower: &str) {
         self.drm |= lower.contains("drm protected");
+        self.no_space |= lower.contains("no space left on device");
         self.authentication |= contains_word(lower, "sign in")
             || contains_word(lower, "log in")
             || lower.contains("login required")
@@ -93,6 +95,7 @@ impl Signals {
     fn labels(&self) -> Vec<&'static str> {
         [
             (self.drm, "drm"),
+            (self.no_space, "no_space"),
             (self.authentication, "sign_in"),
             (self.firewall_block, "cloudflare"),
             (self.forbidden, "http_403"),
@@ -109,6 +112,7 @@ impl Signals {
 
     fn any(&self) -> bool {
         self.drm
+            || self.no_space
             || self.authentication
             || self.firewall_block
             || self.forbidden
@@ -124,6 +128,11 @@ impl Signals {
             PublicError::new(
                 "drm_not_supported",
                 "This media reports DRM protection. HighVi will not bypass DRM or access controls.",
+            )
+        } else if self.no_space {
+            PublicError::new(
+                "insufficient_disk_space",
+                "The disk ran out of free space during the download.",
             )
         } else if self.authentication {
             PublicError::new(
@@ -350,6 +359,15 @@ mod tests {
                 .code,
             "yt_dlp_failed"
         );
+    }
+
+    #[test]
+    fn a_full_disk_is_not_reported_as_a_site_problem() {
+        let error = classify_tool_failure(
+            "ERROR: unable to write data: [Errno 28] No space left on device\nERROR: HTTP Error 403: Forbidden",
+            SourceKind::Page,
+        );
+        assert_eq!(error.code, "insufficient_disk_space");
     }
 
     #[test]

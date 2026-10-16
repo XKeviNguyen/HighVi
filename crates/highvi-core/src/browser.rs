@@ -23,13 +23,17 @@ use std::{
     os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::Path,
     process::Stdio,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::unix::pipe,
     process::{Child, Command},
-    sync::mpsc,
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc},
     time::{Instant, sleep_until, timeout},
 };
 use url::Url;
@@ -45,7 +49,19 @@ const PLAY_WITHOUT_LOAD: Duration = Duration::from_secs(12);
 const GIVE_UP_AFTER_PLAY: Duration = Duration::from_secs(8);
 /// Stop this long after the last new candidate.
 const SETTLE: Duration = Duration::from_secs(2);
-const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+/// Replies to HighVi's own commands (playlist bodies, base64-encoded).
+const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+/// Events the page causes; larger ones are skipped without being parsed.
+const MAX_EVENT_BYTES: usize = 1024 * 1024;
+/// Parsed messages waiting in the channel and the backlog together, by
+/// weight: a reply (one long string) weighs its length; an event weighs
+/// [`EVENT_WEIGHT`] times its length, because parsed JSON with many small
+/// values takes several times its text size.
+const MAX_QUEUED_WEIGHT: usize = 64 * 1024 * 1024;
+const MAX_BACKLOG_WEIGHT: usize = 16 * 1024 * 1024;
+const EVENT_WEIGHT: usize = 8;
+/// Request URLs held for tracking, in total.
+const MAX_TRACKED_URL_TOTAL: usize = 8 * 1024 * 1024;
 const MAX_SESSIONS: usize = 48;
 const MAX_TRACKED_REQUESTS: usize = 4_000;
 /// Body reads for responses named or typed as HLS, and separately for
@@ -132,6 +148,12 @@ pub struct PageReport {
     pub playlists: usize,
     /// Playlist requests (by name or type) the server answered with 4xx.
     pub refused_playlists: usize,
+    /// Events that did not fit HighVi's queue (the page flooded it).
+    pub events_dropped: u64,
+    /// Events too large to read (one huge request is not a flood).
+    pub events_oversized: u64,
+    /// Requests not tracked because the tracking limits were reached.
+    pub untracked_requests: usize,
     pub ended: Ended,
 }
 
@@ -263,7 +285,7 @@ pub fn chrome_args(run: &BrowserRun<'_>, profile: &Path) -> Vec<OsString> {
         // Chrome has no --force-… variant of this switch; the profile
         // preferences below repeat the policy as a second guard.
         "--webrtc-ip-handling-policy=disable_non_proxied_udp",
-        "--disable-features=Translate,MediaRouter,OptimizationHints,AutofillServerCommunication,DialMediaRouteProvider",
+        "--disable-features=Translate,MediaRouter,OptimizationHints,AutofillServerCommunication,DialMediaRouteProvider,NetworkTimeServiceQuerying",
         "--window-size=1280,720",
         // All traffic goes to the egress proxy, loopback included (Chrome
         // bypasses proxies for loopback unless told not to). Chrome never
@@ -355,11 +377,28 @@ fn raise(fd: OwnedFd) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(raised) })
 }
 
+/// A parsed message and its share of the queue's byte budget, returned when
+/// the message is dropped.
+struct Queued {
+    value: Value,
+    weight: usize,
+    _permit: OwnedSemaphorePermit,
+}
+
 /// A minimal DevTools-protocol client: NUL-delimited JSON over two pipes.
+///
+/// Memory is bounded by bytes, not only message counts, because a hostile
+/// page decides how large events are: events over [`MAX_EVENT_BYTES`] are
+/// skipped unparsed (counted in `oversized`), everything queued (channel and
+/// backlog) shares [`MAX_QUEUED_WEIGHT`], and the backlog keeps at most
+/// [`MAX_BACKLOG_WEIGHT`]; events that do not fit are counted in `dropped`.
 struct Cdp {
     writer: pipe::Sender,
-    incoming: mpsc::Receiver<Value>,
-    backlog: VecDeque<Value>,
+    incoming: mpsc::Receiver<Queued>,
+    backlog: VecDeque<Queued>,
+    backlog_weight: usize,
+    dropped: AtomicU64,
+    oversized: Arc<AtomicU64>,
     next_id: u64,
     reader: tokio::task::JoinHandle<()>,
 }
@@ -371,44 +410,36 @@ impl Drop for Cdp {
 }
 
 impl Cdp {
-    fn new(writer: pipe::Sender, mut receiver: pipe::Receiver) -> Self {
+    fn new(writer: pipe::Sender, receiver: pipe::Receiver) -> Self {
         // Small: Chrome then buffers in its own process, not in HighVi.
         let (sender, incoming) = mpsc::channel(64);
-        let reader = tokio::spawn(async move {
-            let mut buffer = Vec::new();
-            let mut chunk = vec![0_u8; 64 * 1024];
-            loop {
-                let Ok(read) = receiver.read(&mut chunk).await else {
-                    return;
-                };
-                if read == 0 {
-                    return;
-                }
-                // Only the new bytes can hold the next delimiter.
-                let mut scan_from = buffer.len();
-                buffer.extend_from_slice(&chunk[..read]);
-                while let Some(offset) = buffer[scan_from..].iter().position(|byte| *byte == 0) {
-                    let end = scan_from + offset;
-                    let message: Vec<u8> = buffer.drain(..=end).collect();
-                    scan_from = 0;
-                    if let Ok(value) = serde_json::from_slice::<Value>(&message[..end])
-                        && sender.send(value).await.is_err()
-                    {
-                        return;
-                    }
-                }
-                if buffer.len() > MAX_MESSAGE_BYTES {
-                    return;
-                }
-            }
-        });
+        let oversized = Arc::new(AtomicU64::new(0));
+        let reader = tokio::spawn(read_messages(
+            receiver,
+            sender,
+            Arc::new(Semaphore::new(MAX_QUEUED_WEIGHT)),
+            Arc::clone(&oversized),
+        ));
         Self {
             writer,
             incoming,
             backlog: VecDeque::new(),
+            backlog_weight: 0,
+            dropped: AtomicU64::new(0),
+            oversized,
             next_id: 1,
             reader,
         }
+    }
+
+    /// Events that did not fit the queue.
+    fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// Events too large to read at all.
+    fn oversized(&self) -> u64 {
+        self.oversized.load(Ordering::Relaxed)
     }
 
     async fn send(
@@ -435,21 +466,168 @@ impl Cdp {
         let id = self.send(session, method, params).await.ok()?;
         loop {
             let message = self.incoming.recv().await?;
-            if message.get("id").and_then(Value::as_u64) == Some(id) {
-                return message.get("result").cloned();
+            if message.value.get("id").and_then(Value::as_u64) == Some(id) {
+                return message.value.get("result").cloned();
             }
-            // Events that arrive while waiting are kept, within a bound.
-            if self.backlog.len() < MAX_BACKLOG {
+            // Events that arrive while waiting are kept, within bounds.
+            if self.backlog.len() < MAX_BACKLOG
+                && self.backlog_weight + message.weight <= MAX_BACKLOG_WEIGHT
+            {
+                self.backlog_weight += message.weight;
                 self.backlog.push_back(message);
+            } else {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
 
     async fn next(&mut self) -> Option<Value> {
-        match self.backlog.pop_front() {
-            Some(message) => Some(message),
-            None => self.incoming.recv().await,
+        let message = match self.backlog.pop_front() {
+            Some(message) => {
+                self.backlog_weight -= message.weight;
+                message
+            }
+            None => self.incoming.recv().await?,
+        };
+        Some(message.value)
+    }
+}
+
+/// Splits Chrome's output into messages and queues them. Events longer
+/// than [`MAX_EVENT_BYTES`] (and replies longer than [`MAX_RESPONSE_BYTES`])
+/// are skipped up to their delimiter without being buffered or parsed.
+async fn read_messages(
+    mut receiver: pipe::Receiver,
+    sender: mpsc::Sender<Queued>,
+    budget: Arc<Semaphore>,
+    oversized: Arc<AtomicU64>,
+) {
+    let mut buffer: Vec<u8> = Vec::new();
+    let mut skipping = false;
+    let mut chunk = vec![0_u8; 64 * 1024];
+    loop {
+        let read = match receiver.read(&mut chunk).await {
+            Ok(0) | Err(_) => return,
+            Ok(read) => read,
+        };
+        let mut data = &chunk[..read];
+        while !data.is_empty() {
+            let Some(end) = data.iter().position(|byte| *byte == 0) else {
+                if !skipping {
+                    buffer.extend_from_slice(data);
+                    if buffer.len() > message_limit(&buffer) {
+                        buffer = Vec::new();
+                        skipping = true;
+                    }
+                }
+                break;
+            };
+            if skipping {
+                oversized.fetch_add(1, Ordering::Relaxed);
+                skipping = false;
+            } else {
+                buffer.extend_from_slice(&data[..end]);
+                if buffer.len() > message_limit(&buffer) {
+                    oversized.fetch_add(1, Ordering::Relaxed);
+                } else if let Ok(value) = serde_json::from_slice::<Value>(&buffer) {
+                    let weight = buffer.len().max(1)
+                        * if message_limit(&buffer) == MAX_RESPONSE_BYTES {
+                            1
+                        } else {
+                            EVENT_WEIGHT
+                        };
+                    let permits = u32::try_from(weight).unwrap_or(u32::MAX);
+                    // Waits while the queue is full: Chrome then buffers.
+                    let Ok(permit) = Arc::clone(&budget).acquire_many_owned(permits).await else {
+                        return;
+                    };
+                    let queued = Queued {
+                        value,
+                        weight,
+                        _permit: permit,
+                    };
+                    if sender.send(queued).await.is_err() {
+                        return;
+                    }
+                }
+                buffer.clear();
+                if buffer.capacity() > MAX_EVENT_BYTES {
+                    buffer = Vec::new();
+                }
+            }
+            data = &data[end + 1..];
         }
+    }
+}
+
+/// Replies to commands start with their `id`; anything else is an event.
+fn message_limit(start: &[u8]) -> usize {
+    if start.starts_with(b"{\"id\":") {
+        MAX_RESPONSE_BYTES
+    } else {
+        MAX_EVENT_BYTES
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum Tracked {
+    Yes,
+    /// Ignored by design (no URL, or one longer than any playlist URL).
+    Ignored,
+    /// Not tracked because the limits are reached: worth reporting.
+    OverBudget,
+}
+
+/// Requests being watched, bounded by count and by total URL bytes.
+#[derive(Debug, Default)]
+struct RequestTracker {
+    requests: HashMap<(String, String), Request>,
+    url_bytes: usize,
+}
+
+impl RequestTracker {
+    /// Starts tracking `key`. A redirect reuses its request's key: the old
+    /// URL is dropped whatever happens to the new one, and since a redirect
+    /// adds no request it only has to fit the byte budget, which an equal
+    /// or shorter URL always does.
+    fn start(
+        &mut self,
+        key: (String, String),
+        url: &str,
+        referer: Option<String>,
+        resource_type: &str,
+    ) -> Tracked {
+        let redirected = self.finish(&key).is_some();
+        if url.is_empty() || url.len() > MAX_TRACKED_URL_BYTES {
+            return Tracked::Ignored;
+        }
+        if (!redirected && self.requests.len() >= MAX_TRACKED_REQUESTS)
+            || self.url_bytes + url.len() > MAX_TRACKED_URL_TOTAL
+        {
+            return Tracked::OverBudget;
+        }
+        self.url_bytes += url.len();
+        self.requests.insert(
+            key,
+            Request {
+                url: url.to_string(),
+                referer,
+                resource_type: resource_type.to_string(),
+                want: Want::Nothing,
+            },
+        );
+        Tracked::Yes
+    }
+
+    fn get_mut(&mut self, key: &(String, String)) -> Option<&mut Request> {
+        self.requests.get_mut(key)
+    }
+
+    /// Stops tracking `key` and returns what was known about it.
+    fn finish(&mut self, key: &(String, String)) -> Option<Request> {
+        let request = self.requests.remove(key)?;
+        self.url_bytes -= request.url.len();
+        Some(request)
     }
 }
 
@@ -541,8 +719,9 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
     };
     // Chrome names a page's main frame after its target.
     let mut main_document: Option<String> = None;
+
     let mut sessions: Vec<String> = vec![main.clone()];
-    let mut requests: HashMap<(String, String), Request> = HashMap::new();
+    let mut requests = RequestTracker::default();
     let mut pending_bodies: HashMap<u64, (Url, Option<String>)> = HashMap::new();
     let mut playlist_fetches = 0;
     let mut sniff_fetches = 0;
@@ -683,27 +862,18 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
                     // Redirects keep the ID; a new navigation replaces it.
                     main_document = Some(id.to_string());
                 }
-                if requests.len() >= MAX_TRACKED_REQUESTS {
-                    continue;
-                }
-                let request = &params["request"];
-                let Some(url) = request["url"].as_str() else {
+                let Some(id) = params["requestId"].as_str() else {
                     continue;
                 };
-                if url.len() > MAX_TRACKED_URL_BYTES {
-                    continue;
-                }
-                let referer = header(&request["headers"], "referer").and_then(origin_referer);
-                if let Some(id) = params["requestId"].as_str() {
-                    requests.insert(
-                        (session, id.to_string()),
-                        Request {
-                            url: url.to_string(),
-                            referer,
-                            resource_type: params["type"].as_str().unwrap_or_default().to_string(),
-                            want: Want::Nothing,
-                        },
-                    );
+                let request = &params["request"];
+                let tracked = requests.start(
+                    (session, id.to_string()),
+                    request["url"].as_str().unwrap_or_default(),
+                    header(&request["headers"], "referer").and_then(origin_referer),
+                    params["type"].as_str().unwrap_or_default(),
+                );
+                if tracked == Tracked::OverBudget {
+                    report.untracked_requests += 1;
                 }
             }
             "Network.loadingFailed" => {
@@ -715,7 +885,7 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
                     {
                         report.document_failed = true;
                     }
-                    requests.remove(&(session, id.to_string()));
+                    requests.finish(&(session, id.to_string()));
                 }
             }
             "Network.responseReceived" => {
@@ -773,7 +943,7 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
                     continue;
                 };
                 // Finished: nothing more to learn about this request.
-                let Some(request) = requests.remove(&(session.clone(), id.to_string())) else {
+                let Some(request) = requests.finish(&(session.clone(), id.to_string())) else {
                     continue;
                 };
                 let size = params["encodedDataLength"].as_f64().unwrap_or(0.0);
@@ -830,6 +1000,8 @@ async fn observe(cdp: &mut Cdp, page: &Url) -> Result<BrowserFinding, PublicErro
     })
     .filter(|title| !title.is_empty());
 
+    report.events_dropped = cdp.dropped();
+    report.events_oversized = cdp.oversized();
     report.loaded = loaded_at.is_some();
     report.played = played_at.is_some();
     report.playlists = observation.playlists.len();
@@ -1144,6 +1316,151 @@ mod tests {
         );
         assert_eq!(origin_referer("http://player.example/embed"), None);
         assert_eq!(origin_referer("not a url"), None);
+    }
+
+    /// A `Cdp` reading what the test writes, and the test's ends of both
+    /// pipes (what HighVi sends is read and discarded).
+    fn fake_chrome() -> (Cdp, pipe::Sender) {
+        let (to_chrome_read, to_chrome_write) = pipe_pair().unwrap();
+        let (from_chrome_read, from_chrome_write) = pipe_pair().unwrap();
+        let mut sink = pipe::Receiver::from_owned_fd(to_chrome_read).unwrap();
+        tokio::spawn(async move {
+            let mut buffer = vec![0_u8; 64 * 1024];
+            while sink.read(&mut buffer).await.is_ok_and(|read| read > 0) {}
+        });
+        let cdp = Cdp::new(
+            pipe::Sender::from_owned_fd(to_chrome_write).unwrap(),
+            pipe::Receiver::from_owned_fd(from_chrome_read).unwrap(),
+        );
+        (cdp, pipe::Sender::from_owned_fd(from_chrome_write).unwrap())
+    }
+
+    fn framed(message: &str) -> Vec<u8> {
+        let mut bytes = message.as_bytes().to_vec();
+        bytes.push(0);
+        bytes
+    }
+
+    #[tokio::test]
+    async fn oversized_events_are_skipped_and_large_replies_kept() {
+        let (mut cdp, mut chrome) = fake_chrome();
+        let huge_event = format!(
+            r#"{{"method":"Network.requestWillBeSent","params":{{"x":"{}"}}}}"#,
+            "a".repeat(3 * 1024 * 1024)
+        );
+        let body = "b".repeat(9 * 1024 * 1024);
+        let reply = format!(r#"{{"id":1,"result":{{"body":"{body}"}}}}"#);
+        let writer = tokio::spawn(async move {
+            chrome.write_all(&framed(&huge_event)).await.unwrap();
+            chrome
+                .write_all(&framed(r#"{"method":"Page.loadEventFired","params":{}}"#))
+                .await
+                .unwrap();
+            chrome.write_all(&framed(&reply)).await.unwrap();
+            chrome
+        });
+        let result = cdp
+            .call(None, "Network.getResponseBody", json!({}))
+            .await
+            .unwrap();
+        assert_eq!(result["body"].as_str().unwrap().len(), 9 * 1024 * 1024);
+        assert_eq!((cdp.oversized(), cdp.dropped()), (1, 0));
+        // The small event survived in the backlog.
+        assert_eq!(cdp.next().await.unwrap()["method"], "Page.loadEventFired");
+        drop(writer.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn an_event_flood_stays_within_the_byte_bounds() {
+        let (mut cdp, mut chrome) = fake_chrome();
+        let event = framed(&format!(
+            r#"{{"method":"Network.dataReceived","params":{{"x":"{}"}}}}"#,
+            "c".repeat(900 * 1024)
+        ));
+        let writer = tokio::spawn(async move {
+            for _ in 0..200 {
+                chrome.write_all(&event).await.unwrap();
+            }
+            chrome
+                .write_all(&framed(r#"{"id":1,"result":{}}"#))
+                .await
+                .unwrap();
+            chrome
+        });
+        // 180 MiB of events arrive before the reply HighVi waits for.
+        assert!(cdp.call(None, "Page.enable", json!({})).await.is_some());
+        assert!(
+            cdp.backlog_weight <= MAX_BACKLOG_WEIGHT,
+            "{}",
+            cdp.backlog_weight
+        );
+        // 900 KiB events weigh 7.2 MiB each: two fit the backlog.
+        assert!(cdp.backlog.len() <= 2, "{}", cdp.backlog.len());
+        assert!(cdp.dropped() >= 198, "{}", cdp.dropped());
+        assert_eq!(cdp.oversized(), 0);
+        drop(writer.await.unwrap());
+    }
+
+    #[test]
+    fn redirects_are_followed_even_when_the_tracking_budget_is_full() {
+        let key = |id: usize| ("s".to_string(), id.to_string());
+        let mut tracker = RequestTracker::default();
+        assert_eq!(
+            tracker.start(
+                key(0),
+                "https://c.example/start-of-the-video",
+                None,
+                "Fetch"
+            ),
+            Tracked::Yes
+        );
+        // Fill the byte budget with long URLs.
+        let long = format!(
+            "https://ads.example/?{}",
+            "x".repeat(MAX_TRACKED_URL_BYTES - 64)
+        );
+        let mut id = 1;
+        while tracker.start(key(id), &long, None, "Fetch") == Tracked::Yes {
+            id += 1;
+        }
+        while tracker.start(key(id), "https://ads.example/1", None, "Fetch") == Tracked::Yes {
+            id += 1;
+        }
+        assert_eq!(
+            tracker.start(key(id + 1), "https://c.example/new", None, "Fetch"),
+            Tracked::OverBudget
+        );
+        // The early request is redirected: its new URL replaces the old one.
+        assert_eq!(
+            tracker.start(key(0), "https://c.example/master.m3u8", None, "Fetch"),
+            Tracked::Yes
+        );
+        assert_eq!(
+            tracker.get_mut(&key(0)).unwrap().url,
+            "https://c.example/master.m3u8"
+        );
+        // A redirect to an ignored URL drops the stale entry.
+        assert_eq!(
+            tracker.start(
+                key(0),
+                &"y".repeat(MAX_TRACKED_URL_BYTES + 1),
+                None,
+                "Fetch"
+            ),
+            Tracked::Ignored
+        );
+        assert!(tracker.get_mut(&key(0)).is_none());
+        // Byte accounting matches what is held.
+        let held: usize = tracker
+            .requests
+            .values()
+            .map(|request| request.url.len())
+            .sum();
+        assert_eq!(tracker.url_bytes, held);
+        for index in 1..id {
+            tracker.finish(&key(index));
+        }
+        assert_eq!(tracker.url_bytes, 0);
     }
 
     #[test]

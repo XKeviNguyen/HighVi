@@ -111,6 +111,13 @@ const I18N = (() => {
       "error.output_publish_failed":
         "The video finished, but HighVi couldn't move it into its folder.",
       "error.open_folder_failed": "HighVi couldn't open the folder.",
+      "error.download_stalled":
+        "The download stopped moving (almost nothing arrived for 2 minutes), so HighVi stopped it. Try again later.",
+      "error.download_timeout": "The download took longer than HighVi allows (24 hours for one part), so it stopped.",
+      "error.insufficient_disk_space":
+        "There isn't enough free space on the disk for this video. Free some space, then try again. HighVi always leaves a little space free.",
+      "error.discovery_overloaded":
+        "The page made too much network noise for HighVi to watch safely, and no video was found in what it could watch.",
       "error.playlist_access_denied":
         "The page's player found the video, but the video server said no (HTTP 403). HighVi doesn't use your logins or get around locks.",
       "error.media_access_denied":
@@ -237,6 +244,13 @@ const I18N = (() => {
       "error.output_publish_failed":
         "Video đã tải xong nhưng HighVi không chuyển được vào thư mục.",
       "error.open_folder_failed": "HighVi không mở được thư mục.",
+      "error.download_stalled":
+        "Video tải mãi không nhích (gần như không nhận được gì trong 2 phút) nên HighVi đã dừng. Thử lại sau nhé.",
+      "error.download_timeout": "Tải lâu hơn mức HighVi cho phép (24 tiếng cho một phần) nên đã dừng.",
+      "error.insufficient_disk_space":
+        "Ổ đĩa không đủ chỗ trống cho video này. Hãy dọn bớt rồi thử lại. HighVi luôn chừa lại một ít chỗ trống.",
+      "error.discovery_overloaded":
+        "Trang tạo quá nhiều hoạt động mạng nên HighVi không theo dõi hết một cách an toàn được, và không thấy video trong phần đã theo dõi.",
       "error.playlist_access_denied":
         "Trình phát của trang đã tìm thấy video, nhưng máy chủ video từ chối (HTTP 403). HighVi không dùng tài khoản của bạn và không phá khóa.",
       "error.media_access_denied":
@@ -366,6 +380,13 @@ const I18N = (() => {
       "error.mux_failed": "映像と音声を MP4 にまとめられなかったので、何も保存していません。",
       "error.output_publish_failed": "動画はできましたが、HighVi がフォルダーに移せませんでした。",
       "error.open_folder_failed": "フォルダーを開けませんでした。",
+      "error.download_stalled":
+        "ダウンロードが止まってしまったので（2 分間ほとんど何も届きませんでした）、HighVi が止めました。あとでもう一度ためしてください。",
+      "error.download_timeout": "ダウンロードが HighVi の上限（1 つの部分につき 24 時間）より長くかかったので、止めました。",
+      "error.insufficient_disk_space":
+        "ディスクの空きが足りません。空きを作ってから、もう一度ためしてください。HighVi はいつも少し空きを残します。",
+      "error.discovery_overloaded":
+        "ページの通信が多すぎて HighVi が安全に見きれず、見られた範囲には動画がありませんでした。",
       "error.playlist_access_denied":
         "ページのプレーヤーは動画を見つけましたが、動画のサーバーにことわられました（HTTP 403）。HighVi はログイン情報を使わず、ロックもやぶりません。",
       "error.media_access_denied":

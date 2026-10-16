@@ -24,7 +24,7 @@ Resolver cho fixture cục bộ và `--no-check-certificates` chỉ tồn tại 
 - Không lấy cookie/token từ trình duyệt và không vượt đăng nhập, paywall hoặc quyền truy cập.
 - Không vượt Cloudflare/anti-bot, không giả lập trình duyệt (`--impersonate`) và không chạy plugin bên thứ ba.
 - Không ghi URL ký số, stderr thô hay secrets vào log/file.
-- Chrome vẫn tự gọi một số dịch vụ Google (Safe Browsing, cập nhật thành phần, tài khoản) trong lúc tìm video; các request này cũng đi qua egress proxy nên chỉ tới địa chỉ công khai, và hồ sơ bị xoá ngay sau đó.
+- Chrome vẫn tự gọi một số dịch vụ Google trong lúc tìm video. Đo trong test (2026-10-15, Chrome 15x): `accounts.google.com`, `update.googleapis.com`, `android.clients.google.com`, `www.google.com`, `www.gstatic.com` — khoảng 10 kết nối mỗi lần. Truy vấn giờ mạng qua HTTP thường đã bị tắt (`NetworkTimeServiceQuerying`); các cờ khác thử nghiệm không giảm được gì nên không thêm. Safe Browsing là cơ chế bảo vệ nên được giữ. Mọi request này đều đi qua egress proxy (chỉ tới địa chỉ công khai, không mang cookie của người dùng) và hồ sơ bị xoá ngay sau đó.
 - Không hỗ trợ proxy hệ thống/proxy công ty cho việc tải (egress proxy của HighVi là đường duy nhất).
 
 ## Report a problem

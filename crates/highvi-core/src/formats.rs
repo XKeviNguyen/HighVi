@@ -30,6 +30,9 @@ pub struct MediaInfo {
     pub extractor: Option<String>,
     /// What was offered and chosen, in fixed vocabulary, for diagnostics.
     pub summary: String,
+    /// Expected size of the chosen tracks, when yt-dlp knows or can tell
+    /// from bitrate and duration.
+    pub estimated_bytes: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +41,7 @@ struct Metadata {
     id: Option<String>,
     has_drm: Option<bool>,
     extractor_key: Option<String>,
+    duration: Option<f64>,
     is_live: Option<bool>,
     live_status: Option<String>,
     #[serde(default)]
@@ -55,6 +59,8 @@ struct Format {
     height: Option<u32>,
     tbr: Option<f64>,
     abr: Option<f64>,
+    filesize: Option<f64>,
+    filesize_approx: Option<f64>,
     has_drm: Option<bool>,
 }
 
@@ -180,6 +186,7 @@ pub fn select_media(raw_json: &[u8]) -> Result<MediaInfo, PublicError> {
 
     let selection = choose_formats(&metadata.formats)?;
     let summary = summarize(&metadata.formats, &selection);
+    let estimated_bytes = estimate(&metadata.formats, &selection, metadata.duration);
     let title = metadata
         .title
         .as_deref()
@@ -201,7 +208,36 @@ pub fn select_media(raw_json: &[u8]) -> Result<MediaInfo, PublicError> {
         info_json,
         extractor: metadata.extractor_key,
         summary,
+        estimated_bytes,
     })
+}
+
+/// Larger claims are treated as unknown rather than trusted.
+const MAX_ESTIMATE_BYTES: f64 = 16.0 * 1024.0 * 1024.0 * 1024.0 * 1024.0;
+
+/// Sum of the chosen formats' sizes; `None` when any is unknown. Sizes come
+/// from untrusted JSON: non-finite, negative or absurd values count as
+/// unknown.
+fn estimate(formats: &[Format], selection: &Selection, duration: Option<f64>) -> Option<u64> {
+    let valid = |value: Option<f64>| {
+        value.filter(|value| value.is_finite() && *value > 0.0 && *value < MAX_ESTIMATE_BYTES)
+    };
+    let duration = valid(duration);
+    let size = |id: &str| -> Option<f64> {
+        let format = formats
+            .iter()
+            .find(|format| format.format_id.as_deref() == Some(id))?;
+        valid(format.filesize)
+            .or(valid(format.filesize_approx))
+            // tbr is kbit/s.
+            // Audio-only formats often state only `abr`.
+            .or_else(|| valid(Some(valid(format.tbr.or(format.abr))? * duration? * 125.0)))
+    };
+    let mut total = size(&selection.video)?;
+    if let Some(audio) = &selection.audio {
+        total += size(audio)?;
+    }
+    valid(Some(total)).map(|total| total as u64)
 }
 
 /// `"33 offered, 15 usable; video https mp4 2160p + audio https m4a"`.
@@ -616,6 +652,46 @@ mod tests {
         assert_eq!(media.selection.video, "y");
         let text = String::from_utf8(media.info_json).unwrap();
         assert!(!text.contains("mms://") && !text.contains("x-0"), "{text}");
+    }
+
+    #[test]
+    fn sizes_are_estimated_from_untrusted_fields_conservatively() {
+        let estimated = |raw: &str| select_media(raw.as_bytes()).unwrap().estimated_bytes;
+        // Known sizes are added up for video + audio.
+        assert_eq!(
+            estimated(
+                r#"{"formats":[
+                  {"format_id":"v","protocol":"https","url":"https://c.example/v.mp4","ext":"mp4","vcodec":"avc1","acodec":"none","height":720,"filesize":1000},
+                  {"format_id":"a","protocol":"https","url":"https://c.example/a.m4a","ext":"m4a","vcodec":"none","acodec":"mp4a","filesize_approx":200}
+                ]}"#
+            ),
+            Some(1_200)
+        );
+        // HLS: bitrate (kbit/s) × duration.
+        assert_eq!(
+            estimated(
+                r#"{"duration":10,"formats":[{"format_id":"h","protocol":"m3u8_native","url":"https://c.example/p.m3u8","tbr":800}]}"#
+            ),
+            Some(1_000_000)
+        );
+        // Audio that states only `abr` is estimated too.
+        assert_eq!(
+            estimated(
+                r#"{"duration":10,"formats":[
+                  {"format_id":"v","protocol":"m3u8_native","url":"https://c.example/v.m3u8","vcodec":"avc1","acodec":"none","height":720,"tbr":800},
+                  {"format_id":"a","protocol":"m3u8_native","url":"https://c.example/a.m3u8","vcodec":"none","acodec":"mp4a","abr":128}
+                ]}"#
+            ),
+            Some(1_160_000)
+        );
+        // Unknown, invalid or absurd values give no estimate.
+        for raw in [
+            r#"{"formats":[{"format_id":"h","protocol":"m3u8_native","url":"https://c.example/p.m3u8"}]}"#,
+            r#"{"duration":-5,"formats":[{"format_id":"h","protocol":"m3u8_native","url":"https://c.example/p.m3u8","tbr":800}]}"#,
+            r#"{"formats":[{"format_id":"h","protocol":"m3u8_native","url":"https://c.example/p.m3u8","filesize":1e300}]}"#,
+        ] {
+            assert_eq!(estimated(raw), None, "{raw}");
+        }
     }
 
     #[test]

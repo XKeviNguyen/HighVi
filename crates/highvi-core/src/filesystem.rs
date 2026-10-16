@@ -77,6 +77,75 @@ pub fn publish_unique(
     Err(std::io::ErrorKind::AlreadyExists.into())
 }
 
+/// Bytes available to unprivileged users on the filesystem holding `path`.
+pub fn free_bytes(path: &Path) -> Option<u64> {
+    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is NUL-terminated and `stats` is a valid out-pointer.
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // SAFETY: statvfs succeeded and filled the struct.
+    let stats = unsafe { stats.assume_init() };
+    stats.f_bavail.checked_mul(stats.f_frsize)
+}
+
+/// Space promised to running jobs, so jobs that start together do not all
+/// count the same free space. One per process (or per scheduler).
+#[derive(Debug, Default)]
+pub struct DiskBudget {
+    reserved: std::sync::Mutex<u64>,
+}
+
+/// Returned to the budget when dropped.
+#[derive(Debug)]
+pub struct Reservation {
+    budget: std::sync::Arc<DiskBudget>,
+    bytes: u64,
+}
+
+impl DiskBudget {
+    /// Reserves `bytes` if `free`, less what other jobs reserved, still
+    /// leaves `floor`.
+    pub fn reserve(
+        self: &std::sync::Arc<Self>,
+        free: u64,
+        bytes: u64,
+        floor: u64,
+    ) -> Option<Reservation> {
+        let mut reserved = self
+            .reserved
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let available = free.saturating_sub(*reserved);
+        (available >= bytes.saturating_add(floor)).then(|| {
+            *reserved = reserved.saturating_add(bytes);
+            Reservation {
+                budget: std::sync::Arc::clone(self),
+                bytes,
+            }
+        })
+    }
+
+    pub fn reserved(&self) -> u64 {
+        *self
+            .reserved
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        let mut reserved = self
+            .budget
+            .reserved
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *reserved = reserved.saturating_sub(self.bytes);
+    }
+}
+
 /// Creates the output directory and refuses to use it through a symlink.
 pub async fn prepare_output_dir(directory: &Path) -> Result<(), PublicError> {
     tokio::fs::create_dir_all(directory)
@@ -286,6 +355,46 @@ mod tests {
         assert!(source.exists());
         assert!(!directory.join("Clip.mp4").exists());
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn free_space_is_reported_for_real_paths_only() {
+        assert!(free_bytes(&std::env::temp_dir()).is_some_and(|free| free > 0));
+        assert!(free_bytes(Path::new("/nonexistent/highvi")).is_none());
+    }
+
+    #[test]
+    fn reservations_share_free_space_and_return_it() {
+        let budget = std::sync::Arc::new(DiskBudget::default());
+        let first = budget.reserve(1_000, 600, 100).unwrap();
+        // 1 000 free − 600 promised leaves 400: not enough for 400 + floor.
+        assert!(budget.reserve(1_000, 400, 100).is_none());
+        let second = budget.reserve(1_000, 300, 100).unwrap();
+        assert_eq!(budget.reserved(), 900);
+        drop(first);
+        drop(second);
+        assert_eq!(budget.reserved(), 0);
+        assert!(budget.reserve(1_000, 900, 100).is_some());
+    }
+
+    #[test]
+    fn concurrent_reservations_never_overcommit() {
+        let budget = std::sync::Arc::new(DiskBudget::default());
+        let granted = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                let budget = std::sync::Arc::clone(&budget);
+                let granted = std::sync::Arc::clone(&granted);
+                scope.spawn(move || {
+                    if let Some(reservation) = budget.reserve(10_000, 1_000, 500) {
+                        granted.lock().unwrap().push(reservation);
+                    }
+                });
+            }
+        });
+        // (10 000 − 500 floor) / 1 000 = 9 jobs fit.
+        assert_eq!(granted.lock().unwrap().len(), 9);
+        assert_eq!(budget.reserved(), 9_000);
     }
 
     #[tokio::test]

@@ -66,6 +66,9 @@ Extractor-related failures carry a `hint` to update yt-dlp when it is older than
 | yt-dlp retries | 3 requests, 5 fragments, 1 extractor |
 | yt-dlp `PATH` | `<job>/bin` with only a link to the real `python3`: no helpers (phantomjs, FFmpeg); JS runtimes off via `--no-js-runtimes` |
 | Diagnostic report | 4 KiB, in memory, failed jobs only |
+| Track download | 24 h each; stopped as `download_stalled` below 64 KiB of progress in any 2 min (rate floor over yt-dlp's stdout progress, so trickles count as stalls; a restarted counter keeps counting) |
+| Disk | before downloading: free − other jobs' reservations ≥ 2 × estimated size + 512 MiB floor; while downloading and muxing (both watched every second): stop below the floor (`insufficient_disk_space`) |
+| DevTools messages | events ≤ 1 MiB (larger skipped unparsed), replies ≤ 16 MiB; queued messages weighted (events × 8 for parsed-JSON overhead) ≤ 64 MiB, backlog ≤ 16 MiB; tracked URLs ≤ 8 MiB; queue overflow or untracked requests → `discovery_overloaded` |
 | Mux | 30 min |
 | Jobs | 1 at a time; Chrome never runs while idle |
 

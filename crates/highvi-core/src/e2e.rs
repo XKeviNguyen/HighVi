@@ -188,6 +188,8 @@ pub(crate) struct Route {
     /// Answered instead when the client is headless Chrome, as bot checks
     /// that single out automated browsers do.
     pub for_headless: Option<Arc<Route>>,
+    /// Send the body in pieces of this size with this pause between them.
+    pub trickle: Option<(usize, Duration)>,
 }
 
 impl Route {
@@ -201,6 +203,14 @@ impl Route {
             required_referer: None,
             headers: Vec::new(),
             for_headless: None,
+            trickle: None,
+        }
+    }
+
+    pub fn trickled(self, chunk: usize, pause: Duration) -> Self {
+        Self {
+            trickle: Some((chunk, pause)),
+            ..self
         }
     }
 
@@ -484,7 +494,16 @@ async fn serve(
     response.push_str("\r\n");
     tls.write_all(response.as_bytes()).await?;
     if method != "HEAD" {
-        tls.write_all(&route.body).await?;
+        match route.trickle {
+            Some((chunk, pause)) => {
+                for piece in route.body.chunks(chunk.max(1)) {
+                    tls.write_all(piece).await?;
+                    tls.flush().await?;
+                    tokio::time::sleep(pause).await;
+                }
+            }
+            None => tls.write_all(&route.body).await?,
+        }
     }
     tls.shutdown().await
 }
@@ -1862,4 +1881,219 @@ async fn yt_dlp_ignores_js_runtimes_next_to_its_interpreter() {
     assert!(hermetic.contains("JS runtimes: none"), "{hermetic}");
     assert!(!marker.exists(), "the fake deno was run");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+// ------------------------------------------------- stalls and disk (V1.1 B)
+
+/// One-segment playlist at `media.test/<name>.m3u8` whose segment is the
+/// real muxed fixture segment, served by `route`.
+fn single_segment(fixture: &Fixture, name: &str, route: impl FnOnce(Vec<u8>) -> Route) {
+    let segment = std::fs::read(media(&fixture.tools.ffmpeg).join("muxed/s0.ts")).unwrap();
+    fixture
+        .server
+        .route(&format!("media.test/{name}/s0.ts"), route(segment));
+    fixture.server.route(
+        &format!("media.test/{name}.m3u8"),
+        Route::playlist(&media_playlist(
+            &[&format!("https://media.test/{name}/s0.ts")],
+            "",
+        )),
+    );
+}
+
+fn quick_limits(environment: &mut JobEnvironment, window: Duration, min_bytes: u64) {
+    environment.limits.stall = crate::process::StallPolicy { window, min_bytes };
+}
+
+#[tokio::test]
+async fn stalled_and_trickling_servers_are_stopped_and_cleaned_up() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    // No answer at all for a minute, and a byte every 300 ms.
+    single_segment(&fixture, "silent", |body| {
+        Route::ok("video/mp2t", body).delayed(Duration::from_secs(60))
+    });
+    single_segment(&fixture, "trickle", |body| {
+        Route::ok("video/mp2t", body).trickled(1, Duration::from_millis(300))
+    });
+    for name in ["silent", "trickle"] {
+        let mut environment = fixture.environment();
+        quick_limits(&mut environment, Duration::from_secs(4), 16 * 1024);
+        let started = Instant::now();
+        let (result, _) = fixture
+            .run_with(
+                &environment,
+                direct(&format!("https://media.test/{name}.m3u8")),
+                None,
+            )
+            .await;
+        assert_code(&result, "download_stalled");
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "{name}: {:?}",
+            started.elapsed()
+        );
+        assert!(fixture.saved_files().is_empty());
+        fixture.assert_no_job_dirs();
+    }
+}
+
+#[tokio::test]
+async fn a_slow_but_steady_server_is_not_a_stall() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    // 2 KiB every 0.25 s: the 106 KB segment takes ~13 s, over two 5 s
+    // windows, so this passes only if progress inside a fragment counts.
+    // The first window also absorbs yt-dlp's start-up on a busy machine.
+    single_segment(&fixture, "steady", |body| {
+        Route::ok("video/mp2t", body).trickled(2 * 1024, Duration::from_millis(250))
+    });
+    let mut environment = fixture.environment();
+    quick_limits(&mut environment, Duration::from_secs(5), 8 * 1024);
+    let (result, _) = fixture
+        .run_with(&environment, direct("https://media.test/steady.m3u8"), None)
+        .await;
+    let outcome = result.unwrap();
+    let (streams, _, clean) = fixture.inspect(&outcome.saved_to);
+    assert_eq!(streams, ["video", "audio"]);
+    assert!(clean);
+}
+
+#[tokio::test]
+async fn a_download_over_its_deadline_is_stopped() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    single_segment(&fixture, "long", |body| {
+        Route::ok("video/mp2t", body).trickled(4 * 1024, Duration::from_millis(100))
+    });
+    let mut environment = fixture.environment();
+    environment.limits.track_deadline = Duration::from_secs(2);
+    let (result, _) = fixture
+        .run_with(&environment, direct("https://media.test/long.m3u8"), None)
+        .await;
+    assert_code(&result, "download_timeout");
+    fixture.assert_no_job_dirs();
+}
+
+#[tokio::test]
+async fn too_little_free_space_refuses_before_and_stops_during_a_download() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    // Before: less free space than the floor HighVi keeps.
+    single_segment(&fixture, "space", |body| {
+        Route::ok("video/mp2t", body).trickled(8 * 1024, Duration::from_millis(200))
+    });
+    let mut environment = fixture.environment();
+    environment.free_space = Some(Arc::new(|| Some(100 * 1024 * 1024)));
+    let (result, _) = fixture
+        .run_with(&environment, direct("https://media.test/space.m3u8"), None)
+        .await;
+    assert_code(&result, "insufficient_disk_space");
+    assert!(
+        !fixture
+            .server
+            .hits()
+            .iter()
+            .any(|hit| hit.path == "/space/s0.ts"),
+        "media was fetched although it could not fit"
+    );
+
+    // During: plenty of space at the start, then the disk fills up.
+    let calls = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let counter = Arc::clone(&calls);
+    environment.free_space = Some(Arc::new(move || {
+        let call = counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(if call == 0 {
+            100 * 1024 * 1024 * 1024
+        } else {
+            1024
+        })
+    }));
+    let started = Instant::now();
+    let (result, updates) = fixture
+        .run_with(&environment, direct("https://media.test/space.m3u8"), None)
+        .await;
+    assert_code(&result, "insufficient_disk_space");
+    assert!(
+        updates
+            .iter()
+            .any(|update| update.stage == Stage::DownloadingVideo)
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(fixture.saved_files().is_empty());
+    fixture.assert_no_job_dirs();
+}
+
+/// A hostile page floods discovery: thousands of requests with long URLs and
+/// multi-megabyte events. HighVi stays within its bounds and says so,
+/// instead of reporting "no video" as if it had seen everything.
+#[tokio::test]
+async fn a_request_flood_is_reported_as_overload() {
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/flood",
+        Route::html(
+            "<!doctype html><title>Flood</title><script>\
+             const pad = 'x'.repeat(7000);\
+             for (let i = 0; i < 3000; i++) fetch('https://ads.test/' + i + '?' + pad).catch(() => {});\
+             const big = 'data:image/png;base64,' + 'A'.repeat(2 * 1024 * 1024);\
+             for (let i = 0; i < 20; i++) { const image = new Image(); image.src = big + i; }\
+             </script>",
+        ),
+    );
+    let started = Instant::now();
+    let (result, _) = fixture.run(page("https://page.test/flood")).await;
+    assert_code(&result, "discovery_overloaded");
+    assert!(
+        started.elapsed() < Duration::from_secs(60),
+        "{:?}",
+        started.elapsed()
+    );
+    let report = fixture.last_report.lock().unwrap().clone();
+    assert!(!report.contains("untracked requests 0,"), "{report}");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// Measurement, not a pass/fail check: peak memory of the HighVi process
+/// while a hostile page floods discovery. Run alone:
+/// `cargo test -p highvi-core flood_peak_memory -- --ignored --nocapture`
+#[tokio::test]
+#[ignore = "measurement; run alone"]
+async fn flood_peak_memory() {
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/flood",
+        Route::html(
+            "<!doctype html><title>Flood</title><script>\
+             const pad = 'x'.repeat(7000);\
+             for (let i = 0; i < 3000; i++) fetch('https://ads.test/' + i + '?' + pad).catch(() => {});\
+             const big = 'data:image/png;base64,' + 'A'.repeat(2 * 1024 * 1024);\
+             for (let i = 0; i < 40; i++) { const image = new Image(); image.src = big + i; }\
+             </script>",
+        ),
+    );
+    let (result, _) = fixture.run(page("https://page.test/flood")).await;
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let peak = status
+        .lines()
+        .find(|line| line.starts_with("VmHWM"))
+        .unwrap_or_default();
+    eprintln!(
+        "flood result: {:?}; {peak}",
+        result.err().map(|error| error.code)
+    );
+    eprintln!("{}", fixture.last_report.lock().unwrap());
 }

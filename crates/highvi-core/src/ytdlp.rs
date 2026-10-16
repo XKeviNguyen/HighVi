@@ -124,7 +124,11 @@ impl YtDlpPolicy<'_> {
                 "--newline",
                 "--progress",
                 "--progress-template",
-                "download:HIGHVI_PROGRESS|%(progress.status)s|%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s",
+                "download:HIGHVI_PROGRESS|%(progress.status)s|%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.downloaded_bytes)s",
+                // At most one progress line per second: enough for the UI
+                // and the stall watch, without flooding either.
+                "--progress-delta",
+                "1",
                 // Fetch HLS in yt-dlp itself, and fail rather than silently
                 // leave gaps where a fragment could not be downloaded.
                 "--downloader",
