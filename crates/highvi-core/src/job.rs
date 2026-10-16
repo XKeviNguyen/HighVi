@@ -695,7 +695,6 @@ async fn mux(
         }),
         None => None,
     };
-    // The muxed copy is about as large as its inputs.
     let mut inputs = 0;
     for path in [Some(&video_path), audio_path.as_ref()]
         .into_iter()
@@ -705,10 +704,11 @@ async fn mux(
             .await
             .map_or(0, |metadata| metadata.len());
     }
+    let needed = mux_space_needed(inputs);
     if let Some(free) = env.free_space()
-        && free < inputs.saturating_add(env.limits.disk_floor)
+        && free < needed.saturating_add(env.limits.disk_floor)
     {
-        return Err(no_space_error(Some(inputs), free));
+        return Err(no_space_error(Some(needed), free));
     }
     let output = job.path().join(OUTPUT_FILE);
     let env_vars = ["PATH", "LANG"]
@@ -812,6 +812,12 @@ fn stalled_error(limits: &JobLimits) -> PublicError {
     )
 }
 
+/// Space a mux needs: about its inputs, plus a margin for container
+/// overhead, so the disk watch does not stop it just before it finishes.
+fn mux_space_needed(inputs: u64) -> u64 {
+    inputs.saturating_add(inputs / 16)
+}
+
 fn no_space_error(needed: Option<u64>, free: u64) -> PublicError {
     let need = needed
         .filter(|needed| *needed > 0)
@@ -883,7 +889,7 @@ fn run_error(error: RunError, tool: &str, timeout_code: &str) -> PublicError {
             "mux_failed" => mux_error(),
             _ => PublicError::new(
                 "download_timeout",
-                "The download took longer than HighVi allows for one track (6 hours).",
+                "The download took longer than HighVi allows for one track.",
             ),
         },
         RunError::Stalled => stalled_error(&JobLimits::default()),
@@ -948,6 +954,14 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_mux_reserves_a_margin_above_its_inputs() {
+        // An output a few percent larger than its inputs still fits.
+        let inputs = 1_000 * MIB;
+        assert!(mux_space_needed(inputs) >= inputs + inputs / 20);
+        assert_eq!(mux_space_needed(u64::MAX), u64::MAX);
+    }
 
     #[test]
     fn parses_only_structured_progress_lines() {
