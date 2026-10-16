@@ -7,10 +7,11 @@ Compact, resumable record. Newest mission first.
 ## Current state
 
 - PR #5 (A: failure attribution, diagnostics, helper policy) **merged** → main 2b65601.
-- PR #6 (B: stall/deadline/disk, DevTools byte bounds) open; reviewer re-verified at 6012ac2
-  (all closed; #5 unreachable delay, accepted); 86aa4db adds mux margin + stale text fix.
+- PR #6 (B: stall/deadline/disk, DevTools byte bounds) **merged by the owner** → main 6b32985
+  (head 86aa4db: CI green, Codex r5 clean, reviewer findings closed; #5 accepted).
+- Merges: the auto-mode permission check blocks `gh pr merge`; the owner merges.
 - `feature/v1.1-bulk-queue` (C: queue + UI + too-old yt-dlp) rebased on B; 156 tests locally.
-- Next: merge B → open C (Codex, CI) → D (docs, packages, release checks).
+- Next: C open (Codex, CI) → owner merges → D (docs, packages, release checks).
 - Failed gates: — . Open issue: `target/` was deleted by an unknown actor between
   11:20 and 11:22 local (not by any logged command of this session, its agents or
   Codex); only build artifacts lost (incl. V1 bundles; rebuildable from c990a01).
