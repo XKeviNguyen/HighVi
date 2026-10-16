@@ -17,7 +17,7 @@ use crate::{
         prepare_output_dir, publish_unique,
     },
     formats::{MediaInfo, select_media},
-    mux::{MuxInput, SNIFF_BYTES, mux_args, sniff},
+    mux::{Container, MuxInput, SNIFF_BYTES, mux_args, sniff},
     process::{
         CancelToken, DiskFloor, RunError, StallPolicy, Stream, Watch, run_captured, run_streaming,
         tool_command,
@@ -981,13 +981,17 @@ async fn mux(
         true => Some(find_track(job.path(), "audio").await?),
         false => None,
     };
-    let audio = match &audio_path {
-        Some(path) => Some(MuxInput {
-            container: sniff_file(path).await?,
-            path,
-        }),
+    let audio_container = match &audio_path {
+        Some(path) => Some(sniff_file(path).await?),
         None => None,
     };
+    if let (Some(path), Some(Container::Ac3 | Container::Eac3)) = (&audio_path, audio_container) {
+        unpack_dolby_in_place(path).await?;
+    }
+    let audio = audio_path
+        .as_ref()
+        .zip(audio_container)
+        .map(|(path, container)| MuxInput { path, container });
     let mut inputs = 0;
     for path in [Some(&video_path), audio_path.as_ref()]
         .into_iter()
@@ -1075,6 +1079,31 @@ async fn find_track(directory: &Path, stem: &str) -> Result<PathBuf, PublicError
     }
 }
 
+/// Replaces packed (E-)AC-3 audio with its plain frames (see
+/// [`crate::mux::unpack_dolby`]), in the job directory.
+async fn unpack_dolby_in_place(path: &Path) -> Result<(), PublicError> {
+    let source = path.to_path_buf();
+    let plain = path.with_extension("plain");
+    let target = plain.clone();
+    let unpacked = tokio::task::spawn_blocking(move || crate::mux::unpack_dolby(&source, &target))
+        .await
+        .map_err(|_| mux_error())?;
+    if unpacked.is_err() {
+        let _ = tokio::fs::remove_file(&plain).await;
+        return Err(unsupported_container());
+    }
+    tokio::fs::rename(&plain, path)
+        .await
+        .map_err(|_| mux_error())
+}
+
+fn unsupported_container() -> PublicError {
+    PublicError::new(
+        "unsupported_container",
+        "The downloaded media is not MPEG-TS, MP4, AAC or Dolby (E-)AC-3, so HighVi cannot make an MP4 from it safely.",
+    )
+}
+
 async fn sniff_file(path: &Path) -> Result<crate::mux::Container, PublicError> {
     let mut header = Vec::with_capacity(SNIFF_BYTES);
     let file = tokio::fs::File::open(path).await.map_err(|_| mux_error())?;
@@ -1082,12 +1111,7 @@ async fn sniff_file(path: &Path) -> Result<crate::mux::Container, PublicError> {
         .read_to_end(&mut header)
         .await
         .map_err(|_| mux_error())?;
-    sniff(&header).ok_or_else(|| {
-        PublicError::new(
-            "unsupported_container",
-            "The downloaded media is not MPEG-TS, MP4 or AAC, so HighVi cannot make an MP4 from it safely.",
-        )
-    })
+    sniff(&header).ok_or_else(unsupported_container)
 }
 
 fn cancelled_error() -> PublicError {
