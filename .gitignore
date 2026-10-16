@@ -5,3 +5,14 @@
 /.vscode/
 *.part
 *.ytdl
+
+# Never commit secrets, cookies or local notes
+.env
+.env.*
+*.pem
+*.key
+*.p12
+cookies.txt
+*.cookies
+.netrc
+/.ledger/

@@ -1,7 +1,6 @@
 # HighVi architecture
 
-One page for contributors. Security details live in [SECURITY.md](../SECURITY.md); the
-resumable work log and verification evidence live in [LEDGER.md](LEDGER.md).
+One page for contributors. Security details live in [SECURITY.md](../SECURITY.md).
 
 ## Components
 
@@ -55,7 +54,8 @@ media URL ever crosses into the UI and nothing can be substituted.
 | Media file or segments refused after metadata succeeded | `media_access_denied` |
 
 Extractor-related failures carry a `hint` to update yt-dlp when it is older than the site needs
-(YouTube: 2026.08.19, see LEDGER) or than `RECOMMENDED_YT_DLP`, or more than 90 days old.
+(YouTube: 2026.08.19, because older builds use a client YouTube has refused since
+2026-08-17) or than `RECOMMENDED_YT_DLP`, or more than 90 days old.
 
 ## Bounds
 
