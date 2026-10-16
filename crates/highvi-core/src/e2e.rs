@@ -3361,3 +3361,129 @@ async fn the_highvi_browser_checks_lower_ranked_streams_after_a_rejection() {
     assert_no_chrome_left(&fixture).await;
     fixture.assert_no_job_dirs();
 }
+
+/// Packed AC-3 and E-AC-3 audio (an ID3 tag, then raw frames: how HLS and
+/// Apple's examples serve Dolby audio) is recognised and copied into the
+/// MP4 next to the video, unchanged.
+#[tokio::test]
+async fn packed_dolby_audio_is_copied_into_the_mp4() {
+    let Some(tools) = tools() else {
+        return;
+    };
+    let directory = temp_directory("dolby");
+    let video = directory.join("video.ts");
+    let made = std::process::Command::new(&tools.ffmpeg)
+        .args([
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x48:rate=10:duration=1",
+        ])
+        .args(["-c:v", "libx264", "-f", "mpegts"])
+        .arg(&video)
+        .status()
+        .unwrap();
+    assert!(made.success());
+    for (codec, container, expected) in [
+        ("ac3", crate::mux::Container::Ac3, "ac3"),
+        ("eac3", crate::mux::Container::Eac3, "eac3"),
+    ] {
+        let raw = directory.join(format!("audio.{codec}"));
+        let made = std::process::Command::new(&tools.ffmpeg)
+            .args([
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=duration=1:sample_rate=48000",
+            ])
+            .args(["-c:a", codec, "-f", codec])
+            .arg(&raw)
+            .status()
+            .unwrap();
+        assert!(made.success(), "{codec}");
+        // HLS packed audio, as yt-dlp saves it: segments joined back to
+        // back, each starting with an ID3 tag (a timestamp).
+        let tag = b"ID3\x04\x00\x00\x00\x00\x00\x0aPRIV\x00\x00\x00\x00\x00\x00".to_vec();
+        let frames = std::fs::read(&raw).unwrap();
+        let cut = (1..=frames.len() / 2)
+            .rev()
+            .find(|&at| frames[at..].starts_with(&[0x0b, 0x77]))
+            .unwrap();
+        let mut packed = tag.clone();
+        packed.extend(&frames[..cut]);
+        packed.extend(&tag);
+        packed.extend(&frames[cut..]);
+        let audio = directory.join(format!("audio-{codec}.bin"));
+        std::fs::write(&audio, &packed).unwrap();
+        let header = &packed[..crate::mux::SNIFF_BYTES.min(packed.len())];
+        assert_eq!(crate::mux::sniff(header), Some(container), "{codec}");
+        crate::mux::unpack_dolby(&audio, &|| false).unwrap();
+
+        let output = directory.join(format!("out-{codec}.mp4"));
+        let video_input = crate::mux::MuxInput {
+            path: &video,
+            container: crate::mux::Container::MpegTs,
+        };
+        let audio_input = crate::mux::MuxInput {
+            path: &audio,
+            container,
+        };
+        let muxed = std::process::Command::new(&tools.ffmpeg)
+            .args(crate::mux::mux_args(
+                &video_input,
+                Some(&audio_input),
+                &output,
+            ))
+            .status()
+            .unwrap();
+        assert!(muxed.success(), "{codec}");
+        let probe = std::process::Command::new(&tools.ffprobe)
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=codec_type,codec_name",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&output)
+            .output()
+            .unwrap();
+        let streams = String::from_utf8_lossy(&probe.stdout);
+        assert!(streams.contains("h264,video"), "{codec}: {streams}");
+        assert!(
+            streams.contains(&format!("{expected},audio")),
+            "{codec}: {streams}"
+        );
+        // No tag glued to a frame, and nothing the decoder rejects.
+        let sizes = std::process::Command::new(&tools.ffprobe)
+            .args(["-v", "error", "-select_streams", "a"])
+            .args(["-show_entries", "packet=size", "-of", "csv=p=0"])
+            .arg(&output)
+            .output()
+            .unwrap();
+        let sizes: std::collections::BTreeSet<String> = String::from_utf8_lossy(&sizes.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(sizes.len(), 1, "{codec}: packet sizes {sizes:?}");
+        let decoded = std::process::Command::new(&tools.ffmpeg)
+            .args(["-v", "error", "-i"])
+            .arg(&output)
+            .args(["-f", "null", "-"])
+            .output()
+            .unwrap();
+        assert!(
+            decoded.stderr.is_empty(),
+            "{codec}: {}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}

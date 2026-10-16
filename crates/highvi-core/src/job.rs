@@ -17,7 +17,7 @@ use crate::{
         prepare_output_dir, publish_unique,
     },
     formats::{MediaInfo, select_media},
-    mux::{MuxInput, SNIFF_BYTES, mux_args, sniff},
+    mux::{Container, MuxInput, SNIFF_BYTES, mux_args, sniff},
     process::{
         CancelToken, DiskFloor, RunError, StallPolicy, Stream, Watch, run_captured, run_streaming,
         tool_command,
@@ -981,13 +981,17 @@ async fn mux(
         true => Some(find_track(job.path(), "audio").await?),
         false => None,
     };
-    let audio = match &audio_path {
-        Some(path) => Some(MuxInput {
-            container: sniff_file(path).await?,
-            path,
-        }),
+    let audio_container = match &audio_path {
+        Some(path) => Some(sniff_file(path).await?),
         None => None,
     };
+    if let (Some(path), Some(Container::Ac3 | Container::Eac3)) = (&audio_path, audio_container) {
+        unpack_dolby_in_place(path, cancel).await?;
+    }
+    let audio = audio_path
+        .as_ref()
+        .zip(audio_container)
+        .map(|(path, container)| MuxInput { path, container });
     let mut inputs = 0;
     for path in [Some(&video_path), audio_path.as_ref()]
         .into_iter()
@@ -1075,19 +1079,60 @@ async fn find_track(directory: &Path, stem: &str) -> Result<PathBuf, PublicError
     }
 }
 
+/// Rewrites packed (E-)AC-3 audio as its plain frames, in place (see
+/// [`crate::mux::unpack_dolby`]: no extra disk space), stopping on cancel.
+async fn unpack_dolby_in_place(path: &Path, cancel: &CancelToken) -> Result<(), PublicError> {
+    let path = path.to_path_buf();
+    let token = cancel.clone();
+    let unpacked = tokio::task::spawn_blocking(move || {
+        crate::mux::unpack_dolby(&path, &|| token.is_cancelled())
+    })
+    .await
+    .map_err(|_| mux_error())?;
+    match unpacked {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => Err(cancelled_error()),
+        Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+            Err(unsupported_container())
+        }
+        Err(_) => Err(mux_error()),
+    }
+}
+
+fn unsupported_container() -> PublicError {
+    PublicError::new(
+        "unsupported_container",
+        "The downloaded media is not MPEG-TS, MP4, AAC or Dolby (E-)AC-3, so HighVi cannot make an MP4 from it safely.",
+    )
+}
+
+/// Longest leading ID3 tag read past to find what follows it.
+const MAX_LEADING_ID3: u64 = 1024 * 1024;
+
 async fn sniff_file(path: &Path) -> Result<crate::mux::Container, PublicError> {
-    let mut header = Vec::with_capacity(SNIFF_BYTES);
-    let file = tokio::fs::File::open(path).await.map_err(|_| mux_error())?;
-    file.take(SNIFF_BYTES as u64)
+    let mut start = [0_u8; 10];
+    let mut file = tokio::fs::File::open(path).await.map_err(|_| mux_error())?;
+    let read = file.read(&mut start).await.map_err(|_| mux_error())?;
+    // Packed audio starts with an ID3 tag, which can be longer than the
+    // sniffed bytes: read past all of it (bounded) to see the frames.
+    let tag = if read == 10
+        && start.starts_with(b"ID3")
+        && start[6..10].iter().all(|byte| byte & 0x80 == 0)
+    {
+        let length = start[6..10]
+            .iter()
+            .fold(0_u64, |total, byte| (total << 7) | u64::from(*byte));
+        let footer = if start[5] & 0x10 != 0 { 10 } else { 0 };
+        (length + footer).min(MAX_LEADING_ID3)
+    } else {
+        0
+    };
+    let mut header = start[..read].to_vec();
+    file.take(tag + SNIFF_BYTES as u64)
         .read_to_end(&mut header)
         .await
         .map_err(|_| mux_error())?;
-    sniff(&header).ok_or_else(|| {
-        PublicError::new(
-            "unsupported_container",
-            "The downloaded media is not MPEG-TS, MP4 or AAC, so HighVi cannot make an MP4 from it safely.",
-        )
-    })
+    sniff(&header).ok_or_else(unsupported_container)
 }
 
 fn cancelled_error() -> PublicError {
@@ -1311,6 +1356,33 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn packed_audio_behind_a_long_id3_tag_is_recognised() {
+        let directory = crate::filesystem::temp_directory("long-id3");
+        // A 2000-byte tag: far past the sniffed bytes.
+        let length = 2000_u32;
+        let size = [
+            (length >> 21) as u8 & 0x7f,
+            (length >> 14) as u8 & 0x7f,
+            (length >> 7) as u8 & 0x7f,
+            length as u8 & 0x7f,
+        ];
+        let mut bytes = b"ID3\x04\x00\x00".to_vec();
+        bytes.extend(size);
+        bytes.extend(vec![0_u8; length as usize]);
+        bytes.extend([0x0b, 0x77, 0xb8, 0xe0, 0x1c, 0x30]);
+        bytes.resize(bytes.len() + 1530, 0);
+        let path = directory.join("audio.ac3");
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(sniff_file(&path).await.unwrap(), Container::Ac3);
+        let aac = directory.join("audio.aac");
+        let mut adts = bytes[..10 + length as usize].to_vec();
+        adts.extend([0xff, 0xf1, 0x50, 0x80, 0x02, 0x1f, 0xfc]);
+        std::fs::write(&aac, &adts).unwrap();
+        assert_eq!(sniff_file(&aac).await.unwrap(), Container::Adts);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn a_mux_reserves_a_margin_above_its_inputs() {

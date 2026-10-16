@@ -85,9 +85,11 @@ const MAX_STORED_PLAYLISTS: usize = 40;
 const MAX_STORED_PLAYLIST_BYTES: usize = 32 * 1024 * 1024;
 /// Rejected rounds after which a window gets no fresh body budgets.
 const MAX_REJECTED_ROUNDS: u32 = 5;
-/// Time a window's checks may take on top of its budget (3 candidates,
-/// each checked by yt-dlp within its own 60 s limit).
-const CHECKS_ALLOWANCE: Duration = Duration::from_secs(MAX_CANDIDATES as u64 * 60);
+/// Time a window's checks may take past its budget. No round starts after
+/// the deadline, so at most one runs over: up to 3 candidates checked by
+/// yt-dlp within its own 60 s limit each, plus the page title (3 s) and
+/// each tool's start-up, hence the margin.
+const CHECKS_ALLOWANCE: Duration = Duration::from_secs(MAX_CANDIDATES as u64 * 60 + 30);
 
 const HLS_MIME_TYPES: &[&str] = &[
     "application/vnd.apple.mpegurl",
