@@ -43,6 +43,12 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 const PAGE_BUDGET: Duration = Duration::from_secs(30);
 /// How long a visible browser window waits for the user to start the video.
 pub const INTERACTIVE_BUDGET: Duration = Duration::from_secs(10 * 60);
+/// How long a window HighVi opened by itself waits: shorter, so an
+/// unattended queue does not hold the one browser for long. The user can
+/// still open it themselves for the full [`INTERACTIVE_BUDGET`].
+pub const AUTO_WINDOW_BUDGET: Duration = Duration::from_secs(3 * 60);
+/// How long a row says the window is about to open before it does.
+pub const WINDOW_NOTICE: Duration = Duration::from_secs(3);
 /// Without candidates this long after load, try starting the page's players.
 const PLAY_AFTER_LOAD: Duration = Duration::from_secs(4);
 /// …or this long after navigating when the page never finishes loading.
@@ -274,6 +280,23 @@ pub fn desktop_display(var: impl Fn(&str) -> Option<OsString>) -> Option<Display
     })
 }
 
+/// Whether a visible window has a display to open on.
+pub(crate) fn can_open_window() -> bool {
+    desktop_display(desktop_var).is_some()
+}
+
+/// The environment of the desktop HighVi runs on. Tests never use the
+/// desktop they happen to run on: only a display they name (an Xvfb), so no
+/// window opens on someone's screen.
+fn desktop_var(name: &str) -> Option<OsString> {
+    #[cfg(not(test))]
+    return std::env::var_os(name);
+    #[cfg(test)]
+    return (name == "DISPLAY")
+        .then(|| std::env::var_os("HIGHVI_TEST_DISPLAY"))
+        .flatten();
+}
+
 /// The first Chrome or Chromium on `PATH`.
 pub fn find_browser() -> Option<std::path::PathBuf> {
     [
@@ -295,19 +318,9 @@ pub async fn discover_in_browser<T>(
     cancel: &mut CancelToken,
     check: &mut Check<'_, T>,
 ) -> Result<(BrowserFinding, Option<T>), PublicError> {
-    // Tests never use the desktop HighVi happens to run on: only a display
-    // they name (an Xvfb), so no window opens on someone's screen.
-    #[cfg(not(test))]
-    let desktop = |name: &str| std::env::var_os(name);
-    #[cfg(test)]
-    let desktop = |name: &str| {
-        (name == "DISPLAY")
-            .then(|| std::env::var_os("HIGHVI_TEST_DISPLAY"))
-            .flatten()
-    };
     let display = match run.mode {
         Mode::Headless => None,
-        Mode::Interactive => Some(desktop_display(desktop).ok_or_else(no_display)?),
+        Mode::Interactive => Some(desktop_display(desktop_var).ok_or_else(no_display)?),
     };
     let profile = run.work_dir.join("chrome-profile");
     write_profile_preferences(&profile)

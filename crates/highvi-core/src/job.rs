@@ -30,7 +30,10 @@ use crate::{
 use serde::Serialize;
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 use tokio::io::AsyncReadExt;
@@ -56,6 +59,12 @@ pub struct JobLimits {
     pub disk_floor: u64,
     /// How long a visible HighVi browser window waits for a video.
     pub interactive_budget: Duration,
+    /// How long a window HighVi opens by itself waits, when automatic
+    /// discovery fails in a way such a window may get past.
+    pub auto_window_budget: Duration,
+    /// How long the row says a window is about to open before it does, so
+    /// the window never comes as a surprise.
+    pub window_notice: Duration,
 }
 
 impl Default for JobLimits {
@@ -72,6 +81,8 @@ impl Default for JobLimits {
             track_deadline: Duration::from_secs(24 * 60 * 60),
             disk_floor: 512 * MIB,
             interactive_budget: crate::browser::INTERACTIVE_BUDGET,
+            auto_window_budget: crate::browser::AUTO_WINDOW_BUDGET,
+            window_notice: crate::browser::WINDOW_NOTICE,
         }
     }
 }
@@ -83,13 +94,18 @@ pub const MAX_BROWSERS: usize = 1;
 /// competing for it.
 pub const MAX_MUXES: usize = 2;
 
-/// Limits shared by every job of one HighVi process. A job holds at most one
-/// of these permits at a time, so waiting for one cannot deadlock.
+/// Limits and settings shared by every job of one HighVi process. A job
+/// holds at most one of these permits at a time, so waiting for one cannot
+/// deadlock.
 #[derive(Debug)]
 pub struct SharedResources {
     pub disk: Arc<DiskBudget>,
     pub browsers: tokio::sync::Semaphore,
     pub muxers: tokio::sync::Semaphore,
+    /// The user's setting: open the HighVi browser window by itself when a
+    /// page needs it (on by default). Read when the window is about to
+    /// open, so switching it off applies to jobs already running.
+    pub auto_window: AtomicBool,
 }
 
 impl Default for SharedResources {
@@ -98,6 +114,7 @@ impl Default for SharedResources {
             disk: Arc::default(),
             browsers: tokio::sync::Semaphore::new(MAX_BROWSERS),
             muxers: tokio::sync::Semaphore::new(MAX_MUXES),
+            auto_window: AtomicBool::new(true),
         }
     }
 }
@@ -161,6 +178,11 @@ impl JobEnvironment {
         Resolver::System
     }
 
+    /// Whether the user lets the HighVi browser window open by itself.
+    fn auto_window(&self) -> bool {
+        self.shared.auto_window.load(Ordering::Relaxed)
+    }
+
     fn policy<'a>(&self, proxy_url: &'a str, referer: Option<&'a str>) -> YtDlpPolicy<'a> {
         YtDlpPolicy {
             proxy_url,
@@ -174,7 +196,9 @@ impl JobEnvironment {
 /// How a job looks for media on a page.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Discovery {
-    /// yt-dlp, then the page's own player in a headless browser.
+    /// yt-dlp, then the page's own player in a headless browser; then, if
+    /// the site refused those or the player needs the user, a visible
+    /// window that opens by itself.
     #[default]
     Automatic,
     /// Straight to a visible HighVi browser window that the user browses
@@ -203,12 +227,25 @@ pub fn browser_can_help(code: &str) -> bool {
     )
 }
 
+/// Failures after which HighVi opens its browser window by itself, sparing
+/// the user a click: [`browser_can_help`], except a page that is simply not
+/// there (the user can still open it), and the window's own endings.
+fn window_opens_unasked(code: &str) -> bool {
+    browser_can_help(code)
+        && !matches!(
+            code,
+            "page_unavailable" | "browser_closed" | "interactive_timeout"
+        )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Stage {
     Discovering,
     /// Waiting for the isolated browser, which one job uses at a time.
     WaitingForBrowser,
+    /// A visible HighVi browser window is about to open by itself.
+    OpeningWindow,
     /// A visible HighVi browser window is open; waiting for the user to
     /// start the video there.
     WaitingForUser,
@@ -498,6 +535,23 @@ async fn fetch(
     Ok((media, reservation))
 }
 
+/// A visible window: how long it waits for the user, and how long the row
+/// says it is about to open first (for a window the user did not ask for).
+#[derive(Clone, Copy)]
+struct Window {
+    budget: Duration,
+    notice: Option<Duration>,
+}
+
+/// The user switched off unasked windows; mapped back to the original
+/// refusal, so it is never shown.
+fn window_not_opened() -> PublicError {
+    PublicError::new(
+        "window_not_opened",
+        "Opening the HighVi browser by itself is switched off.",
+    )
+}
+
 /// What discovery settled on, and the Referer its media needs.
 struct Discovered {
     media: MediaInfo,
@@ -505,8 +559,10 @@ struct Discovered {
 }
 
 /// yt-dlp first; when it finds nothing on a page, the page's own player in
-/// an isolated browser, with each playlist it loads checked by yt-dlp. An
-/// interactive attempt goes straight to a visible browser window.
+/// an isolated browser, with each playlist it loads checked by yt-dlp. When
+/// the site refuses that browser or its player needs the user, a visible
+/// browser window opens by itself. An interactive attempt goes straight to
+/// a visible browser window.
 #[allow(clippy::too_many_arguments)]
 async fn discover(
     env: &JobEnvironment,
@@ -531,10 +587,71 @@ async fn discover(
             return Err(crate::browser::browser_unavailable());
         };
         return Box::pin(discover_in_window(
-            env, job, &proxy_url, proxy, chrome, page, cancel, report, recorder,
+            env,
+            job,
+            &proxy_url,
+            proxy,
+            chrome,
+            page,
+            Window {
+                budget: env.limits.interactive_budget,
+                notice: None,
+            },
+            cancel,
+            report,
+            recorder,
         ))
         .await;
     }
+    let error = match Box::pin(discover_automatically(
+        env, job, proxy, source, cancel, report, recorder,
+    ))
+    .await
+    {
+        Err(error) => error,
+        found => return found,
+    };
+    match (&env.chrome, source) {
+        (Some(chrome), ValidatedSource::Page { page })
+            if source.kind() == SourceKind::Page
+                && window_opens_unasked(&error.code)
+                && env.auto_window()
+                && !cancel.is_cancelled()
+                && crate::browser::can_open_window() =>
+        {
+            let window = Window {
+                budget: env.limits.auto_window_budget,
+                notice: Some(env.limits.window_notice),
+            };
+            match Box::pin(discover_in_window(
+                env, job, &proxy_url, proxy, chrome, page, window, cancel, report, recorder,
+            ))
+            .await
+            {
+                // A window that could not run (crash, unusable display) or
+                // that the user switched off says less than the refusal,
+                // which still offers the button.
+                Err(window) if window.code != "cancelled" && !browser_can_help(&window.code) => {
+                    Err(error)
+                }
+                ended => ended,
+            }
+        }
+        _ => Err(error),
+    }
+}
+
+/// yt-dlp, then the page's own player in a headless browser.
+async fn discover_automatically(
+    env: &JobEnvironment,
+    job: &JobDir,
+    proxy: &EgressProxy,
+    source: &ValidatedSource,
+    cancel: &mut CancelToken,
+    report: &(dyn Fn(JobUpdate) + Send + Sync),
+    recorder: &Mutex<Diagnostics>,
+) -> Result<Discovered, PublicError> {
+    let proxy_url = proxy.url();
     let referer = source.discovery_referer();
     let first = probe(
         env,
@@ -569,15 +686,7 @@ async fn discover(
         Box::pin(async { None })
     };
     let finding = match browse(
-        env,
-        job,
-        &proxy_url,
-        chrome,
-        page,
-        Mode::Headless,
-        cancel,
-        report,
-        &mut later,
+        env, job, &proxy_url, chrome, page, None, cancel, report, &mut later,
     )
     .await
     {
@@ -616,7 +725,7 @@ async fn browse<T>(
     proxy_url: &str,
     chrome: &std::path::Path,
     page: &url::Url,
-    mode: Mode,
+    window: Option<Window>,
     cancel: &mut CancelToken,
     report: &(dyn Fn(JobUpdate) + Send + Sync),
     check: &mut Check<'_, T>,
@@ -625,6 +734,29 @@ async fn browse<T>(
     let browser_permit = tokio::select! {
         permit = env.shared.browsers.acquire() => permit.map_err(|_| crate::browser::browser_failed())?,
         () = cancel.cancelled() => return Err(cancelled_error()),
+    };
+    let (mode, interactive_budget) = match window {
+        None => (Mode::Headless, env.limits.interactive_budget),
+        Some(window) => {
+            // Said once the browser is free, right before the window
+            // opens, however long the wait for it was.
+            if let Some(notice) = window.notice {
+                // Switched off while waiting for the browser: never
+                // announce a window that will not open.
+                if !env.auto_window() {
+                    return Err(window_not_opened());
+                }
+                report(JobUpdate::stage(Stage::OpeningWindow));
+                tokio::select! {
+                    () = tokio::time::sleep(notice) => {}
+                    () = cancel.cancelled() => return Err(cancelled_error()),
+                }
+                if !env.auto_window() {
+                    return Err(window_not_opened());
+                }
+            }
+            (Mode::Interactive, window.budget)
+        }
     };
     report(JobUpdate::stage(match mode {
         Mode::Headless => Stage::Browsing,
@@ -637,7 +769,7 @@ async fn browse<T>(
             proxy_url,
             work_dir: job.path(),
             mode,
-            interactive_budget: env.limits.interactive_budget,
+            interactive_budget,
             #[cfg(test)]
             insecure_tls: env.fixture.is_some(),
         },
@@ -663,6 +795,7 @@ async fn discover_in_window(
     proxy: &EgressProxy,
     chrome: &std::path::Path,
     page: &url::Url,
+    window: Window,
     cancel: &mut CancelToken,
     report: &(dyn Fn(JobUpdate) + Send + Sync),
     recorder: &Mutex<Diagnostics>,
@@ -704,7 +837,7 @@ async fn discover_in_window(
         proxy_url,
         chrome,
         page,
-        Mode::Interactive,
+        Some(window),
         cancel,
         report,
         &mut check,
@@ -842,7 +975,9 @@ fn empty_browser_result(finding: &BrowserFinding, mode: Mode) -> PublicError {
 }
 
 /// yt-dlp failures that mean "nothing found here", as opposed to a refusal
-/// (blocked address, sign-in, DRM, 403…) that a browser must not work around.
+/// (blocked address, sign-in, DRM, 403…) that a headless browser must not
+/// work around. Some refusals open the visible window instead, where the
+/// user acts ([`window_opens_unasked`]).
 fn worth_a_browser(error: &PublicError) -> bool {
     matches!(
         error.code.as_str(),
@@ -1356,6 +1491,24 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_failures_a_window_may_fix_open_one_unasked() {
+        for code in ["host_firewall_block", "access_denied", "no_media_found"] {
+            assert!(window_opens_unasked(code), "{code}");
+        }
+        for code in [
+            "page_unavailable",
+            "browser_closed",
+            "interactive_timeout",
+            "drm_not_supported",
+            "rate_limited",
+            "unsafe_network_target",
+            "cancelled",
+        ] {
+            assert!(!window_opens_unasked(code), "{code}");
+        }
+    }
 
     #[tokio::test]
     async fn packed_audio_behind_a_long_id3_tag_is_recognised() {

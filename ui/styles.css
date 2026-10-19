@@ -14,6 +14,12 @@
   --danger: #ff3b5c;
   --danger-soft: rgba(255, 59, 92, 0.1);
   --amber: #e8ff6b;
+  /* "Needs you": amber phosphor, the other classic CRT colour. Distinct from
+     success green and error red, 11.3:1 on --bg (WCAG AAA). Never the only
+     cue: rows that need the user also get a label, an icon and a border. */
+  --attention: #ffb000;
+  --attention-text: #ffd27a;
+  --attention-soft: rgba(255, 176, 0, 0.1);
   --glow: 0 0 6px rgba(0, 255, 65, 0.55), 0 0 18px rgba(0, 255, 65, 0.25);
   /* Liberation Mono / Cousine first: they cover Vietnamese tone marks. */
   --mono: "Liberation Mono", Cousine, "JetBrains Mono", "Fira Code", "DejaVu Sans Mono", monospace;
@@ -567,6 +573,44 @@ button:disabled {
   margin: 16px 0 10px;
 }
 
+.auto-window {
+  margin: 0 0 12px;
+}
+
+.auto-window .switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12.5px;
+}
+
+.auto-window input {
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--green);
+}
+
+.auto-window input:focus-visible {
+  outline: 2px solid var(--green);
+  outline-offset: 2px;
+}
+
+.auto-window .hint {
+  margin-top: 4px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .concurrency {
   margin: 0;
 }
@@ -611,6 +655,47 @@ button:disabled {
 
 .job.failed {
   border-color: rgba(255, 59, 92, 0.55);
+}
+
+.job.needs-you {
+  border-color: var(--attention);
+  border-left-width: 4px;
+  background: linear-gradient(90deg, var(--attention-soft), rgba(0, 0, 0, 0.55) 60%);
+  animation: attention-breathe 2.4s ease-in-out infinite;
+}
+
+.job.running.needs-you .job-dot {
+  background: var(--attention);
+  box-shadow: 0 0 6px rgba(255, 176, 0, 0.6);
+  animation: pulse 2.4s ease-in-out infinite;
+}
+
+.job.needs-you .progress-track {
+  border-color: rgba(255, 176, 0, 0.45);
+}
+
+.job.needs-you .progress-bar {
+  background: var(--attention);
+  box-shadow: 0 0 6px rgba(255, 176, 0, 0.55);
+}
+
+.job.needs-you .job-status {
+  color: var(--attention-text);
+  font-weight: 700;
+}
+
+.job.needs-you .job-status::before {
+  content: "\25B6  ";
+  color: var(--attention);
+}
+
+/* Rows that need the user breathe gently (one soft glow every 2.4 s) so the
+   eye finds them; right before the window opens, a quicker, stronger glow
+   (0.8 per second). Both stay far below the three flashes a second WCAG
+   2.3.1 allows, change only a soft glow and tint, never flash the whole row,
+   and stop with reduced motion. */
+.job.opening {
+  animation: attention-pulse 1.25s ease-in-out infinite;
 }
 
 .job-head {
@@ -708,6 +793,26 @@ button:disabled {
 @keyframes pulse {
   50% {
     opacity: 0.35;
+  }
+}
+
+@keyframes attention-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 176, 0, 0);
+  }
+  50% {
+    box-shadow: 0 0 0 1px rgba(255, 176, 0, 0.35), 0 0 20px rgba(255, 176, 0, 0.38);
+  }
+}
+
+@keyframes attention-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 176, 0, 0);
+  }
+  50% {
+    box-shadow: 0 0 0 2px rgba(255, 176, 0, 0.55), 0 0 18px rgba(255, 176, 0, 0.35);
   }
 }
 

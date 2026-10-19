@@ -121,6 +121,43 @@ if (new Set(Object.values(readmeCodes)).size !== 1) {
   fail(`README troubleshooting tables differ: ${JSON.stringify(readmeCodes)}`);
 }
 
+// Every element app.js looks up, and every id an attribute points to,
+// exists in index.html.
+const ids = new Set([...html.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]));
+for (const match of app.matchAll(/\$\("#([\w-]+)"\)/g)) {
+  if (!ids.has(match[1])) {
+    fail(`app.js looks up #${match[1]}, which index.html does not have`);
+  }
+}
+for (const match of html.matchAll(/\s(?:aria-describedby|aria-labelledby|for)="([^"]+)"/g)) {
+  for (const id of match[1].split(/\s+/)) {
+    if (!ids.has(id)) {
+      fail(`index.html points to missing id ${id}`);
+    }
+  }
+}
+
+// Every job stage Rust reports has a status text in app.js.
+const stageEnum = readFileSync("crates/highvi-core/src/job.rs", "utf8").match(
+  /pub enum Stage \{([\s\S]*?)\n\}/,
+);
+if (!stageEnum) {
+  fail("could not find the Rust Stage enum");
+} else {
+  const variants = [...stageEnum[1].matchAll(/^\s+([A-Z]\w*),/gm)].map(
+    (match) => match[1][0].toLowerCase() + match[1].slice(1),
+  );
+  const stageKeys = app.match(/const stageKeys = \{([\s\S]*?)\};/)?.[1] ?? "";
+  for (const stage of variants) {
+    if (!new RegExp(`^\\s+${stage}:`, "m").test(stageKeys)) {
+      fail(`Rust stage ${stage} has no entry in app.js stageKeys`);
+    }
+  }
+  if (variants.length < 5) {
+    fail(`found only ${variants.length} Rust stages; the scan is broken`);
+  }
+}
+
 if (failures.length) {
   console.error(failures.join("\n"));
   process.exit(1);

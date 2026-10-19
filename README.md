@@ -57,7 +57,7 @@ Some websites only hand out the treasure map if you say where you came from, lik
 
 **Do I need DevTools or F12?** No. Paste the page link. If `yt-dlp` doesn't know the site, HighVi opens the page in a private, throw-away Chrome (not your profile, no cookies, every request through the network guard), lets the page's own player load, and picks the main video, not the adverts. The **Playlist link** mode is only an advanced fallback for when you already have the `.m3u8` link.
 
-**The site refuses HighVi?** Some sites, often behind Cloudflare, turn away hidden, automated browsers while showing the same page to a normal one. The failed row then offers **Open in HighVi Browser**: a visible, private HighVi window where you start the video yourself (see below).
+**The site refuses HighVi?** Some sites, often behind Cloudflare, turn away hidden, automated browsers while showing the same page to a normal one. HighVi then opens a visible, private HighVi window by itself, where you start the video yourself (see below).
 
 ## 🎬 Tutorial
 
@@ -70,7 +70,7 @@ Some websites only hand out the treasure map if you say where you came from, lik
 <p align="center"><img src="docs/assets/tutorial/1-paste-en.png" alt="A page link pasted into HighVi" width="560" /><br /><sub>A video page link, ready to add.</sub></p>
 4. Scroll to **Downloads** and press **Start queue**. The row shows each step: looking for the video, downloading, putting it together, saving.
 
-<p align="center"><img src="docs/assets/tutorial/2-queue-en.png" alt="The download queue with a failed page and a video downloading" width="560" /><br /><sub>Two rows: example.com has no video (see section 2); the public test stream is downloading, with speed and time left.</sub></p>
+<p align="center"><img src="docs/assets/tutorial/2-queue-en.png" alt="The download queue: one row amber, about to open the HighVi browser, and a video downloading" width="560" /><br /><sub>Two rows: example.com needs you, so its row turns amber and says the HighVi browser opens in a few seconds (see section 2). The public test stream downloads four pieces at a time, with speed and time left.</sub></p>
 5. When the row says **Saved to …**, press **Open folder**. Your video is in `~/Downloads/HighVi`, named after the video.
 
 <p align="center"><img src="docs/assets/tutorial/3-saved-en.png" alt="A finished download" width="560" /><br /><sub>Done: the row shows where the MP4 was saved.</sub></p>
@@ -79,9 +79,11 @@ Several videos? Paste one link per line in step 2, and pick how many run togethe
 
 ### 2. When a site refuses HighVi
 
-Some sites turn away HighVi's hidden browser (the row shows an error such as `host_firewall_block`, "The website's guard (Cloudflare) blocked HighVi").
+Some sites turn away HighVi's hidden browser (for example Cloudflare's guard, `host_firewall_block`).
 
-1. On that row, press **Open in HighVi Browser**. A private HighVi window opens with the page.
+1. The row turns amber and pulses for 3 seconds, then a private HighVi window opens with the page by itself. The row stays amber and glows gently while the window waits for you. (If the window was closed or timed out, press **Open in HighVi Browser** on that row.)
+
+<p align="center"><img src="docs/assets/tutorial/4-waiting-en.png" alt="An amber row: this page needs you to press play in the HighVi browser window" width="560" /><br /><sub>While the window is open, the row says what to do: press play there. The window closes by itself once the video is caught.</sub></p>
 
 <p align="center"><img src="docs/assets/tutorial/4-browser-window.png" alt="The private HighVi browser window" width="640" /><br /><sub>The HighVi browser: a separate, private Chrome window with one tab. Your own browser, logins and cookies are never used.</sub></p>
 2. If the site asks you to confirm you are human, do it yourself, in that window.
@@ -107,22 +109,23 @@ Something went wrong? See **When something goes wrong** below. On a failed row, 
 1. You paste a link and press **Download MP4**.
 2. HighVi checks that it's an `https://` link, then starts a private **network guard**: every request `yt-dlp` makes (the page, redirects, playlists, pieces, keys) must go to a public internet address. Computers inside your home or office network are always blocked.
 3. `yt-dlp` looks for the treasure map. If it finds nothing, HighVi watches the page's own player in a private browser to see which playlist it loads. Either way, HighVi picks the best picture (and the sound, if it's separate).
-4. The pieces are downloaded and glued into one MP4 on your computer. You see progress, speed, and time left, and you can press **Cancel** at any time.
+4. The pieces are downloaded, four at a time, and glued into one MP4 on your computer. You see progress, speed, and time left, and you can press **Cancel** at any time.
 5. The finished video lands in **`~/Downloads/HighVi`**, named after the video. If the name is taken, HighVi adds ` (2)`. It never writes over a file. Press **Open folder** to see it.
 
 ## 🧭 Using the queue
 
 1. Paste one or more video page links, one per line (up to 100 at a time), and press **Add to queue**. Duplicates and invalid lines are listed, not added.
 2. Press **Start queue**. Use **At once** to run 1 to 4 downloads together; the default is 2. Lowering it never stops a running download: the extra ones finish first.
-3. Each row shows its step: looking for the video, *waiting for the private browser* (pages that need it go one at a time), downloading, *waiting to put it together*, saving.
-4. Per row: **Cancel**, **Retry**, **Remove**, and, for pages a visible window may help, **Open in HighVi Browser**. For the whole queue: **Pause queue**, **Cancel all**, **Retry failed**, **Clear completed**.
-5. A failed row can show its diagnostics (steps, error codes, tool versions, host names; never links, cookies or passwords) to copy into a bug report.
+3. Each row shows its step: looking for the video, *waiting for the private browser* (pages that need it go one at a time), *the HighVi browser opens in a few seconds* (the row turns amber, see below), downloading, *waiting to put it together*, saving.
+4. **Open the HighVi browser by itself when a page needs me** is on by default. Turn it off if you would rather press **Open in HighVi Browser** yourself. The choice is kept on this computer and applies at once, even to downloads already running.
+5. Per row: **Cancel**, **Retry**, **Remove**, and, for pages a visible window may help, **Open in HighVi Browser**. For the whole queue: **Pause queue**, **Cancel all**, **Retry failed**, **Clear completed**.
+6. A failed row can show its diagnostics (steps, error codes, tool versions, host names; never links, cookies or passwords) to copy into a bug report.
 
 The queue lives in memory: closing HighVi stops running downloads (finished files stay) and forgets the list.
 
 ## 🌐 Open in HighVi Browser
 
-When a page refuses HighVi's hidden browser, or its player needs you to press play, **Open in HighVi Browser** opens the page in a visible HighVi window:
+When a page refuses HighVi's hidden browser, or its player needs you to press play, HighVi opens the page in a visible HighVi window by itself. It never comes as a surprise: first the row turns **amber and pulses for 3 seconds** and says *"This page needs you to press play. The HighVi browser window opens in a few seconds and closes by itself once the video is caught."* Press **Cancel** in those seconds, or turn off **Open the HighVi browser by itself**, and no window opens. If the window closes or times out, **Open in HighVi Browser** opens it again:
 
 1. The window is a fresh, private Chrome profile made for this one page. It is not your browser: no history, logins, cookies or extensions, and it is deleted afterwards.
 2. Use the page normally and start the video. HighVi watches the window's network traffic for the video stream. No DevTools, no copying links.
@@ -130,7 +133,7 @@ When a page refuses HighVi's hidden browser, or its player needs you to press pl
 
 - The window's web traffic still goes through HighVi's network guard (public `https://` only), with Chrome's sandbox on. Links it would hand to other apps (`mailto:`, `magnet:`, …) go nowhere, and file uploads are off.
 - HighVi never presses play or clicks for you in the window.
-- The window waits up to 10 minutes. Only one HighVi browser runs at a time: if another page is using it, the window opens when it is free. Downloads that don't need the browser keep going.
+- A window HighVi opened by itself waits up to 3 minutes; one you open with the button waits up to 10. Only one HighVi browser runs at a time: if another page is using it, the window opens when it is free. Downloads that don't need the browser keep going.
 - Closing the window ends the attempt (`browser_closed`). **Cancel** works too.
 - It is a normal desktop window: it shares your clipboard like any app, and on X11 (not Wayland), apps on the same display can see each other's windows.
 
@@ -244,13 +247,13 @@ Videos are saved in **`~/Downloads/HighVi`** (or `Downloads/HighVi` in your lang
 | `insufficient_disk_space` | There isn't enough free space for the video. | Free some space, then retry. |
 | `discovery_overloaded` | The page made too many requests for the private browser to follow. | Use **Playlist link** if you have the `.m3u8`. |
 | `browser_closed` | The HighVi browser window was closed before a video started. | Open it again and start the video in it, or leave the row as it is. |
-| `interactive_timeout` | No video started in the HighVi browser window within 10 minutes. | Open it again; start the video in the window. |
+| `interactive_timeout` | No video started in the HighVi browser window in time (3 minutes, or 10 after the button). | Open it again; start the video in the window. |
 | `browser_no_display` | HighVi could not find your desktop's display for its browser window. | Run HighVi from your normal desktop session. |
 | `queue_full` / `batch_too_large` | The queue holds 200 videos, and you can add 100 at a time. | Clear finished rows, or add fewer links. |
 
 ## ❓ FAQ
 
-**Why does a page play in my Chrome but fail in HighVi?** Most often the site refuses hidden, automated browsers (you will see `host_firewall_block` or `access_denied`). Use **Open in HighVi Browser**. If the site refuses that window too, HighVi cannot download from it.
+**Why does a page play in my Chrome but fail in HighVi?** Most often the site refuses hidden, automated browsers (you will see `host_firewall_block` or `access_denied`). HighVi then opens its own window for you to press play (or press **Open in HighVi Browser**). If the site refuses that window too, HighVi cannot download from it.
 
 **Does Open in HighVi Browser use my Chrome profile, passwords or cookies?** No. It is a separate, empty profile that is deleted afterwards. HighVi never reads your own browser's data.
 
@@ -259,6 +262,8 @@ Videos are saved in **`~/Downloads/HighVi`** (or `Downloads/HighVi` in your lang
 **Does it work on Wayland? On a HiDPI screen?** Yes. HighVi and its browser window run natively on Wayland and X11, and scale with the screen.
 
 **How many downloads can run at once?** Up to four; you choose 1 to 4. Pages that need a browser use it one at a time.
+
+**Downloads feel slow?** HighVi fetches four pieces of a video at once, which is usually several times faster than `yt-dlp`'s default of one. Videos running together share your connection, so for one video at full speed set **At once** to 1. Some sites also slow down every connection on purpose.
 
 **Can it download DRM-protected or live videos?** No, and it never tries.
 
@@ -277,7 +282,7 @@ Videos are saved in **`~/Downloads/HighVi`** (or `Downloads/HighVi` in your lang
 
 ## 🧠 For developers
 
-Architecture, pipeline and limits: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Architecture, diagrams, pipeline and limits: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Development loop, CI, review and release: [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
 ```bash
 HIGHVI_REQUIRE_E2E=1 cargo test --workspace --offline
@@ -296,6 +301,18 @@ docs/assets/          README banner and screenshots
 ```
 
 [SECURITY.md](SECURITY.md) explains how HighVi keeps you safe and what its limits are today. In short: every request HighVi's tools make goes through a guard that only lets public HTTPS addresses through, and FFmpeg never touches the network.
+
+## ⚖️ Disclaimer
+
+**Your responsibility.** HighVi is a tool. You choose what to download, and you are responsible for having the right to do so: copyright, the site's terms, and the rights of the people in a video all apply to you. Good uses are videos you made, media under a Creative Commons licence or in the public domain, content whose licence or terms allow downloading, and personal copies only where your local law allows them. In the EU, a private copy is generally not lawful when the source itself is unlawful. Do not download, keep or share pirated or leaked material, or intimate or private images of anyone without their consent. In the US, the EU and many other places, sharing such images is a crime.
+
+**What HighVi does not do.** HighVi is designed to refuse DRM-protected video and does not attempt to remove DRM. It does not use your browser's cookies or sessions, and it does not try to get past paywalls, logins, CAPTCHAs or bot checks. When a site refuses its hidden browser, HighVi opens a visible window where you decide what to do. HighVi runs only on your computer: no server, no accounts, no telemetry, and nothing you download is sent to its developers. The developers do not host, index, link to or recommend any website or content.
+
+**No warranty, limited liability.** HighVi is free software under the [MIT License](LICENSE), provided "as is", without warranty of any kind. To the extent the law allows, the authors are not liable for any claim, damages or other liability arising from its use. Where the law does not allow these limits, they apply only as far as it permits.
+
+**Not legal advice.** Nothing in this project is legal advice. Laws differ between countries and change. If you are not sure a download is lawful, don't download it, or ask a lawyer.
+
+**Takedown and contact.** If you hold rights in, or appear in, content that this project's code, documentation or examples point to, please [open an issue](https://github.com/XKeviNguyen/HighVi/issues). For security reports, see [SECURITY.md](SECURITY.md). Reports are handled in good faith. HighVi keeps nothing outside each user's own computer, so there is nothing the project can remove from there.
 
 ## 📜 License
 

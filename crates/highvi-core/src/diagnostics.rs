@@ -250,6 +250,7 @@ pub fn stage_name(stage: Stage) -> &'static str {
     match stage {
         Stage::Discovering => "discovering",
         Stage::WaitingForBrowser => "waitingForBrowser",
+        Stage::OpeningWindow => "openingWindow",
         Stage::WaitingForUser => "waitingForUser",
         Stage::Browsing => "browsing",
         Stage::DownloadingVideo => "downloadingVideo",

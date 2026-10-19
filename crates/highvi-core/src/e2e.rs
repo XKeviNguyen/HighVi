@@ -562,8 +562,10 @@ impl Fixture {
         })
     }
 
+    /// Automatic discovery stops at the headless browser, so tests see what
+    /// it reports; [`Fixture::with_auto_window`] lets the window open too.
     pub fn environment(&self) -> JobEnvironment {
-        JobEnvironment {
+        let environment = JobEnvironment {
             fixture: Some(self.server.resolver()),
             ..JobEnvironment::new(
                 self.tools.yt_dlp.clone(),
@@ -571,7 +573,22 @@ impl Fixture {
                 self.tools.chrome.clone(),
                 self.output_dir.clone(),
             )
-        }
+        };
+        environment
+            .shared
+            .auto_window
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        environment
+    }
+
+    /// As in HighVi: a refused page opens the visible window by itself.
+    pub fn with_auto_window(&self) -> JobEnvironment {
+        let environment = self.environment();
+        environment
+            .shared
+            .auto_window
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        environment
     }
 
     pub async fn run(
@@ -603,6 +620,20 @@ impl Fixture {
         discovery: crate::Discovery,
         cancel_after: Option<(Stage, Duration)>,
     ) -> (Result<JobOutcome, PublicError>, Vec<JobUpdate>) {
+        self.run_observed(environment, request, discovery, cancel_after, &|_| {})
+            .await
+    }
+
+    /// As [`Fixture::run_mode`], with `observe` called on each update as
+    /// it is reported.
+    pub async fn run_observed(
+        &self,
+        environment: &JobEnvironment,
+        request: SourceRequest,
+        discovery: crate::Discovery,
+        cancel_after: Option<(Stage, Duration)>,
+        observe: &(dyn Fn(&JobUpdate) + Send + Sync),
+    ) -> (Result<JobOutcome, PublicError>, Vec<JobUpdate>) {
         let source = validate_source(&request).unwrap();
         let (handle, token) = cancel_pair();
         let handle = Arc::new(handle);
@@ -622,6 +653,7 @@ impl Fixture {
                     handle.cancel();
                 });
             }
+            observe(&update);
             updates.lock().unwrap().push(update);
         };
         let (result, diagnostics) = run_job(environment, &source, discovery, token, &report).await;
@@ -2180,9 +2212,17 @@ impl crate::QueueEvents for QueueLog {
 fn real_scheduler(fixture: &Fixture) -> (crate::Scheduler, Arc<QueueLog>) {
     let template = fixture.environment();
     let shared = Arc::new(crate::SharedResources::default());
+    shared.auto_window.store(
+        template
+            .shared
+            .auto_window
+            .load(std::sync::atomic::Ordering::SeqCst),
+        std::sync::atomic::Ordering::SeqCst,
+    );
     let environment = Arc::new(JobEnvironment {
         shared,
         fixture: template.fixture.clone(),
+        limits: template.limits,
         ..JobEnvironment::new(
             template.yt_dlp.clone(),
             template.ffmpeg.clone(),
@@ -2779,7 +2819,7 @@ fn chrome_browser_pids_in(output: &Path) -> Vec<i32> {
 
 /// The reported incident (a page that refuses headless Chrome with a
 /// Cloudflare challenge but shows a normal browser the page) and its
-/// recovery: automatic discovery reports the refusal; the visible HighVi
+/// recovery: headless discovery reports the refusal; the visible HighVi
 /// browser, same profile rules, proxy and sandbox, gets the page, waits for
 /// the player and downloads a playable MP4.
 #[tokio::test]
@@ -2816,6 +2856,175 @@ async fn a_page_refused_to_headless_chrome_downloads_in_the_highvi_browser() {
     assert!(stages.contains(&Stage::WaitingForUser), "{stages:?}");
     assert!(!stages.contains(&Stage::Browsing), "{stages:?}");
     assert!(report.contains("document 200"), "{report}");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// The same incident without a click: automatic discovery is refused by
+/// headless Chrome, opens the visible window itself in the same attempt,
+/// and downloads once the player starts. A missing page (HTTP 404) still
+/// fails as it is, with no window.
+#[tokio::test]
+async fn a_refused_page_opens_the_highvi_browser_by_itself() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/guarded",
+        Route::html(&late_player("Guarded video", 15_000)).headless_gets(
+            Route::status(403, "text/html", "<title>Just a moment...</title>")
+                .header("cf-mitigated", "challenge"),
+        ),
+    );
+    let (result, updates) = fixture
+        .run_with(
+            &fixture.with_auto_window(),
+            page("https://page.test/guarded"),
+            None,
+        )
+        .await;
+    let report = fixture.last_report.lock().unwrap().clone();
+    let outcome = result.unwrap_or_else(|error| panic!("{error:?}\n{report}"));
+    assert_eq!(outcome.title, "Guarded video");
+    let (streams, _, clean) = fixture.inspect(&outcome.saved_to);
+    assert_eq!(streams, ["video", "audio"]);
+    assert!(clean);
+    let stages: Vec<Stage> = updates.iter().map(|update| update.stage).collect();
+    let at = |wanted: Stage| stages.iter().position(|stage| *stage == wanted);
+    assert!(
+        matches!(
+            (at(Stage::Browsing), at(Stage::OpeningWindow), at(Stage::WaitingForUser)),
+            (Some(b), Some(o), Some(w)) if b < o && o < w
+        ),
+        "headless, then the notice, then the window: {stages:?}"
+    );
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+
+    fixture.server.route(
+        "page.test/gone",
+        Route::status(404, "text/html", "<title>Gone</title>"),
+    );
+    let (result, updates) = fixture
+        .run_with(
+            &fixture.with_auto_window(),
+            page("https://page.test/gone"),
+            None,
+        )
+        .await;
+    assert_code(&result, "media_not_found");
+    assert!(
+        !updates
+            .iter()
+            .any(|update| update.stage == Stage::WaitingForUser),
+        "a missing page opened a window"
+    );
+
+    // A bare playlist link is not a page: there is nothing to watch.
+    fixture.server.route(
+        "page.test/refused.m3u8",
+        Route::status(403, "text/plain", "forbidden"),
+    );
+    let (result, updates) = fixture
+        .run_with(
+            &fixture.with_auto_window(),
+            page("https://page.test/refused.m3u8"),
+            None,
+        )
+        .await;
+    assert!(result.is_err(), "{result:?}");
+    assert!(
+        !updates
+            .iter()
+            .any(|update| update.stage == Stage::WaitingForUser),
+        "a bare playlist opened a window: {result:?}"
+    );
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// The notice before an unasked window: switching the setting off during
+/// it, or cancelling, means no window opens. Switched off, the attempt ends
+/// with the original refusal, so the row still offers the button.
+#[tokio::test]
+async fn the_notice_before_an_unasked_window_can_stop_it() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/guarded",
+        Route::html(&late_player("Guarded video", 15_000)).headless_gets(
+            Route::status(403, "text/html", "<title>Just a moment...</title>")
+                .header("cf-mitigated", "challenge"),
+        ),
+    );
+    let environment = fixture.with_auto_window();
+    let shared = Arc::clone(&environment.shared);
+    let (result, updates) = fixture
+        .run_observed(
+            &environment,
+            page("https://page.test/guarded"),
+            crate::Discovery::Automatic,
+            None,
+            &|update| {
+                if update.stage == Stage::OpeningWindow {
+                    shared
+                        .auto_window
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                }
+            },
+        )
+        .await;
+    assert_code(&result, "host_firewall_block");
+    let stages: Vec<Stage> = updates.iter().map(|update| update.stage).collect();
+    assert!(stages.contains(&Stage::OpeningWindow), "{stages:?}");
+    assert!(!stages.contains(&Stage::WaitingForUser), "{stages:?}");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+
+    let (result, updates) = fixture
+        .run_with(
+            &fixture.with_auto_window(),
+            page("https://page.test/guarded"),
+            Some((Stage::OpeningWindow, Duration::ZERO)),
+        )
+        .await;
+    assert_code(&result, "cancelled");
+    assert!(
+        !updates
+            .iter()
+            .any(|update| update.stage == Stage::WaitingForUser)
+    );
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+}
+
+/// A window HighVi opened by itself and nobody used closes after its own,
+/// shorter time, and the attempt ends as a window timeout.
+#[tokio::test]
+async fn an_unasked_window_closes_after_its_own_time() {
+    let Some(fixture) = headed_fixture().await else {
+        return;
+    };
+    fixture.server.route(
+        "page.test/idle",
+        Route::html(&late_player("Idle", 60_000)).headless_gets(
+            Route::status(403, "text/html", "<title>Just a moment...</title>")
+                .header("cf-mitigated", "challenge"),
+        ),
+    );
+    let mut environment = fixture.with_auto_window();
+    environment.limits.auto_window_budget = Duration::from_secs(4);
+    let started = std::time::Instant::now();
+    let (result, _) = fixture
+        .run_with(&environment, page("https://page.test/idle"), None)
+        .await;
+    assert_code(&result, "interactive_timeout");
+    assert!(
+        started.elapsed() < Duration::from_secs(90),
+        "{:?}",
+        started.elapsed()
+    );
     assert_no_chrome_left(&fixture).await;
     fixture.assert_no_job_dirs();
 }
