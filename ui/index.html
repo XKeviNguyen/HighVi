@@ -114,6 +114,14 @@
             <label><input type="radio" name="concurrency" value="4" /> <span>4</span></label>
           </fieldset>
         </div>
+        <div id="auto-window-setting" class="auto-window">
+          <label class="switch">
+            <input id="auto-window" type="checkbox" role="switch" checked aria-describedby="auto-window-hint" />
+            <span data-i18n="queue.autoWindow"></span>
+          </label>
+          <p id="auto-window-hint" class="hint" data-i18n="queue.autoWindowHint"></p>
+        </div>
+        <p id="window-alert" class="sr-only" aria-live="assertive"></p>
         <p id="queue-counts" class="queue-counts"></p>
         <p id="queue-paused" class="notice hidden" role="alert"></p>
 

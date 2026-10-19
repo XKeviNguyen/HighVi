@@ -25,6 +25,9 @@ const elements = {
   startButton: $("#start-button"),
   concurrency: $("#concurrency"),
   jobList: $("#job-list"),
+  autoWindow: $("#auto-window"),
+  autoWindowSetting: $("#auto-window-setting"),
+  windowAlert: $("#window-alert"),
   queueEmpty: $("#queue-empty"),
   cancelAll: $("#cancel-all-button"),
   retryFailed: $("#retry-failed-button"),
@@ -46,10 +49,14 @@ let outdated = null;
 let tooOld = null;
 // Diagnostic reports already fetched, by "id:attempt".
 const reports = new Map();
+// Attempts whose "window about to open" was already announced.
+const announced = new Set();
+const autoWindowKey = "highvi.autoWindow";
 
 const stageKeys = {
   discovering: "progress.discovering",
   waitingForBrowser: "progress.waitingForBrowser",
+  openingWindow: "progress.openingWindow",
   waitingForUser: "progress.waitingForUser",
   browsing: "progress.browsing",
   downloadingVideo: "progress.downloadingVideo",
@@ -229,8 +236,16 @@ function setProgress(row, item) {
   setHidden(track, !active);
   track.setAttribute("aria-label", t("progress.aria"));
   const parsed = Number.parseFloat(item.percent || "");
+  let percentText = item.percent || "";
   if (Number.isFinite(parsed)) {
-    const bounded = Math.min(100, Math.max(0, parsed));
+    // yt-dlp re-estimates the total as fragments arrive, so its percent can
+    // step back a little; within one step of one attempt, the bar only grows.
+    const step = `${item.attempt}:${item.stage}`;
+    const peak = row.dataset.peakStep === step ? Number(row.dataset.peak) : 0;
+    const bounded = Math.max(peak, Math.min(100, Math.max(0, parsed)));
+    row.dataset.peakStep = step;
+    row.dataset.peak = String(bounded);
+    percentText = `${bounded.toFixed(1)}%`;
     bar.style.width = `${bounded}%`;
     track.setAttribute("aria-valuenow", String(bounded));
     track.classList.remove("indeterminate");
@@ -239,11 +254,32 @@ function setProgress(row, item) {
     track.removeAttribute("aria-valuenow");
     track.classList.add("indeterminate");
   }
-  row.querySelector(".job-percent").textContent = active ? item.percent || "" : "";
+  row.querySelector(".job-percent").textContent = active ? percentText : "";
   const metrics = [];
   if (active && item.speed) metrics.push(t("progress.speed", { value: item.speed }));
   if (active && item.eta) metrics.push(t("progress.eta", { value: item.eta }));
   row.querySelector(".job-metrics").textContent = metrics.join("  ");
+}
+
+// A row that needs the user: the HighVi browser window is about to open
+// (pulsing) or open and waiting for them to press play (steady). Said once
+// to screen readers too, since the window takes focus a moment later.
+function setAttention(row, item) {
+  const active = item.status === "running";
+  const opening = active && item.stage === "openingWindow";
+  const waiting = active && item.stage === "waitingForUser";
+  row.classList.toggle("needs-you", opening || waiting);
+  row.classList.toggle("opening", opening);
+  const key = `${item.id}:${item.attempt}`;
+  if (opening && !announced.has(key)) {
+    announced.add(key);
+    // Cleared first, so the same words for a retried page are read again.
+    const message = `${item.title || item.host || ""}: ${t("progress.openingWindow")}`;
+    elements.windowAlert.textContent = "";
+    setTimeout(() => {
+      elements.windowAlert.textContent = message;
+    }, 50);
+  }
 }
 
 function createRow(item) {
@@ -274,6 +310,7 @@ function renderRow(row, item) {
   row.querySelector(".job-title").textContent = item.title || item.host || "";
   row.querySelector(".job-status").textContent = statusText(item);
   setProgress(row, item);
+  setAttention(row, item);
 
   const failed = item.status === "failed";
   // Without Chrome, a visible window cannot help either.
@@ -436,6 +473,7 @@ listen("queue-progress", ({ payload }) => {
     row.querySelector(".job-title").textContent = item.title || item.host || "";
     row.querySelector(".job-status").textContent = statusText(item);
     setProgress(row, item);
+    setAttention(row, item);
   }
 }).catch(showError);
 
@@ -446,6 +484,29 @@ elements.startButton.addEventListener("click", () => {
 elements.concurrency.addEventListener("change", (event) => {
   const desired = Number(event.target.value);
   invoke("queue_set_concurrency", { desired }).catch(showError);
+});
+
+// On by default; the choice is kept on this computer only. Rust reads it
+// when a window is about to open, so turning it off stops one that is
+// still being announced.
+function loadAutoWindow() {
+  try {
+    return window.localStorage.getItem(autoWindowKey) !== "off";
+  } catch {
+    return true;
+  }
+}
+
+elements.autoWindow.checked = loadAutoWindow();
+invoke("set_auto_window", { enabled: elements.autoWindow.checked }).catch(showError);
+elements.autoWindow.addEventListener("change", () => {
+  const enabled = elements.autoWindow.checked;
+  try {
+    window.localStorage.setItem(autoWindowKey, enabled ? "on" : "off");
+  } catch {
+    // Not kept after a restart, but applies now.
+  }
+  invoke("set_auto_window", { enabled }).catch(showError);
 });
 
 elements.cancelAll.addEventListener("click", () => invoke("queue_cancel_all").catch(showError));
@@ -487,6 +548,8 @@ invoke("dependency_status")
       ...(status.ffmpeg ? [] : ["FFmpeg"]),
     ];
     browserMissing = !status.browser;
+    // Without Chrome there is no window to open.
+    setHidden(elements.autoWindowSetting, browserMissing);
     outdated =
       typeof status.ytDlpRecommended === "string" && typeof status.ytDlpVersion === "string"
         ? { installed: status.ytDlpVersion, recommended: status.ytDlpRecommended }

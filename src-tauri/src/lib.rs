@@ -14,6 +14,8 @@ const EXIT_GRACE: Duration = Duration::from_secs(5);
 /// it is told about progress through events and never sees a media URL.
 struct AppState {
     queue: Scheduler,
+    /// Shared by every job; holds the user's settings jobs read.
+    shared: Arc<SharedResources>,
 }
 
 #[derive(Debug, Serialize)]
@@ -86,6 +88,16 @@ fn queue_retry(state: State<'_, AppState>, id: u64) {
 #[tauri::command]
 fn queue_open_in_browser(state: State<'_, AppState>, id: u64) {
     state.queue.open_in_browser(id);
+}
+
+/// The user's setting: open the HighVi browser window by itself when a
+/// page needs it. Applies at once, also to jobs already running.
+#[tauri::command]
+fn set_auto_window(state: State<'_, AppState>, enabled: bool) {
+    state
+        .shared
+        .auto_window
+        .store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 #[tauri::command]
@@ -220,8 +232,7 @@ fn job_environment(
 }
 
 /// Runs one queued source with the real downloader.
-fn job_runner(app: AppHandle) -> Runner {
-    let shared = Arc::new(SharedResources::default());
+fn job_runner(app: AppHandle, shared: Arc<SharedResources>) -> Runner {
     Arc::new(move |source, discovery, cancel, report: Report| {
         let app = app.clone();
         let shared = Arc::clone(&shared);
@@ -281,12 +292,13 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             let runtime = tauri::async_runtime::handle().inner().clone();
+            let shared = Arc::new(SharedResources::default());
             let queue = Scheduler::new(
                 runtime,
-                job_runner(handle.clone()),
+                job_runner(handle.clone(), Arc::clone(&shared)),
                 Arc::new(WebviewEvents(handle.clone())),
             );
-            app.manage(AppState { queue });
+            app.manage(AppState { queue, shared });
             // Job directories left by a crash (they can hold media URLs)
             // are removed at start, not only when the next job starts.
             if let Ok(directory) = output_dir(&handle) {
@@ -304,6 +316,7 @@ pub fn run() {
             queue_cancel_all,
             queue_retry,
             queue_open_in_browser,
+            set_auto_window,
             queue_retry_failed,
             queue_remove,
             queue_clear_completed,
