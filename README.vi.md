@@ -19,14 +19,14 @@
 
 <div align="center">
 
-<a href="https://github.com/XKeviNguyen/HighVi/releases/download/v0.1.0/HighVi_0.1.0_amd64.deb"><img src="https://img.shields.io/badge/T%E1%BA%A3i%20HighVi%200.1.0%20(.deb)-00ff41?style=for-the-badge&logo=ubuntu&logoColor=000000&labelColor=00ff41&color=000000" alt="Download HighVi 0.1.0 .deb" /></a>
+<a href="https://github.com/XKeviNguyen/HighVi/releases/download/v0.1.1/HighVi_0.1.1_amd64.deb"><img src="https://img.shields.io/badge/T%E1%BA%A3i%20HighVi%200.1.1%20(.deb)-00ff41?style=for-the-badge&logo=ubuntu&logoColor=000000&labelColor=00ff41&color=000000" alt="Download HighVi 0.1.1 .deb" /></a>
 
-<sub>Ubuntu 24.04 / 26.04, 64-bit · <a href="https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.0">mọi file của bản phát hành này</a> (có cả AppImage)</sub>
+<sub>Ubuntu 24.04 / 26.04, 64-bit · <a href="https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.1">mọi file của bản phát hành này</a> (có cả AppImage)</sub>
 
 </div>
 
 ```bash
-sudo apt install ./HighVi_0.1.0_amd64.deb    # trong thư mục bạn đã tải file về
+sudo apt install ./HighVi_0.1.1_amd64.deb    # trong thư mục bạn đã tải file về
 ```
 
 ## 🟩 HighVi là gì?
@@ -194,12 +194,12 @@ npm run build   # đóng gói .deb và AppImage
 
 ## 📦 Cài đặt, nâng cấp, gỡ bỏ
 
-Tải file `.deb` (hoặc AppImage) ở [bản phát hành v0.1.0](https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.0), hoặc tự đóng gói (xem **Bắt đầu**).
+Tải file `.deb` (hoặc AppImage) ở [bản phát hành v0.1.1](https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.1), hoặc tự đóng gói (xem **Bắt đầu**).
 
 **Cài file `.deb`** (Ubuntu/Debian; tự cài kèm `yt-dlp` và FFmpeg):
 
 ```bash
-sudo apt install ./HighVi_0.1.0_amd64.deb
+sudo apt install ./HighVi_0.1.1_amd64.deb
 ```
 
 Trên Ubuntu 24.04, cài thêm `yt-dlp` mới bằng pipx (xem **Bắt đầu**). Muốn tìm video trên trang có trình phát dựng bằng JavaScript, và để dùng **Mở trong trình duyệt HighVi**, hãy cài Google Chrome hoặc Chromium; bản Chromium snap của Ubuntu cũng dùng được.
@@ -207,7 +207,7 @@ Trên Ubuntu 24.04, cài thêm `yt-dlp` mới bằng pipx (xem **Bắt đầu**)
 **Nâng cấp** lên bản mới hơn: cài file `.deb` mới y như trên. Nếu số phiên bản không đổi, thêm `--reinstall`, không thì apt giữ bản cũ:
 
 ```bash
-sudo apt install --reinstall ./HighVi_0.1.0_amd64.deb
+sudo apt install --reinstall ./HighVi_0.1.1_amd64.deb
 ```
 
 **Gỡ cài đặt**: `sudo apt remove high-vi`. Video của bạn trong `~/Downloads/HighVi` vẫn được giữ.
@@ -215,8 +215,8 @@ sudo apt install --reinstall ./HighVi_0.1.0_amd64.deb
 **AppImage** (cần có sẵn `yt-dlp` và FFmpeg trong `PATH`):
 
 ```bash
-chmod +x HighVi_0.1.0_amd64.AppImage
-./HighVi_0.1.0_amd64.AppImage
+chmod +x HighVi_0.1.1_amd64.AppImage
+./HighVi_0.1.1_amd64.AppImage
 ```
 
 Nếu nó báo lỗi FUSE, chạy với `APPIMAGE_EXTRACT_AND_RUN=1`.
@@ -282,7 +282,7 @@ Video được lưu ở **`~/Downloads/HighVi`** (hoặc `Downloads/HighVi` tron
 
 ## 🧠 Dành cho lập trình viên
 
-Kiến trúc, sơ đồ, quy trình xử lý và các giới hạn: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Quy trình phát triển, CI, review và phát hành: [docs/WORKFLOW.md](docs/WORKFLOW.md).
+Kiến trúc, sơ đồ, quy trình xử lý và các giới hạn: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Quy trình phát triển, CI, review và phát hành: [docs/WORKFLOW.md](docs/WORKFLOW.md). Các lỗi đã gặp, cách sửa và bài học rút ra: [docs/JOURNEY.md](docs/JOURNEY.md).
 
 ```bash
 HIGHVI_REQUIRE_E2E=1 cargo test --workspace --offline

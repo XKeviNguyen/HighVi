@@ -1470,6 +1470,43 @@ async fn browser_reports_drm_and_never_downloads_it() {
     );
 }
 
+/// A browser that answers late (a cold start on a slow or busy machine) is
+/// waited for, not reported as a crash. CI once needed more than 20 s to
+/// start four Chromes at once; here a wrapper holds Chrome back for 25 s.
+#[tokio::test]
+async fn a_slow_starting_browser_is_waited_for() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(fixture) = browser_fixture().await else {
+        return;
+    };
+    let chrome = fixture.tools.chrome.clone().unwrap();
+    let slow = temp_directory("slow-chrome").join("slow-chrome");
+    // Absolute paths: Chrome runs with a private PATH.
+    std::fs::write(
+        &slow,
+        format!(
+            "#!/bin/sh\n/bin/sleep 25\nexec '{}' \"$@\"\n",
+            chrome.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&slow, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fixture
+        .server
+        .route("page.test/slow", Route::html(&late_player("Slow start", 0)));
+    let mut environment = fixture.environment();
+    environment.chrome = Some(slow.clone());
+    let (result, _) = fixture
+        .run_with(&environment, page("https://page.test/slow"), None)
+        .await;
+    let report = fixture.last_report.lock().unwrap().clone();
+    let outcome = result.unwrap_or_else(|error| panic!("{error:?}\n{report}"));
+    assert_eq!(outcome.title, "Slow start");
+    assert_no_chrome_left(&fixture).await;
+    fixture.assert_no_job_dirs();
+    let _ = std::fs::remove_dir_all(slow.parent().unwrap());
+}
+
 #[tokio::test]
 async fn pages_without_media_and_broken_browsers_fail_cleanly() {
     let Some(fixture) = browser_fixture().await else {

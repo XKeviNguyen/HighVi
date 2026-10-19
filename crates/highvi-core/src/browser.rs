@@ -38,7 +38,10 @@ use tokio::{
 };
 use url::Url;
 
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long Chrome may take to answer its first DevTools call. A cold start
+/// on a slow or busy machine (first launch, fonts, several Chromes at once)
+/// took over 20 s on CI; a Chrome that never answers is still reported.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 /// Hard limit for one page, from navigation to the last observed request.
 const PAGE_BUDGET: Duration = Duration::from_secs(30);
 /// How long a visible browser window waits for the user to start the video.

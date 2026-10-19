@@ -294,6 +294,7 @@ Extractor-related failures carry a `hint` to update yt-dlp when it is older than
 | yt-dlp metadata | 8 MiB stdout, 60 s |
 | yt-dlp download | native HLS, 4 concurrent fragments, retries: 3 requests, 5 fragments, 1 extractor; 20 s socket timeout |
 | Browser (both modes) | `<profile>/bin` first on Chrome's `PATH`: no-op `xdg-open`, `xdg-email`, `xdg-mime`, `xdg-settings`, `gio`… so links meant for desktop apps go nowhere; native file chooser intercepted (CDP); downloads denied |
+| Browser startup | Chrome's first DevTools answer within 60 s (`STARTUP_TIMEOUT`): a cold start on a slow or busy machine took over 20 s on CI |
 | Browser discovery | 30 s per page; gives up ~8 s after trying to play; ≤ 48 sessions, ≤ 4 000 tracked requests, ≤ 60 body reads |
 | HighVi browser window | unasked: 3 s notice (`JobLimits::window_notice`), then ≤ 3 min (`auto_window_budget`); button: ≤ 10 min (`interactive_budget`). New playlists are checked *while the window stays open*; only one that passes ends it. Ends otherwise on a closed window (`browser_closed`, only on a clean Chrome exit; a crash is `browser_failed`), on cancel, or at the limit (`interactive_timeout`). Never presses play or makes a user gesture. Popups and new tabs are attached and watched. Same flags, proxy, sandbox and limits as headless; the environment adds only the display (absolute Wayland socket, or `DISPLAY` + `XAUTHORITY`), a private `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS=disabled:` |
 | Proxy | ≤ 64 tunnels, 8 KiB request head, 10 s head/resolve, 15 s connect, 90 s idle |
@@ -328,6 +329,7 @@ work for everyone.
 | 3 min for an unasked window, 10 for the button | One budget for both | An unattended bulk queue must not hold the one browser for long, while someone who asked has time. |
 | Fall back to the original refusal | Show the window's technical failure | The refusal explains more and keeps the button. |
 | 4 concurrent fragments | 1 (yt-dlp default) or 8+ | Measured 3.3× faster; bounded politeness (§8). Accepted cost: when one fragment fails for good, the other workers keep fetching ahead during its retries (more requests and `.part-Frag*` files before the job fails). That is bounded by the retry time, covered by the 2× disk reservation, and removed with the job directory. |
+| 60 s for Chrome's first answer | 20 s | A cold, CPU-starved start exceeded 20 s on CI and on one core, reported as a crash (`browser_failed`). A Chrome that never answers is still reported, only later. See JOURNEY.md §5.6. |
 | Notice only for a window that will open | Announce first, check later | The setting is checked before the notice and again after it, so the row never promises a window that will not come. |
 
 ## 13. Tests
