@@ -28,6 +28,11 @@ pub const TOOL_BIN: &str = "bin";
 const NO_FFMPEG: &str = "no-ffmpeg";
 
 const SOCKET_TIMEOUT_SECONDS: &str = "20";
+/// HLS fragments one job fetches at once. Servers cap each connection, so
+/// one at a time (yt-dlp's default) left most of the link idle: measured on
+/// a public test stream, 4 took a download from 65 s to 20 s. Kept small:
+/// up to four jobs run at once, and sites rate-limit busy clients.
+pub const CONCURRENT_FRAGMENTS: &str = "4";
 
 /// Environment variables passed through; everything else is cleared so
 /// ambient Python or yt-dlp settings cannot change its behaviour. Proxy
@@ -144,6 +149,8 @@ impl YtDlpPolicy<'_> {
                 "--downloader",
                 "m3u8:native",
                 "--abort-on-unavailable-fragments",
+                "--concurrent-fragments",
+                CONCURRENT_FRAGMENTS,
                 "--no-overwrites",
                 "--no-mtime",
                 "--fixup",
@@ -278,6 +285,18 @@ mod tests {
         }
         let index = args.iter().position(|arg| arg == "--downloader").unwrap();
         assert_eq!(args[index + 1], "m3u8:native");
+    }
+
+    /// Servers cap each connection's speed; one fragment at a time made a
+    /// job several times slower than the link allows.
+    #[test]
+    fn fragments_are_fetched_in_parallel() {
+        let args = strings(&policy(None).download_args("-hls-1", "video"));
+        let index = args
+            .iter()
+            .position(|arg| arg == "--concurrent-fragments")
+            .expect("fragments are fetched one at a time");
+        assert_eq!(args[index + 1], CONCURRENT_FRAGMENTS);
     }
 
     #[test]
