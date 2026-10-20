@@ -19,14 +19,14 @@
 
 <div align="center">
 
-<a href="https://github.com/XKeviNguyen/HighVi/releases/download/v0.1.0/HighVi_0.1.0_amd64.deb"><img src="https://img.shields.io/badge/Download%20HighVi%200.1.0%20(.deb)-00ff41?style=for-the-badge&logo=ubuntu&logoColor=000000&labelColor=00ff41&color=000000" alt="Download HighVi 0.1.0 .deb" /></a>
+<a href="https://github.com/XKeviNguyen/HighVi/releases/download/v0.1.1/HighVi_0.1.1_amd64.deb"><img src="https://img.shields.io/badge/Download%20HighVi%200.1.1%20(.deb)-00ff41?style=for-the-badge&logo=ubuntu&logoColor=000000&labelColor=00ff41&color=000000" alt="Download HighVi 0.1.1 .deb" /></a>
 
-<sub>Ubuntu 24.04 / 26.04, 64-bit · <a href="https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.0">all files of this release</a> (also an AppImage)</sub>
+<sub>Ubuntu 24.04 / 26.04, 64-bit · <a href="https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.1">all files of this release</a> (also an AppImage)</sub>
 
 </div>
 
 ```bash
-sudo apt install ./HighVi_0.1.0_amd64.deb    # in the folder you downloaded it to
+sudo apt install ./HighVi_0.1.1_amd64.deb    # in the folder you downloaded it to
 ```
 
 ## 🟩 What is HighVi?
@@ -194,12 +194,12 @@ npm run build   # make a .deb and an AppImage
 
 ## 📦 Install, upgrade, remove
 
-Download the `.deb` (or the AppImage) from the [v0.1.0 release](https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.0), or build the packages yourself (see **Get started**).
+Download the `.deb` (or the AppImage) from the [v0.1.1 release](https://github.com/XKeviNguyen/HighVi/releases/tag/v0.1.1), or build the packages yourself (see **Get started**).
 
 **Install the `.deb`** (Ubuntu/Debian; it also installs `yt-dlp` and FFmpeg):
 
 ```bash
-sudo apt install ./HighVi_0.1.0_amd64.deb
+sudo apt install ./HighVi_0.1.1_amd64.deb
 ```
 
 On Ubuntu 24.04, also install a newer `yt-dlp` with pipx (see **Get started**). For pages whose player is built with JavaScript, and for **Open in HighVi Browser**, install Google Chrome or Chromium; Ubuntu's Chromium snap works.
@@ -207,7 +207,7 @@ On Ubuntu 24.04, also install a newer `yt-dlp` with pipx (see **Get started**). 
 **Upgrade** to a newer build: install the new `.deb` the same way. If the version number did not change, add `--reinstall`, or apt keeps the old one:
 
 ```bash
-sudo apt install --reinstall ./HighVi_0.1.0_amd64.deb
+sudo apt install --reinstall ./HighVi_0.1.1_amd64.deb
 ```
 
 **Remove**: `sudo apt remove high-vi`. Your videos in `~/Downloads/HighVi` are kept.
@@ -215,8 +215,8 @@ sudo apt install --reinstall ./HighVi_0.1.0_amd64.deb
 **AppImage** (needs `yt-dlp` and FFmpeg on your `PATH`):
 
 ```bash
-chmod +x HighVi_0.1.0_amd64.AppImage
-./HighVi_0.1.0_amd64.AppImage
+chmod +x HighVi_0.1.1_amd64.AppImage
+./HighVi_0.1.1_amd64.AppImage
 ```
 
 If it complains about FUSE, run it with `APPIMAGE_EXTRACT_AND_RUN=1`.
@@ -282,7 +282,7 @@ Videos are saved in **`~/Downloads/HighVi`** (or `Downloads/HighVi` in your lang
 
 ## 🧠 For developers
 
-Architecture, diagrams, pipeline and limits: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Development loop, CI, review and release: [docs/WORKFLOW.md](docs/WORKFLOW.md).
+Architecture, diagrams, pipeline and limits: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md). Development loop, CI, review and release: [docs/WORKFLOW.md](docs/WORKFLOW.md). The bugs we hit, how we fixed them and what we learned: [docs/JOURNEY.md](docs/JOURNEY.md).
 
 ```bash
 HIGHVI_REQUIRE_E2E=1 cargo test --workspace --offline
