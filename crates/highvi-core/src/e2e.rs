@@ -1249,7 +1249,8 @@ fn chrome_survivors(fixture: &Fixture) -> Vec<String> {
 }
 
 async fn assert_no_chrome_left(fixture: &Fixture) {
-    for _ in 0..50 {
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
         if chrome_survivors(fixture).is_empty() {
             return;
         }
@@ -2835,6 +2836,26 @@ fn late_player(title: &str, delay_ms: u32) -> String {
     )
 }
 
+/// How long a test waits for Chrome to do something. Generous on purpose: a
+/// cold, busy CI runner took longer than a fixed 12 s to show a window
+/// (docs/JOURNEY.md, B34 and B50). Waits end as soon as the thing happens.
+const CHROME_PATIENCE: Duration = Duration::from_secs(150);
+
+/// Waits until this fixture's visible window is up and has fetched `host`'s
+/// page; returns its Chrome browser processes, or none on timeout.
+async fn wait_for_window(output: &Path, hits: &HitLog, host: &str) -> Vec<i32> {
+    let deadline = std::time::Instant::now() + CHROME_PATIENCE;
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let shown = hits.list.lock().unwrap().iter().any(|hit| hit.host == host);
+        let pids = chrome_browser_pids_in(output);
+        if shown && !pids.is_empty() {
+            return pids;
+        }
+    }
+    Vec::new()
+}
+
 /// The Chrome browser processes (not renderers) with a profile under `output`.
 fn chrome_browser_pids_in(output: &Path) -> Vec<i32> {
     let needle = output.to_string_lossy().into_owned();
@@ -3084,26 +3105,17 @@ async fn closing_the_highvi_browser_ends_the_attempt() {
             let output = fixture.output_dir.clone();
             let hits = Arc::clone(&fixture.server.hits_log);
             tokio::spawn(async move {
-                for _ in 0..600 {
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                    let pids = chrome_browser_pids_in(&output);
-                    let page_shown = hits
-                        .list
-                        .lock()
-                        .unwrap()
-                        .iter()
-                        .any(|hit| hit.host == "page.test");
-                    if !pids.is_empty() && page_shown {
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                        for pid in pids {
-                            // SAFETY: SIGTERM to the test's own Chrome, which
-                            // Chrome handles as closing its windows.
-                            unsafe { libc::kill(pid, libc::SIGTERM) };
-                        }
-                        return true;
-                    }
+                let pids = wait_for_window(&output, &hits, "page.test").await;
+                if pids.is_empty() {
+                    return false;
                 }
-                false
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                for pid in pids {
+                    // SAFETY: SIGTERM to the test's own Chrome, which
+                    // Chrome handles as closing its windows.
+                    unsafe { libc::kill(pid, libc::SIGTERM) };
+                }
+                true
             })
         };
         let (result, _) = fixture
@@ -3493,25 +3505,16 @@ async fn a_killed_highvi_browser_is_a_failure_not_a_close() {
         let output = fixture.output_dir.clone();
         let hits = Arc::clone(&fixture.server.hits_log);
         tokio::spawn(async move {
-            for _ in 0..600 {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-                let shown = hits
-                    .list
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .any(|hit| hit.host == "page.test");
-                let pids = chrome_browser_pids_in(&output);
-                if shown && !pids.is_empty() {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    for pid in pids {
-                        // SAFETY: SIGKILL to the test's own Chrome.
-                        unsafe { libc::kill(pid, libc::SIGKILL) };
-                    }
-                    return true;
-                }
+            let pids = wait_for_window(&output, &hits, "page.test").await;
+            if pids.is_empty() {
+                return false;
             }
-            false
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            for pid in pids {
+                // SAFETY: SIGKILL to the test's own Chrome.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
+            true
         })
     };
     let (result, _) = fixture
