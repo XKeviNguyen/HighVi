@@ -103,15 +103,21 @@ pub struct DiskBudget {
 #[derive(Debug)]
 pub struct Reservation {
     budget: std::sync::Arc<DiskBudget>,
+    /// What the job asked for.
+    total: u64,
+    /// Free space when it asked, if known.
+    free: Option<u64>,
+    /// What it still holds: `total` less what it has written.
     bytes: u64,
 }
 
 impl DiskBudget {
     /// Reserves `bytes` if `free`, less what other jobs reserved, still
-    /// leaves `floor`.
+    /// leaves `floor`. Unknown free space admits the job; the floor is
+    /// still watched while it writes.
     pub fn reserve(
         self: &std::sync::Arc<Self>,
-        free: u64,
+        free: Option<u64>,
         bytes: u64,
         floor: u64,
     ) -> Option<Reservation> {
@@ -119,11 +125,13 @@ impl DiskBudget {
             .reserved
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let available = free.saturating_sub(*reserved);
+        let available = free.unwrap_or(u64::MAX).saturating_sub(*reserved);
         (available >= bytes.saturating_add(floor)).then(|| {
             *reserved = reserved.saturating_add(bytes);
             Reservation {
                 budget: std::sync::Arc::clone(self),
+                total: bytes,
+                free,
                 bytes,
             }
         })
@@ -134,6 +142,33 @@ impl DiskBudget {
             .reserved
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Reservation {
+    /// The job has `written` bytes on the disk. Free space already counts
+    /// them, so the promise shrinks by as much; it never grows back. Only
+    /// as far as `free` has fallen since the reservation, though: some
+    /// filesystems report writes late, and the count comes from yt-dlp.
+    /// Each job compares with its own reading, so jobs writing at once on
+    /// such a filesystem may each count the same fall for a moment; the
+    /// floor watched while writing still holds.
+    pub fn written(&mut self, written: u64, free: Option<u64>) {
+        let (Some(before), Some(free)) = (self.free, free) else {
+            return;
+        };
+        let shown = written.min(before.saturating_sub(free));
+        let outstanding = self.total.saturating_sub(shown);
+        if outstanding >= self.bytes {
+            return;
+        }
+        let mut reserved = self
+            .budget
+            .reserved
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *reserved = reserved.saturating_sub(self.bytes - outstanding);
+        self.bytes = outstanding;
     }
 }
 
@@ -378,15 +413,15 @@ mod tests {
     #[test]
     fn reservations_share_free_space_and_return_it() {
         let budget = std::sync::Arc::new(DiskBudget::default());
-        let first = budget.reserve(1_000, 600, 100).unwrap();
+        let first = budget.reserve(Some(1_000), 600, 100).unwrap();
         // 1 000 free − 600 promised leaves 400: not enough for 400 + floor.
-        assert!(budget.reserve(1_000, 400, 100).is_none());
-        let second = budget.reserve(1_000, 300, 100).unwrap();
+        assert!(budget.reserve(Some(1_000), 400, 100).is_none());
+        let second = budget.reserve(Some(1_000), 300, 100).unwrap();
         assert_eq!(budget.reserved(), 900);
         drop(first);
         drop(second);
         assert_eq!(budget.reserved(), 0);
-        assert!(budget.reserve(1_000, 900, 100).is_some());
+        assert!(budget.reserve(Some(1_000), 900, 100).is_some());
     }
 
     #[test]
@@ -398,7 +433,7 @@ mod tests {
                 let budget = std::sync::Arc::clone(&budget);
                 let granted = std::sync::Arc::clone(&granted);
                 scope.spawn(move || {
-                    if let Some(reservation) = budget.reserve(10_000, 1_000, 500) {
+                    if let Some(reservation) = budget.reserve(Some(10_000), 1_000, 500) {
                         granted.lock().unwrap().push(reservation);
                     }
                 });
@@ -407,6 +442,48 @@ mod tests {
         // (10 000 − 500 floor) / 1 000 = 9 jobs fit.
         assert_eq!(granted.lock().unwrap().len(), 9);
         assert_eq!(budget.reserved(), 9_000);
+    }
+
+    #[test]
+    fn written_bytes_are_not_counted_twice() {
+        let budget = std::sync::Arc::new(DiskBudget::default());
+        let mut first = budget.reserve(Some(1_000), 600, 100).unwrap();
+        // The first job writes 300 bytes, but free space does not show them
+        // yet (btrfs, ZFS and network mounts report late), or is unknown:
+        // nothing is given back. A forged progress line gets no further.
+        first.written(300, Some(1_000));
+        first.written(300, None);
+        assert_eq!(budget.reserved(), 600);
+        // Free space shows 200 of them, then all 300: the disk has 700 free,
+        // and the first job needs only 300 more.
+        first.written(300, Some(800));
+        assert_eq!(budget.reserved(), 400);
+        first.written(300, Some(700));
+        assert_eq!(budget.reserved(), 300);
+        let mut second = budget.reserve(Some(700), 300, 100).unwrap();
+        assert_eq!(budget.reserved(), 600);
+        // Another job's 250 bytes lower free space too; the second job
+        // wrote only 50 of them and gets back only those.
+        second.written(50, Some(400));
+        assert_eq!(budget.reserved(), 550);
+        // Progress past the promise gives back all of it...
+        first.written(900, Some(100));
+        assert_eq!(budget.reserved(), 250);
+        // ...and going backwards never grows it.
+        second.written(10, Some(400));
+        assert_eq!(budget.reserved(), 250);
+        drop(first);
+        drop(second);
+        assert_eq!(budget.reserved(), 0);
+    }
+
+    #[test]
+    fn unknown_free_space_at_reserve_gives_nothing_back() {
+        let budget = std::sync::Arc::new(DiskBudget::default());
+        let mut job = budget.reserve(None, 600, 100).unwrap();
+        // Later readings have nothing to compare with.
+        job.written(600, Some(1_000));
+        assert_eq!(budget.reserved(), 600);
     }
 
     #[tokio::test]
