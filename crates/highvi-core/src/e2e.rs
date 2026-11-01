@@ -2166,6 +2166,62 @@ async fn too_little_free_space_refuses_before_and_stops_during_a_download() {
     fixture.assert_no_job_dirs();
 }
 
+/// What a job has downloaded is on the disk, so its reservation shrinks by
+/// as much instead of counting those bytes a second time against the jobs
+/// that start after it.
+#[tokio::test]
+async fn downloaded_bytes_leave_the_reservation() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    // A disk of its own, so other tests' files do not move its free space.
+    fn used(path: &std::path::Path) -> u64 {
+        std::fs::read_dir(path).map_or(0, |entries| {
+            entries
+                .flatten()
+                .map(|entry| match entry.file_type() {
+                    Ok(kind) if kind.is_dir() => used(&entry.path()),
+                    _ => entry.metadata().map_or(0, |metadata| metadata.len()),
+                })
+                .sum()
+        })
+    }
+    let mut environment = fixture.environment();
+    let output = fixture.output_dir.clone();
+    environment.free_space = Some(Arc::new(move || Some((1 << 40) - used(&output))));
+    let budget = Arc::clone(&environment.shared.disk);
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sampler = tokio::spawn({
+        let done = Arc::clone(&done);
+        async move {
+            let mut samples = Vec::new();
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                samples.push(budget.reserved());
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            samples
+        }
+    });
+    let (result, _) = fixture
+        .run_with(
+            &environment,
+            direct("https://media.test/muxed/master.m3u8"),
+            None,
+        )
+        .await;
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    let samples = sampler.await.unwrap();
+    result.unwrap();
+    let peak = samples.iter().copied().max().unwrap_or(0);
+    // The master playlist's bandwidth gives an estimate, so space is held.
+    assert!(peak > 0, "{samples:?}");
+    assert!(
+        samples.iter().any(|&held| 0 < held && held < peak),
+        "{samples:?}"
+    );
+    assert_eq!(environment.shared.disk.reserved(), 0);
+}
+
 /// A hostile page floods discovery: thousands of requests with long URLs and
 /// multi-megabyte events. HighVi stays within its bounds and says so,
 /// instead of reporting "no video" as if it had seen everything.

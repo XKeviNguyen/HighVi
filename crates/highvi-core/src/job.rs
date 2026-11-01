@@ -493,12 +493,12 @@ async fn fetch(
     let needed = media
         .estimated_bytes
         .map_or(0, |bytes| bytes.saturating_mul(2));
-    let free = env.free_space().unwrap_or(u64::MAX);
-    let reservation = env
+    let free = env.free_space();
+    let mut reservation = env
         .shared
         .disk
         .reserve(free, needed, env.limits.disk_floor)
-        .ok_or_else(|| no_space_error(Some(needed), free))?;
+        .ok_or_else(|| no_space_error(Some(needed), free.unwrap_or(u64::MAX)))?;
     tokio::fs::write(job.path().join(INFO_JSON), &media.info_json)
         .await
         .map_err(|_| output_dir_error())?;
@@ -516,8 +516,10 @@ async fn fetch(
             .as_deref()
             .map(|id| (id, "audio", Stage::DownloadingAudio)),
     ];
+    // Bytes the finished tracks left on the disk.
+    let mut written: u64 = 0;
     for (format_id, stem, stage) in tracks.into_iter().flatten() {
-        Box::pin(download_track(
+        let track = Box::pin(download_track(
             env,
             job,
             &policy,
@@ -529,8 +531,10 @@ async fn fetch(
             cancel,
             report,
             recorder,
+            &mut |bytes| reservation.written(written.saturating_add(bytes), env.free_space()),
         ))
         .await?;
+        written = written.saturating_add(track);
     }
     Ok((media, reservation))
 }
@@ -1046,7 +1050,8 @@ async fn download_track(
     cancel: &mut CancelToken,
     report: &(dyn Fn(JobUpdate) + Send + Sync),
     recorder: &Mutex<Diagnostics>,
-) -> Result<(), PublicError> {
+    on_written: &mut (dyn FnMut(u64) + Send),
+) -> Result<u64, PublicError> {
     report(JobUpdate::stage(stage));
     let before = stats.counts();
     let mut command = tool_command(
@@ -1065,12 +1070,18 @@ async fn download_track(
             floor: env.limits.disk_floor,
         }),
     };
+    // The most this track has written, as yt-dlp reports it.
+    let mut written = 0;
     let success = run_streaming(command, watch, cancel, |line, stream| {
         // The progress template writes to stdout; a look-alike on stderr
         // (remote text in an error) must not move the stall meter.
         match parse_progress_line(line, stage).filter(|_| stream == Stream::Stdout) {
             Some((update, bytes)) => {
                 report(update);
+                if let Some(bytes) = bytes.filter(|bytes| *bytes > written) {
+                    written = bytes;
+                    on_written(written);
+                }
                 bytes
             }
             None => {
@@ -1098,7 +1109,7 @@ async fn download_track(
         return Err(network_refusal(stats.counts().since(before))
             .unwrap_or_else(|| signals.classify(kind, FetchTarget::Media)));
     }
-    Ok(())
+    Ok(written)
 }
 
 async fn mux(
