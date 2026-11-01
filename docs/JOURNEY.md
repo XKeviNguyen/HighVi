@@ -15,8 +15,8 @@ It is written for contributors, and for anyone building a tool that drives other
 | Duration | 8 days, from MVP (13 Oct) to v0.1.1 (20 Oct) |
 | Pull requests | 13 merged, plus the v0.1.1 release branch |
 | Commits | ~70 |
-| Bugs catalogued | **49**, each with its root cause, location and fix (§7) |
-| Bugs found by the author's own tests | 4 of 49. Independent review found 24, native runs and measurements 9, users and CI 5, the baseline audit 4, the dev workflow 3 (§3). |
+| Bugs catalogued | **50**, each with its root cause, location and fix (§7) |
+| Bugs found by the author's own tests | 4 of 50. Independent review found 24, native runs and measurements 9, users and CI 6, the baseline audit 4, the dev workflow 3 (§3). |
 | Tests at the end | 188 unit and end-to-end tests with real yt-dlp, FFmpeg and Chrome, on two yt-dlp versions in CI |
 
 ## 2. Timeline
@@ -63,18 +63,18 @@ flowchart LR
   subgraph around["Around it"]
     direction LR
     env["Packaging and environment<br/>3 bugs"]:::cool
-    tests["Tests, CI, dev workflow<br/>7 bugs"]:::warm
+    tests["Tests, CI, dev workflow<br/>8 bugs"]:::warm
   end
 ```
 
 ```mermaid
 pie showData
-  title Bugs by area (49)
+  title Bugs by area (50)
   "Network guard" : 10
   "Browser discovery" : 9
   "Downloader" : 8
   "Queue and concurrency" : 7
-  "Tests, CI, dev workflow" : 7
+  "Tests, CI, dev workflow" : 8
   "UI" : 3
   "Packaging and environment" : 3
   "Mux" : 2
@@ -84,7 +84,7 @@ pie showData
 
 ```mermaid
 pie showData
-  title How each bug was found (49)
+  title How each bug was found (50)
   "Independent code review" : 15
   "Security review" : 9
   "Native run on a real system" : 6
@@ -93,7 +93,7 @@ pie showData
   "User report" : 3
   "Measurement" : 3
   "Dev workflow, self-discovered" : 3
-  "CI" : 2
+  "CI" : 3
 ```
 
 The headline: **independent, read-only review found half of all bugs**, including both High
@@ -277,8 +277,17 @@ sequenceDiagram
 regression test wraps Chrome in a script that holds it back for 25 s. It fails on the old 20 s
 and passes now, and the one-core reproduction passes too (v0.1.1).
 
+**It came back (B50).** CI on `main` went red again after the v0.1.1 merge, this time with a
+single test: "no browser window was seen". The first fix had covered the product's timeout but
+not the **tests' own** fixed waits. Two window tests watched for Chrome for only 12 s
+(600 × 20 ms), then gave up, and the attempt then sat through its 10-minute budget, which is why
+that CI run took 622 s instead of about 150 s. Reproduced by holding Chrome back for 15 s: both
+tests failed (618 s). With a shared deadline-based watcher (up to 150 s, returning as soon as
+the window appears) both pass in 17.5 s.
+
 **Lesson.** A fixed timeout is a bet about the machine. CI runners and users' first launches
-are slow. Test under load (one core), and do not mistake "slow" for "crashed".
+are slow. Test under load (one core), and do not mistake "slow" for "crashed". When you find
+one timing bet, **sweep for all of them**, in the test code as well as the product.
 
 ## 6. Recurring patterns
 
@@ -291,7 +300,7 @@ flowchart LR
   P4["Environment assumptions<br/>7"]:::p
   P5["Unbounded input from<br/>untrusted pages/servers<br/>6"]:::p
   P6["Wrong attribution or<br/>premature success<br/>5"]:::p
-  P7["Test setup unlike reality<br/>4"]:::p
+  P7["Test setup unlike reality<br/>5"]:::p
 ```
 
 1. **Trust boundary crossed by a tool's own behaviour** (B2, B4, B5, B6, B16, B17, B19, B20,
@@ -304,7 +313,7 @@ flowchart LR
 5. **Unbounded input** (B8, B21, B30, B42, B44): every buffer an untrusted page can fill needs a
    byte budget.
 6. **Wrong attribution or premature success** (B1, B26, B27, B33, B40).
-7. **Test setup unlike reality** (B23, B24, B29, B34): a fixture without CORS, base64 bodies
+7. **Test setup unlike reality** (B23, B24, B29, B34, B50): a fixture without CORS, base64 bodies
    from Chrome, one install layout, a fast developer machine.
 
 ## 7. Full bug catalogue
@@ -363,6 +372,7 @@ test with real tools, **NR** = native run, **M** = measurement, **U** = user rep
 | B47 | Tests | Shared build folder built the wrong checkout | Shared mutable build state | dev workflow | (practice) | self |
 | B48 | Tests | GUI test touched the owner's live clipboard | Shell inherited the live desktop session | test harness | `HIGHVI_TEST_DISPLAY` (6f796fe) | self |
 | B49 | Tests | `pkill -f` matched its own shell | Pattern matched the caller's command line | dev workflow | (practice: PIDs) | self |
+| B50 | Tests | "No browser window was seen" on main after v0.1.1 | Test watchers gave Chrome only a fixed 12 s | e2e `wait_for_window` | after v0.1.1 | CI |
 
 ## 8. Lessons
 
@@ -377,9 +387,9 @@ test with real tools, **NR** = native run, **M** = measurement, **U** = user rep
 | 7 | Attribute a failure to the stage that failed, and say so in the error. | B1, B26, B27, B33 |
 | 8 | Measure the cause before building the fix. | B25, B39, B46 |
 | 9 | Re-review every fix; it is a new mechanism. | B18, B31, B42, B44 |
-| 10 | Fixtures, CI and test machines must resemble reality, including slow ones. | B23, B24, B29, B34, B35 |
+| 10 | Fixtures, CI and test machines must resemble reality, including slow ones. | B23, B24, B29, B34, B35, B50 |
 | 11 | Children die with the parent; cleanup never follows links. | B11, B37 |
-| 12 | A fixed timeout is a bet about the machine; give nested deadlines margins. | B34, B45 |
+| 12 | A fixed timeout is a bet about the machine; give nested deadlines margins; sweep the tests too. | B34, B45, B50 |
 | 13 | One site's text must never decide global state. | B33 |
 | 14 | Isolate the build and the test environment from the developer's own session. | B47, B48, B49 |
 | 15 | Write down accepted risks with their reasons. | B38 |
