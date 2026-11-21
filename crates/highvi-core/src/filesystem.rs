@@ -96,7 +96,47 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
 /// count the same free space. One per process (or per scheduler).
 #[derive(Debug, Default)]
 pub struct DiskBudget {
-    reserved: std::sync::Mutex<u64>,
+    ledger: std::sync::Mutex<Ledger>,
+    /// Woken whenever space is given back or a waiter leaves the line.
+    released: tokio::sync::Notify,
+}
+
+#[derive(Debug, Default)]
+struct Ledger {
+    reserved: u64,
+    /// Jobs waiting for space, oldest first. Only the oldest may take
+    /// space, so small jobs that start later cannot keep a big one waiting.
+    waiters: std::collections::VecDeque<u64>,
+    next_ticket: u64,
+}
+
+/// What [`DiskBudget::admit`] decided.
+#[derive(Debug)]
+pub enum Admission {
+    Granted(Reservation),
+    /// Other downloads hold space (or an older waiter is ahead): wait for
+    /// them to give it back.
+    Wait,
+    /// The video does not fit, and no other download holds space.
+    Refused,
+}
+
+/// A place in the line of jobs waiting for space; leaving it (by drop)
+/// lets the next one try.
+#[derive(Debug)]
+pub struct WaitTicket {
+    budget: std::sync::Arc<DiskBudget>,
+    id: u64,
+}
+
+impl Drop for WaitTicket {
+    fn drop(&mut self) {
+        self.budget
+            .ledger()
+            .waiters
+            .retain(|waiter| *waiter != self.id);
+        self.budget.released.notify_waiters();
+    }
 }
 
 /// Returned to the budget when dropped.
@@ -112,36 +152,92 @@ pub struct Reservation {
 }
 
 impl DiskBudget {
+    fn ledger(&self) -> std::sync::MutexGuard<'_, Ledger> {
+        self.ledger
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Reserves `bytes` if `free`, less what other jobs reserved, still
-    /// leaves `floor`. Unknown free space admits the job; the floor is
-    /// still watched while it writes.
+    /// leaves `floor` and no job is waiting for space. Unknown free space
+    /// admits the job; the floor is still watched while it writes.
     pub fn reserve(
         self: &std::sync::Arc<Self>,
         free: Option<u64>,
         bytes: u64,
         floor: u64,
     ) -> Option<Reservation> {
-        let mut reserved = self
-            .reserved
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let available = free.unwrap_or(u64::MAX).saturating_sub(*reserved);
-        (available >= bytes.saturating_add(floor)).then(|| {
-            *reserved = reserved.saturating_add(bytes);
-            Reservation {
+        match self.admit(free, bytes, floor, &mut None).0 {
+            Admission::Granted(reservation) => Some(reservation),
+            Admission::Wait | Admission::Refused => None,
+        }
+    }
+
+    /// Decides, in one look at the ledger, whether a job needing `bytes`
+    /// may start, must wait (other jobs hold space, or an older waiter is
+    /// first), or cannot fit at all (nothing else is held and it still
+    /// does not fit). A waiting job keeps `ticket` for its place in the line and
+    /// passes it back on the next try. Also returns what other jobs held
+    /// at that moment.
+    pub fn admit(
+        self: &std::sync::Arc<Self>,
+        free: Option<u64>,
+        bytes: u64,
+        floor: u64,
+        ticket: &mut Option<WaitTicket>,
+    ) -> (Admission, u64) {
+        let mut ledger = self.ledger();
+        let held = ledger.reserved;
+        let mine = ticket.as_ref().map(|ticket| ticket.id);
+        let ahead = ledger
+            .waiters
+            .front()
+            .is_some_and(|front| Some(*front) != mine);
+        let needed = bytes.saturating_add(floor);
+        let available = free.unwrap_or(u64::MAX).saturating_sub(held);
+        if available >= needed && !ahead {
+            ledger.reserved = held.saturating_add(bytes);
+            drop(ledger);
+            // Leaves the line (and wakes the next waiter).
+            drop(ticket.take());
+            let reservation = Reservation {
                 budget: std::sync::Arc::clone(self),
                 total: bytes,
                 free,
                 bytes,
+            };
+            return (Admission::Granted(reservation), held);
+        }
+        // While others hold space, what is free now says little: a job that
+        // is merging briefly needs room for two copies and then frees its
+        // tracks. So wait until nothing is held; only then is a video that
+        // still does not fit refused.
+        if held > 0 || ahead {
+            if ticket.is_none() {
+                let id = ledger.next_ticket;
+                ledger.next_ticket += 1;
+                ledger.waiters.push_back(id);
+                *ticket = Some(WaitTicket {
+                    budget: std::sync::Arc::clone(self),
+                    id,
+                });
             }
-        })
+            return (Admission::Wait, held);
+        }
+        drop(ledger);
+        drop(ticket.take());
+        (Admission::Refused, held)
+    }
+
+    /// Resolves after space is given back or a waiter leaves the line.
+    /// Create it before checking the budget (and `enable` it), so a
+    /// release in between is not missed.
+    pub fn released(&self) -> tokio::sync::futures::Notified<'_> {
+        self.released.notified()
     }
 
     pub fn reserved(&self) -> u64 {
-        *self
-            .reserved
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.ledger().reserved
     }
 }
 
@@ -152,7 +248,8 @@ impl Reservation {
     /// filesystems report writes late, and the count comes from yt-dlp.
     /// Each job compares with its own reading, so jobs writing at once on
     /// such a filesystem may each count the same fall for a moment; the
-    /// floor watched while writing still holds.
+    /// floor watched while writing still holds. Waiters are not woken:
+    /// free space fell by as much, so nothing opened up for them.
     pub fn written(&mut self, written: u64, free: Option<u64>) {
         let (Some(before), Some(free)) = (self.free, free) else {
             return;
@@ -162,24 +259,18 @@ impl Reservation {
         if outstanding >= self.bytes {
             return;
         }
-        let mut reserved = self
-            .budget
-            .reserved
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *reserved = reserved.saturating_sub(self.bytes - outstanding);
+        let mut ledger = self.budget.ledger();
+        ledger.reserved = ledger.reserved.saturating_sub(self.bytes - outstanding);
         self.bytes = outstanding;
     }
 }
 
 impl Drop for Reservation {
     fn drop(&mut self) {
-        let mut reserved = self
-            .budget
-            .reserved
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        *reserved = reserved.saturating_sub(self.bytes);
+        let mut ledger = self.budget.ledger();
+        ledger.reserved = ledger.reserved.saturating_sub(self.bytes);
+        drop(ledger);
+        self.budget.released.notify_waiters();
     }
 }
 
@@ -408,6 +499,109 @@ mod tests {
     fn free_space_is_reported_for_real_paths_only() {
         assert!(free_bytes(&std::env::temp_dir()).is_some_and(|free| free > 0));
         assert!(free_bytes(Path::new("/nonexistent/highvi")).is_none());
+    }
+
+    fn granted(admission: &(Admission, u64)) -> bool {
+        matches!(admission.0, Admission::Granted(_))
+    }
+    fn waits(admission: &(Admission, u64)) -> bool {
+        matches!(admission.0, Admission::Wait)
+    }
+    fn refused(admission: &(Admission, u64)) -> bool {
+        matches!(admission.0, Admission::Refused)
+    }
+
+    #[test]
+    fn admission_at_the_boundaries() {
+        let floor = 10;
+        let budget = std::sync::Arc::new(DiskBudget::default());
+        // Nothing else held: an exact fit starts, one byte short is refused.
+        assert!(granted(&budget.admit(Some(110), 100, floor, &mut None)));
+        assert!(refused(&budget.admit(Some(109), 100, floor, &mut None)));
+        assert!(granted(&budget.admit(None, 100, floor, &mut None)));
+        // An unknown size still keeps the floor.
+        assert!(refused(&budget.admit(Some(9), 0, floor, &mut None)));
+        assert!(granted(&budget.admit(Some(10), 0, floor, &mut None)));
+        assert_eq!(budget.reserved(), 0);
+
+        let _held = budget.reserve(Some(1_000), 500, 0).unwrap();
+        // Exactly fits beside what is held.
+        let beside = budget.admit(Some(610), 100, floor, &mut None);
+        assert!(granted(&beside));
+        assert_eq!(beside.1, 500);
+        drop(beside);
+        // One byte short beside it: waits, in line.
+        let mut ticket = None;
+        assert!(waits(&budget.admit(Some(609), 100, floor, &mut ticket)));
+        assert!(ticket.is_some());
+        // Even a video larger than what is free now waits while others
+        // hold space: a merging job frees its tracks when it is done.
+        let mut big = None;
+        assert!(waits(&budget.admit(Some(50), 100, floor, &mut big)));
+    }
+
+    #[test]
+    fn waiters_take_space_in_order() {
+        let budget = std::sync::Arc::new(DiskBudget::default());
+        let held = budget.reserve(Some(1_000), 900, 0).unwrap();
+        let mut big = None;
+        assert!(waits(&budget.admit(Some(1_000), 800, 0, &mut big)));
+        // Would fit beside the holder, but the big one is first in line.
+        let mut small = None;
+        assert!(waits(&budget.admit(Some(1_000), 50, 0, &mut small)));
+        assert!(budget.reserve(Some(1_000), 50, 0).is_none());
+        drop(held);
+        assert!(waits(&budget.admit(Some(1_000), 50, 0, &mut small)));
+        let (first, _) = budget.admit(Some(1_000), 800, 0, &mut big);
+        assert!(matches!(first, Admission::Granted(_)));
+        assert!(big.is_none(), "a granted job leaves the line");
+        // What is left fits the small one.
+        let (second, held) = budget.admit(Some(1_000), 50, 0, &mut small);
+        assert!(matches!(second, Admission::Granted(_)));
+        assert_eq!(held, 800);
+        // Only one of two waiters fits: the other keeps waiting.
+        let mut third = None;
+        assert!(waits(&budget.admit(Some(1_000), 300, 0, &mut third)));
+        drop((first, second));
+        assert_eq!(budget.reserved(), 0);
+        assert!(granted(&budget.admit(Some(1_000), 300, 0, &mut third)));
+    }
+
+    #[test]
+    fn a_waiter_that_gives_up_lets_the_next_one_go() {
+        let budget = std::sync::Arc::new(DiskBudget::default());
+        let held = budget.reserve(Some(1_000), 900, 0).unwrap();
+        let mut first = None;
+        let mut second = None;
+        assert!(waits(&budget.admit(Some(1_000), 500, 0, &mut first)));
+        assert!(waits(&budget.admit(Some(1_000), 500, 0, &mut second)));
+        drop(held);
+        assert!(waits(&budget.admit(Some(1_000), 500, 0, &mut second)));
+        drop(first);
+        assert!(granted(&budget.admit(Some(1_000), 500, 0, &mut second)));
+        assert!(second.is_none());
+    }
+
+    #[tokio::test]
+    async fn giving_space_back_wakes_waiters() {
+        let budget = std::sync::Arc::new(DiskBudget::default());
+        let mut held = budget.reserve(Some(1_000), 900, 0).unwrap();
+        let released = budget.released();
+        tokio::pin!(released);
+        released.as_mut().enable();
+        // Writing moves bytes from the promise to the disk; nothing opens
+        // up for a waiter, so it is not woken.
+        held.written(400, Some(600));
+        assert_eq!(budget.reserved(), 500);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), released.as_mut())
+                .await
+                .is_err()
+        );
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(5), released)
+            .await
+            .expect("not woken when space came back");
     }
 
     #[test]

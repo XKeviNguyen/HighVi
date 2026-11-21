@@ -10,7 +10,10 @@ use crate::{
     job::Stage,
     tools::{self, ToolVersions, YtDlpVersion},
 };
-use std::{fmt::Write as _, time::Instant};
+use std::{
+    fmt::Write as _,
+    time::{Duration, Instant},
+};
 
 pub const MAX_REPORT_BYTES: usize = 4096;
 const MAX_STAGES: usize = 32;
@@ -29,6 +32,7 @@ pub struct Diagnostics {
     candidates_checked: usize,
     egress: Option<(u64, RefusalCounts)>,
     outcome: Option<(String, Option<Stage>, u64)>,
+    disk: Option<DiskReport>,
     tools: ToolVersions,
     pub(crate) yt_dlp: Option<YtDlpVersion>,
 }
@@ -57,6 +61,7 @@ impl Diagnostics {
             candidates_checked: 0,
             egress: None,
             outcome: None,
+            disk: None,
             tools: ToolVersions::default(),
             yt_dlp: None,
         }
@@ -96,6 +101,25 @@ impl Diagnostics {
         self.candidates_checked += 1;
     }
 
+    /// The space check before downloading, as last decided: what the video
+    /// needs, the free space and what other downloads held at that moment,
+    /// the space HighVi keeps free, and how long it waited.
+    pub fn disk(
+        &mut self,
+        needed: u64,
+        free: Option<u64>,
+        held_by_others: u64,
+        floor: u64,
+        waited: Option<Duration>,
+    ) {
+        self.disk = Some(DiskReport {
+            needed,
+            free,
+            held_by_others,
+            floor,
+            waited,
+        });
+    }
     pub(crate) fn egress(&mut self, tunnels: u64, refused: RefusalCounts) {
         self.egress = Some((tunnels, refused));
     }
@@ -185,6 +209,24 @@ impl Diagnostics {
                 *at as f64 / 1000.0
             );
         }
+        // Early, so the 4 KiB cap never cuts it.
+        if let Some(disk) = &self.disk {
+            const MIB: u64 = 1024 * 1024;
+            let _ = writeln!(
+                text,
+                "disk: needs {} MiB, free {}, keeps {} MiB free, held by other downloads {} MiB{}",
+                disk.needed.div_ceil(MIB),
+                disk.free.map_or_else(
+                    || "unknown".to_string(),
+                    |free| format!("{} MiB", free / MIB)
+                ),
+                disk.floor / MIB,
+                disk.held_by_others / MIB,
+                disk.waited
+                    .map(|waited| format!(", waited {:.1} s", waited.as_secs_f64()))
+                    .unwrap_or_default(),
+            );
+        }
         let timeline: Vec<String> = self
             .stages
             .iter()
@@ -246,6 +288,16 @@ fn yes(value: bool) -> &'static str {
     if value { "yes" } else { "no" }
 }
 
+/// The space check before downloading, in bytes.
+#[derive(Debug, Clone, Copy)]
+struct DiskReport {
+    needed: u64,
+    free: Option<u64>,
+    held_by_others: u64,
+    floor: u64,
+    waited: Option<Duration>,
+}
+
 pub fn stage_name(stage: Stage) -> &'static str {
     match stage {
         Stage::Discovering => "discovering",
@@ -253,6 +305,7 @@ pub fn stage_name(stage: Stage) -> &'static str {
         Stage::OpeningWindow => "openingWindow",
         Stage::WaitingForUser => "waitingForUser",
         Stage::Browsing => "browsing",
+        Stage::WaitingForSpace => "waitingForSpace",
         Stage::DownloadingVideo => "downloadingVideo",
         Stage::DownloadingAudio => "downloadingAudio",
         Stage::WaitingToMerge => "waitingToMerge",

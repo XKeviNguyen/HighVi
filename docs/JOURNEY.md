@@ -15,7 +15,7 @@ It is written for contributors, and for anyone building a tool that drives other
 | Duration | 8 days, from MVP (13 Oct) to v0.1.1 (20 Oct) |
 | Pull requests | 13 merged, plus the v0.1.1 release branch |
 | Commits | ~70 |
-| Bugs catalogued | **50**, each with its root cause, location and fix (§7) |
+| Bugs catalogued | **57**, each with its root cause, location and fix (§7). B51–B57 came after v0.1.1 (§5.7). |
 | Bugs found by the author's own tests | 4 of 50. Independent review found 24, native runs and measurements 9, users and CI 6, the baseline audit 4, the dev workflow 3 (§3). |
 | Tests at the end | 188 unit and end-to-end tests with real yt-dlp, FFmpeg and Chrome, on two yt-dlp versions in CI |
 
@@ -30,6 +30,7 @@ timeline
   16 Oct : Pre-public audit (PR #8) : Open in HighVi Browser (PR #9) : Packed Dolby audio (PR #11) : Release v0.1.0, repository public
   19 Oct : 4 HLS fragments at once, 3.3× faster : Browser window opens by itself (PR #13)
   20 Oct : CI flake, Chrome cold start over 20 s : v0.1.1
+  21 Nov : v0.1.2, downloaded bytes counted once against free space : A second download no longer refused while the first holds the space (v0.1.3)
 ```
 
 ## 3. Where the bugs lived
@@ -84,13 +85,13 @@ pie showData
 
 ```mermaid
 pie showData
-  title How each bug was found (50)
-  "Independent code review" : 15
+  title How each bug was found (57)
+  "Independent code review" : 20
   "Security review" : 9
-  "Native run on a real system" : 6
+  "Native run on a real system" : 7
   "End-to-end test with real tools" : 4
   "Baseline audit" : 4
-  "User report" : 3
+  "User report" : 4
   "Measurement" : 3
   "Dev workflow, self-discovered" : 3
   "CI" : 3
@@ -289,6 +290,45 @@ the window appears) both pass in 17.5 s.
 are slow. Test under load (one core), and do not mistake "slow" for "crashed". When you find
 one timing bet, **sweep for all of them**, in the test code as well as the product.
 
+### 5.7 "Not enough space" on a disk with room (B52–B57)
+
+**Symptom.** A user downloading a 4.9 GB video added a second one of about 5 GB. The second
+failed at once with `insufficient_disk_space`, on a disk with about 20 GB free. The message told
+them to free space, which was not the real problem.
+
+**Investigation.** The diagnostics report had no numbers, and the UI shows a fixed translated
+message, so the first step was the arithmetic. Each job reserves twice its estimate, because
+the tracks and the muxed MP4 exist together for a moment: 2 × 4.9 + 2 × 5 + 0.5 GB floor is
+about 20.3 GB. Refusing to overcommit the disk was right. **Failing** was wrong: the second video
+fitted the disk on its own and only lacked room beside the first.
+
+**Fix, and what review found in it.** The job now waits in line (`WaitingForSpace`) and starts
+when space is given back. Two read-only breaker reviews found five more problems in the first
+version of that fix:
+
+```mermaid
+flowchart TB
+  classDef bug fill:#3a1010,stroke:#ff6060,color:#ffd6d6
+  classDef fix fill:#0b2a14,stroke:#19c94b,color:#c8ffd4
+  W["First fix: wait when the video fits free space<br/>but not beside other jobs' reservations"]
+  W --> B53["B53 race: the decision read the ledger twice,<br/>a release in between gave a hard refusal<br/>(reproduced 131k times in 2M tries)"]:::bug
+  W --> B54["B54: during another job's merge free space dips,<br/>so the waiter was refused although it fits later"]:::bug
+  W --> B55["B55: no line, so small jobs that start later<br/>could keep a big waiter waiting forever"]:::bug
+  W --> B56["B56: links found before a long wait may expire"]:::bug
+  W --> B57["B57: removing the wake-up or the recheck<br/>still passed every new test"]:::bug
+  B53 & B54 & B55 --> F1["One lock for the whole decision; FIFO tickets;<br/>wait while anything is held, refuse only when nothing is"]:::fix
+  B56 --> F2["After 10 min, find the links again<br/>(yt-dlp and headless only, never an unasked window)"]:::fix
+  B57 --> F3["Recheck interval in limits; tests that need the wake-up,<br/>the recheck and the boundaries; 8 mutants, all caught"]:::fix
+```
+
+The diagnostics report now has a `disk:` line (needs, free, the floor, what others held,
+how long it waited), placed early so the 4 KiB cap never cuts it.
+
+**Lesson.** A resource the user will have later is not a reason to fail now: queue for it, in
+order, and say what you are waiting for. And a test suite for a waiting mechanism has to
+prove the **wake-up**, not just the outcome; a periodic recheck quietly hides a broken
+notification.
+
 ## 6. Recurring patterns
 
 ```mermaid
@@ -373,6 +413,13 @@ test with real tools, **NR** = native run, **M** = measurement, **U** = user rep
 | B48 | Tests | GUI test touched the owner's live clipboard | Shell inherited the live desktop session | test harness | `HIGHVI_TEST_DISPLAY` (6f796fe) | self |
 | B49 | Tests | `pkill -f` matched its own shell | Pattern matched the caller's command line | dev workflow | (practice: PIDs) | self |
 | B50 | Tests | "No browser window was seen" on main after v0.1.1 | Test watchers gave Chrome only a fixed 12 s | e2e `wait_for_window` | after v0.1.1 | CI |
+| B51 | Tests | JS-runtime isolation test could not start the release yt-dlp zipapp | `python -m yt_dlp` needs `yt_dlp/__main__.py`, which the zipapp lacks | e2e `yt_dlp_ignores_js_runtimes…` | a54ceca | NR |
+| B52 | Disk | Second download refused although it fitted the disk alone | Shortfall from other jobs' reservations treated as a hard failure | `fetch`, disk reservation | fix/wait-for-disk-space | U |
+| B53 | Disk | Rare spurious refusal while waiting | Decision read the ledger under two separate locks | `DiskBudget::admit` | fix/wait-for-disk-space | IR |
+| B54 | Disk | Waiter refused during another job's merge | "Fits alone" judged on a momentary dip in free space | `DiskBudget::admit` | fix/wait-for-disk-space | IR |
+| B55 | Disk | A big waiter could wait forever | No order among waiters | `DiskBudget` waiters | fix/wait-for-disk-space | IR |
+| B56 | Disk | Links could expire during a long wait | Links found before waiting, used after | `wait_for_space` | fix/wait-for-disk-space | IR |
+| B57 | Tests | Broken wake-up or recheck still passed | Tests checked outcomes, not the mechanism; recheck hid it | e2e disk tests | fix/wait-for-disk-space | IR |
 
 ## 8. Lessons
 
@@ -393,6 +440,8 @@ test with real tools, **NR** = native run, **M** = measurement, **U** = user rep
 | 13 | One site's text must never decide global state. | B33 |
 | 14 | Isolate the build and the test environment from the developer's own session. | B47, B48, B49 |
 | 15 | Write down accepted risks with their reasons. | B38 |
+| 16 | A resource that will free up is a reason to wait in line, not to fail; say what you wait for. | B52, B55 |
+| 17 | Make every check-then-act decision under one lock, and test the wake-up, not just the result. | B53, B57 |
 
 ## 9. Practices that worked
 
