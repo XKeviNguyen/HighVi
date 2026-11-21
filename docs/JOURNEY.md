@@ -414,12 +414,12 @@ test with real tools, **NR** = native run, **M** = measurement, **U** = user rep
 | B49 | Tests | `pkill -f` matched its own shell | Pattern matched the caller's command line | dev workflow | (practice: PIDs) | self |
 | B50 | Tests | "No browser window was seen" on main after v0.1.1 | Test watchers gave Chrome only a fixed 12 s | e2e `wait_for_window` | after v0.1.1 | CI |
 | B51 | Tests | JS-runtime isolation test could not start the release yt-dlp zipapp | `python -m yt_dlp` needs `yt_dlp/__main__.py`, which the zipapp lacks | e2e `yt_dlp_ignores_js_runtimes…` | a54ceca | NR |
-| B52 | Disk | Second download refused although it fitted the disk alone | Shortfall from other jobs' reservations treated as a hard failure | `fetch`, disk reservation | fix/wait-for-disk-space | U |
-| B53 | Disk | Rare spurious refusal while waiting | Decision read the ledger under two separate locks | `DiskBudget::admit` | fix/wait-for-disk-space | IR |
-| B54 | Disk | Waiter refused during another job's merge | "Fits alone" judged on a momentary dip in free space | `DiskBudget::admit` | fix/wait-for-disk-space | IR |
-| B55 | Disk | A big waiter could wait forever | No order among waiters | `DiskBudget` waiters | fix/wait-for-disk-space | IR |
-| B56 | Disk | Links could expire during a long wait | Links found before waiting, used after | `wait_for_space` | fix/wait-for-disk-space | IR |
-| B57 | Tests | Broken wake-up or recheck still passed | Tests checked outcomes, not the mechanism; recheck hid it | e2e disk tests | fix/wait-for-disk-space | IR |
+| B52 | Disk | Second download refused although it fitted the disk alone | Shortfall from other jobs' reservations treated as a hard failure | `fetch`, disk reservation | #17 (v0.1.3) | U |
+| B53 | Disk | Rare spurious refusal while waiting | Decision read the ledger under two separate locks | `DiskBudget::admit` | #17 (v0.1.3) | IR |
+| B54 | Disk | Waiter refused during another job's merge | "Fits alone" judged on a momentary dip in free space | `DiskBudget::admit` | #17 (v0.1.3) | IR |
+| B55 | Disk | A big waiter could wait forever | No order among waiters | `DiskBudget` waiters | #17 (v0.1.3) | IR |
+| B56 | Disk | Links could expire during a long wait | Links found before waiting, used after | `wait_for_space` | #17 (v0.1.3) | IR |
+| B57 | Tests | Broken wake-up or recheck still passed | Tests checked outcomes, not the mechanism; recheck hid it | e2e disk tests | #17 (v0.1.3) | IR |
 
 ## 8. Lessons
 
