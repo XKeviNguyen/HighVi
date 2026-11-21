@@ -107,7 +107,39 @@ struct Ledger {
     /// Jobs waiting for space, oldest first. Only the oldest may take
     /// space, so small jobs that start later cannot keep a big one waiting.
     waiters: std::collections::VecDeque<u64>,
+    /// Merges waiting for space, oldest first. They go before any download:
+    /// a merge always gives space back when it is done, so a download must
+    /// never be able to keep one waiting (that would deadlock the queue).
+    merge_waiters: std::collections::VecDeque<u64>,
     next_ticket: u64,
+    /// Room each downloading job will need to merge, by reservation. Merges
+    /// are what need two copies at once; keeping room for the largest one
+    /// (not for every one) lets several downloads run beside each other,
+    /// since each merge frees its tracks before the next needs the room.
+    merges: Vec<(u64, u64)>,
+    next_hold: u64,
+}
+
+/// What a job asks the budget for.
+#[derive(Clone, Copy, Debug)]
+pub enum Need {
+    /// Downloading `bytes`, then merging them into a copy of about `merge`
+    /// bytes. Starts only if, beside everything already held, there is
+    /// still room for the largest merge any downloading job will need.
+    Download { bytes: u64, merge: u64 },
+    /// Writing the merged copy now. This is what the merge room was kept
+    /// for, so only what is actually held counts against it.
+    Merge { bytes: u64 },
+}
+
+impl Need {
+    /// All the room it needs when nothing else is running.
+    pub fn total(self) -> u64 {
+        match self {
+            Need::Download { bytes, merge } => bytes.saturating_add(merge),
+            Need::Merge { bytes } => bytes,
+        }
+    }
 }
 
 /// What [`DiskBudget::admit`] decided.
@@ -127,14 +159,19 @@ pub enum Admission {
 pub struct WaitTicket {
     budget: std::sync::Arc<DiskBudget>,
     id: u64,
+    merge: bool,
 }
 
 impl Drop for WaitTicket {
     fn drop(&mut self) {
-        self.budget
-            .ledger()
-            .waiters
-            .retain(|waiter| *waiter != self.id);
+        let mut ledger = self.budget.ledger();
+        let line = if self.merge {
+            &mut ledger.merge_waiters
+        } else {
+            &mut ledger.waiters
+        };
+        line.retain(|waiter| *waiter != self.id);
+        drop(ledger);
         self.budget.released.notify_waiters();
     }
 }
@@ -143,6 +180,8 @@ impl Drop for WaitTicket {
 #[derive(Debug)]
 pub struct Reservation {
     budget: std::sync::Arc<DiskBudget>,
+    /// Its entry in the merge room, while it downloads.
+    hold: Option<u64>,
     /// What the job asked for.
     total: u64,
     /// Free space when it asked, if known.
@@ -167,7 +206,8 @@ impl DiskBudget {
         bytes: u64,
         floor: u64,
     ) -> Option<Reservation> {
-        match self.admit(free, bytes, floor, &mut None).0 {
+        let need = Need::Download { bytes, merge: 0 };
+        match self.admit(free, need, floor, &mut None).0 {
             Admission::Granted(reservation) => Some(reservation),
             Admission::Wait | Admission::Refused => None,
         }
@@ -182,26 +222,47 @@ impl DiskBudget {
     pub fn admit(
         self: &std::sync::Arc<Self>,
         free: Option<u64>,
-        bytes: u64,
+        need: Need,
         floor: u64,
         ticket: &mut Option<WaitTicket>,
     ) -> (Admission, u64) {
         let mut ledger = self.ledger();
         let held = ledger.reserved;
         let mine = ticket.as_ref().map(|ticket| ticket.id);
-        let ahead = ledger
-            .waiters
-            .front()
-            .is_some_and(|front| Some(*front) != mine);
-        let needed = bytes.saturating_add(floor);
+        let is_merge = matches!(need, Need::Merge { .. });
+        let first_in = |line: &std::collections::VecDeque<u64>| {
+            line.front().is_some_and(|front| Some(*front) != mine)
+        };
+        // Merges answer only to older merges; downloads to older downloads
+        // and to every waiting merge.
+        let ahead = if is_merge {
+            first_in(&ledger.merge_waiters)
+        } else {
+            first_in(&ledger.waiters) || !ledger.merge_waiters.is_empty()
+        };
+        let (bytes, merge_room, merge) = match need {
+            Need::Download { bytes, merge } => {
+                let largest = ledger.merges.iter().map(|(_, merge)| *merge).max();
+                (bytes, largest.unwrap_or(0).max(merge), Some(merge))
+            }
+            Need::Merge { bytes } => (bytes, 0, None),
+        };
+        let needed = bytes.saturating_add(merge_room).saturating_add(floor);
         let available = free.unwrap_or(u64::MAX).saturating_sub(held);
         if available >= needed && !ahead {
             ledger.reserved = held.saturating_add(bytes);
+            let hold = merge.filter(|merge| *merge > 0).map(|merge| {
+                let id = ledger.next_hold;
+                ledger.next_hold += 1;
+                ledger.merges.push((id, merge));
+                id
+            });
             drop(ledger);
             // Leaves the line (and wakes the next waiter).
             drop(ticket.take());
             let reservation = Reservation {
                 budget: std::sync::Arc::clone(self),
+                hold,
                 total: bytes,
                 free,
                 bytes,
@@ -210,16 +271,30 @@ impl DiskBudget {
         }
         // While others hold space, what is free now says little: a job that
         // is merging briefly needs room for two copies and then frees its
-        // tracks. So wait until nothing is held; only then is a video that
-        // still does not fit refused.
-        if held > 0 || ahead {
+        // tracks. So wait while something that will move on holds space;
+        // only then is a video that still does not fit refused. A merge
+        // waits only on downloads and merges in progress (what `reserved`
+        // counts; a job that finished downloading holds no bytes there):
+        // merge room kept for others is no space taken, and those jobs wait
+        // behind it, so waiting on them could never end.
+        let others_active = if is_merge {
+            held > 0
+        } else {
+            held > 0 || !ledger.merges.is_empty()
+        };
+        if others_active || ahead {
             if ticket.is_none() {
                 let id = ledger.next_ticket;
                 ledger.next_ticket += 1;
-                ledger.waiters.push_back(id);
+                if is_merge {
+                    ledger.merge_waiters.push_back(id);
+                } else {
+                    ledger.waiters.push_back(id);
+                }
                 *ticket = Some(WaitTicket {
                     budget: std::sync::Arc::clone(self),
                     id,
+                    merge: is_merge,
                 });
             }
             return (Admission::Wait, held);
@@ -239,17 +314,56 @@ impl DiskBudget {
     pub fn reserved(&self) -> u64 {
         self.ledger().reserved
     }
+
+    /// Holds `bytes` outright, as another job would, whatever is free.
+    #[cfg(test)]
+    pub(crate) fn hold(self: &std::sync::Arc<Self>, bytes: u64) -> Reservation {
+        let mut ledger = self.ledger();
+        ledger.reserved = ledger.reserved.saturating_add(bytes);
+        Reservation {
+            budget: std::sync::Arc::clone(self),
+            hold: None,
+            total: bytes,
+            free: None,
+            bytes,
+        }
+    }
+
+    /// Room kept for merges: the largest any downloading job will need.
+    pub fn merge_room(&self) -> u64 {
+        self.ledger()
+            .merges
+            .iter()
+            .map(|(_, merge)| *merge)
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 impl Reservation {
+    /// The download is done: what it reserved but did not write (the
+    /// estimate was high, or free space was reported late) goes back now.
+    /// Only its merge room stays, until its merge has space of its own.
+    pub fn finish_download(&mut self) {
+        if self.bytes == 0 {
+            return;
+        }
+        let mut ledger = self.budget.ledger();
+        ledger.reserved = ledger.reserved.saturating_sub(self.bytes);
+        self.bytes = 0;
+        drop(ledger);
+        self.budget.released.notify_waiters();
+    }
+
     /// The job has `written` bytes on the disk. Free space already counts
     /// them, so the promise shrinks by as much; it never grows back. Only
     /// as far as `free` has fallen since the reservation, though: some
     /// filesystems report writes late, and the count comes from yt-dlp.
     /// Each job compares with its own reading, so jobs writing at once on
     /// such a filesystem may each count the same fall for a moment; the
-    /// floor watched while writing still holds. Waiters are not woken:
-    /// free space fell by as much, so nothing opened up for them.
+    /// floor watched while writing still holds. Waiters are woken only when
+    /// nothing is held any more: otherwise free space fell by as much, so
+    /// nothing opened up for them.
     pub fn written(&mut self, written: u64, free: Option<u64>) {
         let (Some(before), Some(free)) = (self.free, free) else {
             return;
@@ -262,6 +376,12 @@ impl Reservation {
         let mut ledger = self.budget.ledger();
         ledger.reserved = ledger.reserved.saturating_sub(self.bytes - outstanding);
         self.bytes = outstanding;
+        let drained = ledger.reserved == 0;
+        drop(ledger);
+        // Nothing held any more: a merge waiting on it can now be decided.
+        if drained {
+            self.budget.released.notify_waiters();
+        }
     }
 }
 
@@ -269,6 +389,9 @@ impl Drop for Reservation {
     fn drop(&mut self) {
         let mut ledger = self.budget.ledger();
         ledger.reserved = ledger.reserved.saturating_sub(self.bytes);
+        if let Some(hold) = self.hold {
+            ledger.merges.retain(|(id, _)| *id != hold);
+        }
         drop(ledger);
         self.budget.released.notify_waiters();
     }
@@ -501,6 +624,225 @@ mod tests {
         assert!(free_bytes(Path::new("/nonexistent/highvi")).is_none());
     }
 
+    /// A download with no merge room of its own.
+    fn plain(bytes: u64) -> Need {
+        Need::Download { bytes, merge: 0 }
+    }
+    fn download(size: u64) -> Need {
+        Need::Download {
+            bytes: size,
+            merge: size,
+        }
+    }
+
+    /// The case that was refused: ~4.2 GB videos, 17 GB free (in MiB).
+    #[test]
+    fn two_large_downloads_run_side_by_side() {
+        let (size, free, floor) = (4_247, 17_007, 512);
+        let budget = std::sync::Arc::new(DiskBudget::default());
+        let (first, _) = budget.admit(Some(free), download(size), floor, &mut None);
+        assert!(matches!(first, Admission::Granted(_)));
+        // Beside it: its own size, one merge room, the floor.
+        let (second, _) = budget.admit(Some(free), download(size), floor, &mut None);
+        assert!(matches!(second, Admission::Granted(_)), "{second:?}");
+        assert_eq!(budget.reserved(), 2 * size);
+        assert_eq!(budget.merge_room(), size);
+        // A third would not leave room for a merge: it waits.
+        let mut third = None;
+        assert!(waits(&budget.admit(
+            Some(free),
+            download(size),
+            floor,
+            &mut third
+        )));
+        drop((first, second));
+        assert_eq!(budget.merge_room(), 0);
+    }
+
+    #[test]
+    fn a_lone_download_still_needs_room_to_merge() {
+        let budget = std::sync::Arc::new(DiskBudget::default());
+        assert!(refused(&budget.admit(
+            Some(2 * 100 + 9),
+            download(100),
+            10,
+            &mut None
+        )));
+        assert!(granted(&budget.admit(
+            Some(2 * 100 + 10),
+            download(100),
+            10,
+            &mut None
+        )));
+    }
+
+    #[test]
+    fn merge_room_follows_the_largest_downloading_job() {
+        let budget = std::sync::Arc::new(DiskBudget::default());
+        let big = budget.admit(Some(1_000), download(300), 0, &mut None).0;
+        assert!(matches!(big, Admission::Granted(_)));
+        // 300 held + 300 merge room: a small one fits beside it.
+        let small = budget.admit(Some(1_000), download(100), 0, &mut None).0;
+        assert!(matches!(small, Admission::Granted(_)));
+        assert_eq!(budget.merge_room(), 300);
+        // 400 held + room 300 leaves 300: a 301-byte download must wait.
+        assert!(waits(&budget.admit(Some(1_000), plain(301), 0, &mut None)));
+        drop(big);
+        assert_eq!(budget.merge_room(), 100);
+    }
+
+    #[test]
+    fn a_merge_uses_the_room_kept_for_it() {
+        let budget = std::sync::Arc::new(DiskBudget::default());
+        let mut downloading = match budget.admit(Some(1_000), download(400), 0, &mut None).0 {
+            Admission::Granted(reservation) => reservation,
+            other => panic!("{other:?}"),
+        };
+        // Everything downloaded: free fell by 400, nothing is held, but the
+        // merge room still counts against new downloads, which wait.
+        downloading.written(400, Some(600));
+        assert_eq!(budget.reserved(), 0);
+        assert!(waits(&budget.admit(Some(600), plain(300), 0, &mut None)));
+        // The merge itself is not charged the room kept for it.
+        let merge = budget.admit(Some(600), Need::Merge { bytes: 425 }, 0, &mut None);
+        assert!(granted(&merge));
+        drop(downloading);
+        assert_eq!(budget.merge_room(), 0);
+    }
+
+    fn take(admission: (Admission, u64)) -> Reservation {
+        match admission.0 {
+            Admission::Granted(reservation) => reservation,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Breaker repro: three 4247 MiB videos, 17007 MiB free. Two download,
+    /// the third waits first in line; the two merges must not queue behind
+    /// it (it waits for them), or nothing ever moves again.
+    #[test]
+    fn merges_never_wait_behind_a_waiting_download() {
+        let (size, floor) = (4_247, 512);
+        let merge = size + size / 16;
+        let budget = std::sync::Arc::new(DiskBudget::default());
+        let need = Need::Download { bytes: size, merge };
+        let mut a = take(budget.admit(Some(17_007), need, floor, &mut None));
+        let mut b = take(budget.admit(Some(17_007), need, floor, &mut None));
+        let mut c = None;
+        assert!(waits(&budget.admit(Some(17_007), need, floor, &mut c)));
+        // Both downloaded: their bytes are on the disk.
+        a.written(size, Some(17_007 - size));
+        b.written(size, Some(17_007 - 2 * size));
+        a.finish_download();
+        b.finish_download();
+        let free = 17_007 - 2 * size;
+        assert!(waits(&budget.admit(Some(free), need, floor, &mut c)));
+        let merge_a = budget.admit(Some(free), Need::Merge { bytes: merge }, floor, &mut None);
+        assert!(granted(&merge_a), "{:?}", merge_a.0);
+        drop(a);
+        // B's merge waits for A's (which is writing), not for C.
+        let mut b_merge = None;
+        assert!(waits(&budget.admit(
+            Some(free - merge),
+            Need::Merge { bytes: merge },
+            floor,
+            &mut b_merge
+        )));
+        drop(merge_a);
+        assert!(granted(&budget.admit(
+            Some(free),
+            Need::Merge { bytes: merge },
+            floor,
+            &mut b_merge
+        )));
+    }
+
+    /// Breaker repro: a lone job whose tracks came out larger than the
+    /// estimate. Its merge does not fit and nothing else will free space:
+    /// refused, not a wait that never ends (and blocks every later job).
+    #[test]
+    fn a_merge_that_cannot_fit_is_refused() {
+        let budget = std::sync::Arc::new(DiskBudget::default());
+        let need = Need::Download {
+            bytes: 1_000,
+            merge: 1_062,
+        };
+        let mut job = take(budget.admit(Some(2_300), need, 100, &mut None));
+        job.written(1_400, Some(900));
+        job.finish_download();
+        assert_eq!(budget.reserved(), 0);
+        let mut ticket = None;
+        let merge = budget.admit(Some(900), Need::Merge { bytes: 1_487 }, 100, &mut ticket);
+        assert!(refused(&merge));
+        assert!(ticket.is_none(), "a refused merge leaves the line");
+        // Its leftover bytes no longer block anyone else.
+        drop(job);
+        assert!(granted(&budget.admit(
+            Some(900),
+            plain(700),
+            100,
+            &mut None
+        )));
+    }
+
+    #[test]
+    fn a_merge_first_in_line_that_cannot_fit_lets_the_next_go() {
+        let budget = std::sync::Arc::new(DiskBudget::default());
+        let writing = budget.hold(500);
+        let mut big = None;
+        let mut small = None;
+        assert!(waits(&budget.admit(
+            Some(1_000),
+            Need::Merge { bytes: 900 },
+            0,
+            &mut big
+        )));
+        assert!(waits(&budget.admit(
+            Some(1_000),
+            Need::Merge { bytes: 300 },
+            0,
+            &mut small
+        )));
+        drop(writing);
+        // Nothing in progress, and the big one still does not fit.
+        assert!(refused(&budget.admit(
+            Some(800),
+            Need::Merge { bytes: 900 },
+            0,
+            &mut big
+        )));
+        assert!(granted(&budget.admit(
+            Some(800),
+            Need::Merge { bytes: 300 },
+            0,
+            &mut small
+        )));
+    }
+
+    #[test]
+    fn downloads_wait_behind_a_waiting_merge() {
+        let budget = std::sync::Arc::new(DiskBudget::default());
+        let writing = budget.hold(600);
+        let mut merge = None;
+        assert!(waits(&budget.admit(
+            Some(1_000),
+            Need::Merge { bytes: 500 },
+            0,
+            &mut merge
+        )));
+        // Would fit beside what is held, but the merge is first.
+        assert!(waits(&budget.admit(Some(1_000), plain(100), 0, &mut None)));
+        drop(writing);
+        let merged = budget.admit(Some(1_000), Need::Merge { bytes: 500 }, 0, &mut merge);
+        assert!(granted(&merged));
+        assert!(granted(&budget.admit(
+            Some(1_000),
+            plain(100),
+            0,
+            &mut None
+        )));
+    }
+
     fn granted(admission: &(Admission, u64)) -> bool {
         matches!(admission.0, Admission::Granted(_))
     }
@@ -516,28 +858,43 @@ mod tests {
         let floor = 10;
         let budget = std::sync::Arc::new(DiskBudget::default());
         // Nothing else held: an exact fit starts, one byte short is refused.
-        assert!(granted(&budget.admit(Some(110), 100, floor, &mut None)));
-        assert!(refused(&budget.admit(Some(109), 100, floor, &mut None)));
-        assert!(granted(&budget.admit(None, 100, floor, &mut None)));
+        assert!(granted(&budget.admit(
+            Some(110),
+            plain(100),
+            floor,
+            &mut None
+        )));
+        assert!(refused(&budget.admit(
+            Some(109),
+            plain(100),
+            floor,
+            &mut None
+        )));
+        assert!(granted(&budget.admit(None, plain(100), floor, &mut None)));
         // An unknown size still keeps the floor.
-        assert!(refused(&budget.admit(Some(9), 0, floor, &mut None)));
-        assert!(granted(&budget.admit(Some(10), 0, floor, &mut None)));
+        assert!(refused(&budget.admit(Some(9), plain(0), floor, &mut None)));
+        assert!(granted(&budget.admit(Some(10), plain(0), floor, &mut None)));
         assert_eq!(budget.reserved(), 0);
 
         let _held = budget.reserve(Some(1_000), 500, 0).unwrap();
         // Exactly fits beside what is held.
-        let beside = budget.admit(Some(610), 100, floor, &mut None);
+        let beside = budget.admit(Some(610), plain(100), floor, &mut None);
         assert!(granted(&beside));
         assert_eq!(beside.1, 500);
         drop(beside);
         // One byte short beside it: waits, in line.
         let mut ticket = None;
-        assert!(waits(&budget.admit(Some(609), 100, floor, &mut ticket)));
+        assert!(waits(&budget.admit(
+            Some(609),
+            plain(100),
+            floor,
+            &mut ticket
+        )));
         assert!(ticket.is_some());
         // Even a video larger than what is free now waits while others
         // hold space: a merging job frees its tracks when it is done.
         let mut big = None;
-        assert!(waits(&budget.admit(Some(50), 100, floor, &mut big)));
+        assert!(waits(&budget.admit(Some(50), plain(100), floor, &mut big)));
     }
 
     #[test]
@@ -545,26 +902,31 @@ mod tests {
         let budget = std::sync::Arc::new(DiskBudget::default());
         let held = budget.reserve(Some(1_000), 900, 0).unwrap();
         let mut big = None;
-        assert!(waits(&budget.admit(Some(1_000), 800, 0, &mut big)));
+        assert!(waits(&budget.admit(Some(1_000), plain(800), 0, &mut big)));
         // Would fit beside the holder, but the big one is first in line.
         let mut small = None;
-        assert!(waits(&budget.admit(Some(1_000), 50, 0, &mut small)));
+        assert!(waits(&budget.admit(Some(1_000), plain(50), 0, &mut small)));
         assert!(budget.reserve(Some(1_000), 50, 0).is_none());
         drop(held);
-        assert!(waits(&budget.admit(Some(1_000), 50, 0, &mut small)));
-        let (first, _) = budget.admit(Some(1_000), 800, 0, &mut big);
+        assert!(waits(&budget.admit(Some(1_000), plain(50), 0, &mut small)));
+        let (first, _) = budget.admit(Some(1_000), plain(800), 0, &mut big);
         assert!(matches!(first, Admission::Granted(_)));
         assert!(big.is_none(), "a granted job leaves the line");
         // What is left fits the small one.
-        let (second, held) = budget.admit(Some(1_000), 50, 0, &mut small);
+        let (second, held) = budget.admit(Some(1_000), plain(50), 0, &mut small);
         assert!(matches!(second, Admission::Granted(_)));
         assert_eq!(held, 800);
         // Only one of two waiters fits: the other keeps waiting.
         let mut third = None;
-        assert!(waits(&budget.admit(Some(1_000), 300, 0, &mut third)));
+        assert!(waits(&budget.admit(Some(1_000), plain(300), 0, &mut third)));
         drop((first, second));
         assert_eq!(budget.reserved(), 0);
-        assert!(granted(&budget.admit(Some(1_000), 300, 0, &mut third)));
+        assert!(granted(&budget.admit(
+            Some(1_000),
+            plain(300),
+            0,
+            &mut third
+        )));
     }
 
     #[test]
@@ -573,12 +935,27 @@ mod tests {
         let held = budget.reserve(Some(1_000), 900, 0).unwrap();
         let mut first = None;
         let mut second = None;
-        assert!(waits(&budget.admit(Some(1_000), 500, 0, &mut first)));
-        assert!(waits(&budget.admit(Some(1_000), 500, 0, &mut second)));
+        assert!(waits(&budget.admit(Some(1_000), plain(500), 0, &mut first)));
+        assert!(waits(&budget.admit(
+            Some(1_000),
+            plain(500),
+            0,
+            &mut second
+        )));
         drop(held);
-        assert!(waits(&budget.admit(Some(1_000), 500, 0, &mut second)));
+        assert!(waits(&budget.admit(
+            Some(1_000),
+            plain(500),
+            0,
+            &mut second
+        )));
         drop(first);
-        assert!(granted(&budget.admit(Some(1_000), 500, 0, &mut second)));
+        assert!(granted(&budget.admit(
+            Some(1_000),
+            plain(500),
+            0,
+            &mut second
+        )));
         assert!(second.is_none());
     }
 
