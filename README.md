@@ -172,7 +172,7 @@ sudo apt install build-essential curl wget file libxdo-dev libssl-dev \
   libayatana-appindicator3-dev librsvg2-dev libwebkit2gtk-4.1-dev ffmpeg
 ```
 
-Install `yt-dlp` **2025.11.12 or newer** (HighVi is tested with 2026.03.17 and 2026.08.19), and keep it up to date. Ubuntu 26.04's package is new enough; **Ubuntu 24.04's is not** (2024.04.09). There, install it with pipx, then **log out and back in** so the new one is found first:
+Install `yt-dlp` **2025.11.12 or newer** (HighVi is tested with 2026.03.17, 2026.08.19 and 2026.10.26), and keep it up to date. Ubuntu 26.04's package is new enough; **Ubuntu 24.04's is not** (2024.04.09). There, install it with pipx, then **log out and back in** so the new one is found first:
 
 ```bash
 sudo apt install pipx && pipx install yt-dlp
@@ -276,7 +276,7 @@ Videos are saved in **`~/Downloads/HighVi`** (or `Downloads/HighVi` in your lang
 - **A player that needs a special click** (a custom "play" overlay, an age gate, a consent wall) won't be pressed. HighVi only starts normal `<video>` elements.
 - **No system or company proxy.** HighVi's own network guard is the only way out. Behind a proxy that blocks direct connections, downloads fail.
 - **Plain `http://` media is refused,** even when the page itself is `https://`.
-- **Linux only.** Tested on Ubuntu 26.04 with Google Chrome 153/154, yt-dlp 2026.03.17 and 2026.08.19, and FFmpeg 8. On Ubuntu 24.04, only installing and starting the `.deb` was checked. On Wayland, only starting up and sharp HiDPI scaling were checked.
+- **Linux only.** Tested on Ubuntu 26.04 with Google Chrome 153/154, yt-dlp 2026.03.17, 2026.08.19 and 2026.10.26, and FFmpeg 8. On Ubuntu 24.04, only installing and starting the `.deb` was checked. On Wayland, only starting up and sharp HiDPI scaling were checked.
 - **Up to four downloads at once,** and only one page in the private browser at a time. The queue is forgotten when HighVi closes.
 - **Very long media URLs (over 8 KiB) seen in the browser are ignored.**
 

@@ -172,7 +172,7 @@ sudo apt install build-essential curl wget file libxdo-dev libssl-dev \
   libayatana-appindicator3-dev librsvg2-dev libwebkit2gtk-4.1-dev ffmpeg
 ```
 
-Cài `yt-dlp` **bản 2025.11.12 trở lên** (HighVi được thử với 2026.03.17 và 2026.08.19), và nhớ cập nhật thường xuyên. Gói của Ubuntu 26.04 là đủ mới; **gói của Ubuntu 24.04 thì không** (2024.04.09). Trên 24.04, hãy cài bằng pipx, rồi **đăng xuất và đăng nhập lại** để máy tìm thấy bản mới trước:
+Cài `yt-dlp` **bản 2025.11.12 trở lên** (HighVi được thử với 2026.03.17, 2026.08.19 và 2026.10.26), và nhớ cập nhật thường xuyên. Gói của Ubuntu 26.04 là đủ mới; **gói của Ubuntu 24.04 thì không** (2024.04.09). Trên 24.04, hãy cài bằng pipx, rồi **đăng xuất và đăng nhập lại** để máy tìm thấy bản mới trước:
 
 ```bash
 sudo apt install pipx && pipx install yt-dlp
@@ -276,7 +276,7 @@ Video được lưu ở **`~/Downloads/HighVi`** (hoặc `Downloads/HighVi` tron
 - **Trình phát cần bấm nút đặc biệt** (lớp “play” riêng, hỏi tuổi, hỏi đồng ý cookie) sẽ không được bấm. HighVi chỉ bật các thẻ `<video>` bình thường.
 - **Không dùng proxy hệ thống hay proxy công ty.** Lớp bảo vệ mạng của HighVi là lối ra duy nhất. Nếu mạng chặn kết nối trực tiếp thì sẽ không tải được.
 - **Media dùng `http://` bị từ chối,** kể cả khi trang là `https://`.
-- **Chỉ Linux.** Đã thử trên Ubuntu 26.04 với Google Chrome 153/154, yt-dlp 2026.03.17 và 2026.08.19, FFmpeg 8. Trên Ubuntu 24.04 mới chỉ kiểm tra việc cài và mở gói `.deb`. Trên Wayland mới chỉ kiểm tra việc khởi động và hiển thị sắc nét trên màn hình HiDPI.
+- **Chỉ Linux.** Đã thử trên Ubuntu 26.04 với Google Chrome 153/154, yt-dlp 2026.03.17, 2026.08.19 và 2026.10.26, FFmpeg 8. Trên Ubuntu 24.04 mới chỉ kiểm tra việc cài và mở gói `.deb`. Trên Wayland mới chỉ kiểm tra việc khởi động và hiển thị sắc nét trên màn hình HiDPI.
 - **Tối đa bốn video cùng lúc,** và mỗi lần chỉ một trang trong trình duyệt riêng. Hàng chờ mất khi đóng HighVi.
 - **URL media rất dài (trên 8 KiB) thấy trong trình duyệt sẽ bị bỏ qua.**
 

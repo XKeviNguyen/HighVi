@@ -23,8 +23,9 @@ static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
 const MAX_VERSION_CHARS: usize = 60;
 /// yt-dlp itself warns once a build is this old.
 const STALE_AFTER_DAYS: i64 = 90;
-/// The newest yt-dlp HighVi is tested with (CI matrix). Older builds still
-/// work for plain HLS, but sites change and old extractors stop working.
+/// The first yt-dlp that works with YouTube after its 2026-08-17 change; the
+/// CI matrix also runs newer releases. Older builds still work for plain HLS,
+/// but sites change and old extractors stop working.
 pub const RECOMMENDED_YT_DLP: (u16, u8, u8) = (2026, 8, 19);
 /// The oldest yt-dlp that knows every option HighVi's isolation depends on
 /// (`--no-js-runtimes` arrived in 2025.11.12, `--no-plugin-dirs` earlier;

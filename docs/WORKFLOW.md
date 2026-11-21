@@ -63,15 +63,19 @@ Rules that keep tests honest:
 flowchart TB
   classDef job fill:#0d1f3a,stroke:#5aa0ff,color:#d6e6ff
   classDef step fill:#101820,stroke:#3a5a80,color:#c9d6e6
-  PR([pull request / push to main]) --> check1 & check2 & audit & package
+  PR([pull request / push to main]) --> check1 & check2 & check3 & audit & package
 
   subgraph check1["check · yt-dlp 2026.3.17 (oldest supported)"]
     direction TB
     s1[fmt]:::step --> s2[clippy -D warnings]:::step --> s3["tests on Xvfb :99<br/>Chrome sandbox on"]:::step --> s4[JS syntax + check-ui]:::step
   end
-  subgraph check2["check · yt-dlp 2026.8.19 (newest tested)"]
+  subgraph check2["check · yt-dlp 2026.8.19 (first with the YouTube fix)"]
     direction TB
     t1[fmt]:::step --> t2[clippy]:::step --> t3[tests on Xvfb]:::step --> t4[check-ui]:::step
+  end
+  subgraph check3["check · yt-dlp 2026.10.26 (newest tested)"]
+    direction TB
+    u1[fmt]:::step --> u2[clippy]:::step --> u3[tests on Xvfb]:::step --> u4[check-ui]:::step
   end
   audit["cargo audit<br/>fails on known vulnerabilities"]:::job
   package[".deb bundle<br/>Depends has yt-dlp + ffmpeg,<br/>ships /usr/bin/highvi + .desktop"]:::job

@@ -1979,9 +1979,16 @@ async fn yt_dlp_ignores_js_runtimes_next_to_its_interpreter() {
         command
             .env_clear()
             .envs(crate::ytdlp::ytdlp_env(&job))
-            .env("PYTHONPATH", &package_path)
-            .current_dir(&job)
-            .args(["-m", "yt_dlp", "-v"]);
+            .current_dir(&job);
+        if package_path.is_file() {
+            // The release zipapp keeps its entry point at the archive root
+            // (no `yt_dlp/__main__.py`), so `-m yt_dlp` cannot start it.
+            command.arg(&package_path).arg("-v");
+        } else {
+            command
+                .env("PYTHONPATH", &package_path)
+                .args(["-m", "yt_dlp", "-v"]);
+        }
         if hermetic {
             command.args(crate::ytdlp::YT_DLP_HERMETIC_ARGS);
         } else {

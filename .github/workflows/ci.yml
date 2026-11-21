@@ -20,10 +20,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Oldest supported (Ubuntu 26.04 APT) and newest tested
-        # (tools::RECOMMENDED_YT_DLP; first release that works with YouTube
-        # after its 2026-08-17 change).
-        yt-dlp: ["2026.3.17", "2026.8.19"]
+        # Oldest supported (Ubuntu 26.04 APT), the first release that works
+        # with YouTube after its 2026-08-17 change (tools::RECOMMENDED_YT_DLP),
+        # and the newest tested.
+        yt-dlp: ["2026.3.17", "2026.8.19", "2026.10.26"]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
