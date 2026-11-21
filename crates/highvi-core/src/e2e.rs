@@ -2229,6 +2229,236 @@ async fn downloaded_bytes_leave_the_reservation() {
     assert_eq!(environment.shared.disk.reserved(), 0);
 }
 
+/// Space another download holds for itself (here: held directly, as a
+/// running job would), leaving 1 KiB of a 1 TiB disk.
+fn space_held_by_another_download(environment: &JobEnvironment) -> crate::filesystem::Reservation {
+    let free = 1 << 40;
+    environment
+        .shared
+        .disk
+        .reserve(Some(free), free - 1024, 0)
+        .unwrap()
+}
+
+/// Runs the muxed fixture, calling `on_wait` once the job reports that it
+/// waits for space. Fails instead of hanging if the job never finishes.
+async fn run_waiting_for_space(
+    fixture: &Fixture,
+    environment: &JobEnvironment,
+    on_wait: impl FnOnce() + Send + 'static,
+) -> (Result<JobOutcome, PublicError>, Vec<JobUpdate>) {
+    let on_wait = Mutex::new(Some(on_wait));
+    tokio::time::timeout(
+        Duration::from_secs(60),
+        fixture.run_observed(
+            environment,
+            direct("https://media.test/muxed/master.m3u8"),
+            crate::Discovery::Automatic,
+            None,
+            &|update| {
+                if update.stage == Stage::WaitingForSpace
+                    && let Some(on_wait) = on_wait.lock().unwrap().take()
+                {
+                    on_wait();
+                }
+            },
+        ),
+    )
+    .await
+    .expect("the job never finished")
+}
+
+fn disk_line(fixture: &Fixture) -> String {
+    let report = fixture.last_report.lock().unwrap().clone();
+    report
+        .lines()
+        .find(|line| line.starts_with("disk: "))
+        .unwrap_or_else(|| panic!("no disk line in:\n{report}"))
+        .to_string()
+}
+
+fn waited_before_downloading(updates: &[JobUpdate]) {
+    let stages: Vec<_> = updates.iter().map(|update| update.stage).collect();
+    let waited = stages
+        .iter()
+        .position(|stage| *stage == Stage::WaitingForSpace)
+        .unwrap_or_else(|| panic!("never waited for space: {stages:?}"));
+    let downloading = stages
+        .iter()
+        .position(|stage| *stage == Stage::DownloadingVideo)
+        .unwrap_or_else(|| panic!("never downloaded: {stages:?}"));
+    assert!(waited < downloading, "{stages:?}");
+}
+
+/// A video that does not fit beside what other downloads hold waits for
+/// them instead of failing, and starts as soon as they give space back:
+/// woken by the release, not by the periodic recheck (an hour here).
+#[tokio::test]
+async fn a_download_waits_for_space_other_downloads_hold() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let mut environment = fixture.environment();
+    environment.free_space = Some(Arc::new(|| Some(1 << 40)));
+    environment.limits.space_recheck = Duration::from_secs(60 * 60);
+    let held = space_held_by_another_download(&environment);
+    let (result, updates) = run_waiting_for_space(&fixture, &environment, move || {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            drop(held);
+        });
+    })
+    .await;
+    result.unwrap();
+    waited_before_downloading(&updates);
+    assert_eq!(fixture.saved_files().len(), 1);
+    assert_eq!(environment.shared.disk.reserved(), 0);
+    let disk = disk_line(&fixture);
+    assert!(disk.contains("free 1048576 MiB"), "{disk}");
+    assert!(disk.contains("keeps 512 MiB free"), "{disk}");
+    assert!(disk.contains("held by other downloads 0 MiB"), "{disk}");
+    assert!(disk.contains(", waited "), "{disk}");
+}
+
+/// The user frees space while the other download still runs: the waiting
+/// one notices on its next look and starts.
+#[tokio::test]
+async fn freeing_space_lets_a_waiting_download_start() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let free = Arc::new(std::sync::atomic::AtomicU64::new(1 << 40));
+    let mut environment = fixture.environment();
+    environment.free_space = Some(Arc::new({
+        let free = Arc::clone(&free);
+        move || Some(free.load(std::sync::atomic::Ordering::SeqCst))
+    }));
+    environment.limits.space_recheck = Duration::from_millis(100);
+    let held = space_held_by_another_download(&environment);
+    let (result, updates) = run_waiting_for_space(&fixture, &environment, {
+        let free = Arc::clone(&free);
+        move || free.store(1 << 41, std::sync::atomic::Ordering::SeqCst)
+    })
+    .await;
+    result.unwrap();
+    waited_before_downloading(&updates);
+    // The other download is still running.
+    assert_eq!(environment.shared.disk.reserved(), (1 << 40) - 1024);
+    drop(held);
+    assert_eq!(environment.shared.disk.reserved(), 0);
+}
+
+/// Waiting for space is cancellable, nothing is fetched meanwhile, and the
+/// report says what it waited for.
+#[tokio::test]
+async fn waiting_for_space_can_be_cancelled() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let mut environment = fixture.environment();
+    environment.free_space = Some(Arc::new(|| Some(1 << 40)));
+    let held = space_held_by_another_download(&environment);
+    let started = Instant::now();
+    let (result, _) = fixture
+        .run_with(
+            &environment,
+            direct("https://media.test/muxed/master.m3u8"),
+            Some((Stage::WaitingForSpace, Duration::from_millis(200))),
+        )
+        .await;
+    assert_code(&result, "cancelled");
+    assert!(started.elapsed() < Duration::from_secs(15));
+    assert!(
+        !fixture
+            .server
+            .hits()
+            .iter()
+            .any(|hit| hit.path.ends_with(".ts") || hit.path.ends_with(".m4s")),
+        "media was fetched while waiting for space"
+    );
+    assert!(fixture.saved_files().is_empty());
+    fixture.assert_no_job_dirs();
+    let disk = disk_line(&fixture);
+    assert!(
+        disk.contains("held by other downloads 1048575 MiB"),
+        "{disk}"
+    );
+    assert!(disk.contains(", waited "), "{disk}");
+    // Only the other download's space is still held.
+    assert_eq!(environment.shared.disk.reserved(), (1 << 40) - 1024);
+    drop(held);
+    assert_eq!(environment.shared.disk.reserved(), 0);
+}
+
+/// When the others are done and the disk has filled up meanwhile, the wait
+/// ends in the usual error instead of going on.
+#[tokio::test]
+async fn space_still_missing_after_the_others_finish_is_an_error() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let free = Arc::new(std::sync::atomic::AtomicU64::new(1 << 40));
+    let mut environment = fixture.environment();
+    environment.free_space = Some(Arc::new({
+        let free = Arc::clone(&free);
+        move || Some(free.load(std::sync::atomic::Ordering::SeqCst))
+    }));
+    let held = space_held_by_another_download(&environment);
+    let (result, _) = run_waiting_for_space(&fixture, &environment, {
+        let free = Arc::clone(&free);
+        move || {
+            free.store(1024, std::sync::atomic::Ordering::SeqCst);
+            drop(held);
+        }
+    })
+    .await;
+    assert_code(&result, "insufficient_disk_space");
+    assert!(fixture.saved_files().is_empty());
+    fixture.assert_no_job_dirs();
+    assert_eq!(environment.shared.disk.reserved(), 0);
+    let disk = disk_line(&fixture);
+    assert!(disk.contains("free 0 MiB"), "{disk}");
+    assert!(disk.contains("held by other downloads 0 MiB"), "{disk}");
+}
+
+/// After a long wait the links found may have expired, so they are found
+/// again before downloading.
+#[tokio::test]
+async fn links_are_found_again_after_a_long_wait() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let mut environment = fixture.environment();
+    environment.free_space = Some(Arc::new(|| Some(1 << 40)));
+    environment.limits.space_recheck = Duration::from_millis(50);
+    environment.limits.links_stale_after = Duration::from_millis(300);
+    // Held until the job, having waited, finds its links again.
+    let held = Mutex::new(Some(space_held_by_another_download(&environment)));
+    let waited = std::sync::atomic::AtomicBool::new(false);
+    let (result, updates) = tokio::time::timeout(
+        Duration::from_secs(60),
+        fixture.run_observed(
+            &environment,
+            direct("https://media.test/muxed/master.m3u8"),
+            crate::Discovery::Automatic,
+            None,
+            &|update| match update.stage {
+                Stage::WaitingForSpace => waited.store(true, std::sync::atomic::Ordering::SeqCst),
+                Stage::Discovering if waited.load(std::sync::atomic::Ordering::SeqCst) => {
+                    held.lock().unwrap().take();
+                }
+                _ => {}
+            },
+        ),
+    )
+    .await
+    .expect("the job never finished: links were not found again");
+    result.unwrap();
+    waited_before_downloading(&updates);
+    assert!(held.lock().unwrap().is_none());
+    assert_eq!(fixture.saved_files().len(), 1);
+}
+
 /// A hostile page floods discovery: thousands of requests with long URLs and
 /// multi-megabyte events. HighVi stays within its bounds and says so,
 /// instead of reporting "no video" as if it had seen everything.

@@ -13,8 +13,8 @@ use crate::{
     diagnostics::Diagnostics,
     egress::{EgressProxy, EgressStats, RefusalCounts, Resolver},
     filesystem::{
-        DiskBudget, JobDir, Reservation, cleanup_stale_jobs, free_bytes, output_dir_error,
-        prepare_output_dir, publish_unique,
+        Admission, DiskBudget, JobDir, Reservation, WaitTicket, cleanup_stale_jobs, free_bytes,
+        output_dir_error, prepare_output_dir, publish_unique,
     },
     formats::{MediaInfo, select_media},
     mux::{Container, MuxInput, SNIFF_BYTES, mux_args, sniff},
@@ -34,7 +34,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::io::AsyncReadExt;
 
@@ -65,6 +65,13 @@ pub struct JobLimits {
     /// How long the row says a window is about to open before it does, so
     /// the window never comes as a surprise.
     pub window_notice: Duration,
+    /// How often a job waiting for space looks at the disk again without
+    /// being woken: the user may free space themselves.
+    pub space_recheck: Duration,
+    /// After waiting this long for space, the links found may have expired
+    /// (signed media URLs often last minutes to hours), so they are found
+    /// again before downloading.
+    pub links_stale_after: Duration,
 }
 
 impl Default for JobLimits {
@@ -83,6 +90,8 @@ impl Default for JobLimits {
             interactive_budget: crate::browser::INTERACTIVE_BUDGET,
             auto_window_budget: crate::browser::AUTO_WINDOW_BUDGET,
             window_notice: crate::browser::WINDOW_NOTICE,
+            space_recheck: Duration::from_secs(5),
+            links_stale_after: Duration::from_secs(10 * 60),
         }
     }
 }
@@ -251,6 +260,9 @@ pub enum Stage {
     WaitingForUser,
     /// Watching the page in the isolated browser.
     Browsing,
+    /// The video fits the disk, but other downloads hold the space it
+    /// needs; waiting for them to give it back.
+    WaitingForSpace,
     DownloadingVideo,
     DownloadingAudio,
     /// Waiting for a free mux slot.
@@ -470,40 +482,42 @@ async fn fetch(
         env, job, proxy, source, discovery, cancel, report, recorder,
     ))
     .await?;
-    let mut media = discovered.media;
-    // A playlist link gives yt-dlp only a file name, often "master" or
-    // "index"; the folder it sits in usually names the video.
-    if source.kind() != SourceKind::Page
-        && is_generic_playlist_name(&media.title)
-        && let Some(name) = playlist_folder_name(source.discovery_target())
-    {
-        media.suggested_filename = crate::suggested_filename(Some(&name), None);
-        media.title = name;
-    }
-    record(recorder, |diagnostics| {
-        diagnostics.media(media.extractor.as_deref(), media.summary.clone());
-    });
-    report(JobUpdate {
-        title: Some(media.title.clone()),
-        ..JobUpdate::stage(Stage::Discovering)
-    });
-    // The tracks and the muxed copy exist together for a moment: twice the
-    // estimate. An unknown size reserves nothing; the floor still applies
-    // while downloading.
-    let needed = media
-        .estimated_bytes
-        .map_or(0, |bytes| bytes.saturating_mul(2));
-    let free = env.free_space();
-    let mut reservation = env
-        .shared
-        .disk
-        .reserve(free, needed, env.limits.disk_floor)
-        .ok_or_else(|| no_space_error(Some(needed), free.unwrap_or(u64::MAX)))?;
+    let mut referer = discovered.referer;
+    let mut media = found_media(source, discovered.media, report, recorder);
+    let mut wait = SpaceWait::new(discovery);
+    let mut reservation = loop {
+        // The tracks and the muxed copy exist together for a moment: twice
+        // the estimate. An unknown size reserves nothing; the floor still
+        // applies while downloading.
+        let needed = media
+            .estimated_bytes
+            .map_or(0, |bytes| bytes.saturating_mul(2));
+        match wait_for_space(env, needed, &mut wait, cancel, report, recorder).await? {
+            Space::Granted(reservation) => break reservation,
+            Space::LinksStale => {
+                // Find the links again (yt-dlp, then the headless browser;
+                // never a window nobody asked for). If that fails, the
+                // links already found are still worth a try.
+                match Box::pin(discover_automatically(
+                    env, job, proxy, source, cancel, report, recorder,
+                ))
+                .await
+                {
+                    Ok(fresh) => {
+                        referer = fresh.referer;
+                        media = found_media(source, fresh.media, report, recorder);
+                    }
+                    Err(error) if error.code == "cancelled" => return Err(error),
+                    Err(_) => {}
+                }
+            }
+        }
+    };
     tokio::fs::write(job.path().join(INFO_JSON), &media.info_json)
         .await
         .map_err(|_| output_dir_error())?;
 
-    let policy = env.policy(&proxy_url, discovered.referer.as_deref());
+    let policy = env.policy(&proxy_url, referer.as_deref());
     let tracks = [
         Some((
             media.selection.video.as_str(),
@@ -1300,6 +1314,121 @@ fn stalled_error(limits: &JobLimits) -> PublicError {
 /// overhead, so the disk watch does not stop it just before it finishes.
 fn mux_space_needed(inputs: u64) -> u64 {
     inputs.saturating_add(inputs / 16)
+}
+
+/// The media as found, with a meaningful title, recorded and shown.
+fn found_media(
+    source: &ValidatedSource,
+    mut media: MediaInfo,
+    report: &(dyn Fn(JobUpdate) + Send + Sync),
+    recorder: &Mutex<Diagnostics>,
+) -> MediaInfo {
+    // A playlist link gives yt-dlp only a file name, often "master" or
+    // "index"; the folder it sits in usually names the video.
+    if source.kind() != SourceKind::Page
+        && is_generic_playlist_name(&media.title)
+        && let Some(name) = playlist_folder_name(source.discovery_target())
+    {
+        media.suggested_filename = crate::suggested_filename(Some(&name), None);
+        media.title = name;
+    }
+    record(recorder, |diagnostics| {
+        diagnostics.media(media.extractor.as_deref(), media.summary.clone());
+    });
+    report(JobUpdate {
+        title: Some(media.title.clone()),
+        ..JobUpdate::stage(Stage::Discovering)
+    });
+    media
+}
+
+/// A job's wait for disk space, across finding its links again.
+struct SpaceWait {
+    /// Its place in the line, once it has had to wait.
+    ticket: Option<WaitTicket>,
+    /// When it first had to wait.
+    since: Option<Instant>,
+    /// When its links were last found, while waiting.
+    links_found: Option<Instant>,
+    /// Links from a window the user drove cannot be found again unasked.
+    links_refreshable: bool,
+}
+
+impl SpaceWait {
+    fn new(discovery: Discovery) -> Self {
+        Self {
+            ticket: None,
+            since: None,
+            links_found: None,
+            links_refreshable: discovery == Discovery::Automatic,
+        }
+    }
+}
+
+enum Space {
+    Granted(Reservation),
+    /// Waited so long that the links found may have expired.
+    LinksStale,
+}
+
+/// Reserves `needed` bytes. While other downloads hold space the job waits
+/// (cancellably) in line instead of failing; with nothing else held, a
+/// video that does not fit fails at once.
+async fn wait_for_space(
+    env: &JobEnvironment,
+    needed: u64,
+    wait: &mut SpaceWait,
+    cancel: &mut CancelToken,
+    report: &(dyn Fn(JobUpdate) + Send + Sync),
+    recorder: &Mutex<Diagnostics>,
+) -> Result<Space, PublicError> {
+    let floor = env.limits.disk_floor;
+    let mut announced = false;
+    loop {
+        // Listen before looking, so a release in between is not missed.
+        let released = env.shared.disk.released();
+        tokio::pin!(released);
+        released.as_mut().enable();
+        let free = env.free_space();
+        let (admission, held) = env.shared.disk.admit(free, needed, floor, &mut wait.ticket);
+        let note = |since: Option<Instant>| {
+            let waited = since.map(|since| since.elapsed());
+            record(recorder, |diagnostics| {
+                diagnostics.disk(needed, free, held, floor, waited);
+            });
+        };
+        match admission {
+            Admission::Granted(reservation) => {
+                note(wait.since);
+                return Ok(Space::Granted(reservation));
+            }
+            Admission::Refused => {
+                note(wait.since);
+                return Err(no_space_error(Some(needed), free.unwrap_or(u64::MAX)));
+            }
+            Admission::Wait => {}
+        }
+        let now = Instant::now();
+        let since = *wait.since.get_or_insert(now);
+        let links_found = *wait.links_found.get_or_insert(since);
+        if wait.links_refreshable && now.duration_since(links_found) >= env.limits.links_stale_after
+        {
+            wait.links_found = Some(now);
+            return Ok(Space::LinksStale);
+        }
+        if !announced {
+            announced = true;
+            report(JobUpdate::stage(Stage::WaitingForSpace));
+        }
+        tokio::select! {
+            () = &mut released => {}
+            () = tokio::time::sleep(env.limits.space_recheck) => {}
+            () = cancel.cancelled() => {
+                note(wait.since);
+                return Err(cancelled_error());
+            }
+        }
+    }
 }
 
 fn no_space_error(needed: Option<u64>, free: u64) -> PublicError {

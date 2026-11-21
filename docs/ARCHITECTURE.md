@@ -213,6 +213,9 @@ stateDiagram-v2
     OpeningWindow --> WaitingForUser: 3 s, setting on
     WaitingForUser --> Discovering: playlist found, checking
     Discovering --> DownloadingVideo
+    Discovering --> WaitingForSpace: other downloads hold the space
+    WaitingForSpace --> DownloadingVideo: space given back
+    WaitingForSpace --> Discovering: waited 10 min, links found again
     DownloadingVideo --> DownloadingAudio: separate audio
     DownloadingVideo --> WaitingToMerge
     DownloadingAudio --> WaitingToMerge
@@ -301,7 +304,7 @@ Extractor-related failures carry a `hint` to update yt-dlp when it is older than
 | yt-dlp `PATH` | `<job>/bin` with only a link to the real `python3`: no helpers (phantomjs, FFmpeg); JS runtimes off via `--no-js-runtimes` |
 | Diagnostic report | 4 KiB, in memory, failed jobs only |
 | Track download | 24 h each; stopped as `download_stalled` below 64 KiB of progress in any 2 min |
-| Disk | before downloading: free − other jobs' reservations ≥ 2 × estimated size + 512 MiB floor; while downloading and muxing (checked every second): stop below the floor (`insufficient_disk_space`) |
+| Disk | before downloading: free − other jobs' reservations ≥ 2 × estimated size + 512 MiB floor. Short only because other jobs hold space: wait in line (`WaitingForSpace`, oldest waiter first, woken when space is given back, rechecked every 5 s, links found again after 10 min); refused only when nothing else is held; while downloading and muxing (checked every second): stop below the floor (`insufficient_disk_space`) |
 | DevTools messages | events ≤ 1 MiB, replies ≤ 16 MiB; queued messages ≤ 64 MiB weighted, backlog ≤ 16 MiB; tracked URLs ≤ 8 MiB; overflow → `discovery_overloaded` |
 | Mux | 30 min |
 | Jobs | 1–4 at once (default 2); queue ≤ 200 items, ≤ 100 per add; one Chrome and two muxes at a time; Chrome never runs while idle |

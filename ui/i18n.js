@@ -46,6 +46,7 @@ const I18N = (() => {
       "error.browser_no_display": "HighVi could not find your desktop display to open its browser window.",
       "progress.waitingForBrowser": "Waiting for the private browser (one video at a time)…",
       "progress.waitingToMerge": "Waiting to put it together…",
+      "progress.waitingForSpace": "Waiting for disk space: other downloads are using it. Starts by itself when there is room…",
       "progress.browsing": "Opening the page in a private browser to find the video…",
       "deps.browserMissing":
         "Optional: install Google Chrome or Chromium so HighVi can find videos on pages whose player is built with JavaScript.",
@@ -221,6 +222,7 @@ const I18N = (() => {
       "error.browser_no_display": "HighVi không tìm thấy màn hình desktop để mở cửa sổ trình duyệt.",
       "progress.waitingForBrowser": "Đang chờ trình duyệt riêng (mỗi lần một video)…",
       "progress.waitingToMerge": "Đang chờ ghép video…",
+      "progress.waitingForSpace": "Đang chờ chỗ trống trên đĩa (các video khác đang dùng). Tự bắt đầu khi đủ chỗ…",
       "progress.browsing": "Đang mở trang trong một trình duyệt riêng để tìm video…",
       "deps.browserMissing":
         "Không bắt buộc: cài Google Chrome hoặc Chromium để HighVi tìm được video trên các trang có trình phát dựng bằng JavaScript.",
@@ -395,6 +397,7 @@ const I18N = (() => {
       "error.browser_no_display": "ブラウザーのウィンドウをひらくための画面（ディスプレイ）が見つかりませんでした。",
       "progress.waitingForBrowser": "専用ブラウザーの順番を待っています（1 本ずつ）…",
       "progress.waitingToMerge": "組み立ての順番を待っています…",
+      "progress.waitingForSpace": "ディスクの空きを待っています（ほかのダウンロードが使用中）。空きができたら自動で始まります…",
       "progress.browsing": "動画をさがすために、専用のブラウザーでページを開いています…",
       "deps.browserMissing":
         "なくても使えます：Google Chrome か Chromium を入れると、JavaScript で作られたプレーヤーのページでも動画をさがせます。",

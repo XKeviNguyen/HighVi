@@ -59,6 +59,7 @@ const stageKeys = {
   openingWindow: "progress.openingWindow",
   waitingForUser: "progress.waitingForUser",
   browsing: "progress.browsing",
+  waitingForSpace: "progress.waitingForSpace",
   downloadingVideo: "progress.downloadingVideo",
   downloadingAudio: "progress.downloadingAudio",
   waitingToMerge: "progress.waitingToMerge",
