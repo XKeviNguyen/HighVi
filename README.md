@@ -116,10 +116,14 @@ Something went wrong? See **When something goes wrong** below. On a failed row, 
 
 1. Paste one or more video page links, one per line (up to 100 at a time), and press **Add to queue**. Duplicates and invalid lines are listed, not added.
 2. Press **Start queue**. Use **At once** to run 1 to 4 downloads together; the default is 2. Lowering it never stops a running download: the extra ones finish first.
-3. Each row shows its step: looking for the video, *waiting for the private browser* (pages that need it go one at a time), *the HighVi browser opens in a few seconds* (the row turns amber, see below), downloading, *waiting to put it together*, saving.
+3. Each row shows its step: looking for the video, *waiting for the private browser* (pages that need it go one at a time), *the HighVi browser opens in a few seconds* (the row turns amber, see below), *waiting for disk space* (see below), downloading, *waiting to put it together*, saving.
 4. **Open the HighVi browser by itself when a page needs me** is on by default. Turn it off if you would rather press **Open in HighVi Browser** yourself. The choice is kept on this computer and applies at once, even to downloads already running.
 5. Per row: **Cancel**, **Retry**, **Remove**, and, for pages a visible window may help, **Open in HighVi Browser**. For the whole queue: **Pause queue**, **Cancel all**, **Retry failed**, **Clear completed**.
-6. A failed row can show its diagnostics (steps, error codes, tool versions, host names; never links, cookies or passwords) to copy into a bug report.
+6. A failed row can show its diagnostics (steps, error codes, tool versions, host names, disk space numbers; never links, cookies or passwords) to copy into a bug report.
+
+**Disk space.** Each download keeps room for about twice its size, because the downloaded pieces and the finished MP4 exist together for a moment. A download that does not fit beside the ones already running does not fail: it waits, and starts by itself when there is room. The oldest waiting download goes first, and **Cancel** works while it waits. It only fails when the video does not fit even with nothing else running. After 10 minutes of waiting, HighVi finds the video's links again, because some sites' links expire.
+
+<p align="center"><img src="docs/assets/tutorial/6-space-en.png" alt="A row waiting for disk space while another video downloads" width="560" /><br /><sub>The second video waits for disk space while the first one downloads.</sub></p>
 
 The queue lives in memory: closing HighVi stops running downloads (finished files stay) and forgets the list.
 
@@ -244,7 +248,7 @@ Videos are saved in **`~/Downloads/HighVi`** (or `Downloads/HighVi` in your lang
 | `media_access_denied` | The page was found, but the video's server said **no** (HTTP 403). | Often an old `yt-dlp`: update it. Some sites only allow their own player. |
 | `download_stalled` | The download stopped moving for 2 minutes. | Try again later. |
 | `download_timeout` | One part took longer than 24 hours. | Try again on a faster connection. |
-| `insufficient_disk_space` | There isn't enough free space for the video. | Free some space, then retry. |
+| `insufficient_disk_space` | There isn't enough free space for the video, even with no other download running. | Free some space, then retry. (A video that only lacks room because others are downloading waits instead.) |
 | `discovery_overloaded` | The page made too many requests for the private browser to follow. | Use **Playlist link** if you have the `.m3u8`. |
 | `browser_closed` | The HighVi browser window was closed before a video started. | Open it again and start the video in it, or leave the row as it is. |
 | `interactive_timeout` | No video started in the HighVi browser window in time (3 minutes, or 10 after the button). | Open it again; start the video in the window. |

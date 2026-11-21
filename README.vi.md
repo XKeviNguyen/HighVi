@@ -116,10 +116,14 @@ Có lỗi? Xem phần **Khi có lỗi** bên dưới. Trên dòng bị lỗi, **
 
 1. Dán một hoặc nhiều link trang video, mỗi dòng một link (tối đa 100 link mỗi lần), rồi bấm **Thêm vào hàng chờ**. Link trùng hay không hợp lệ sẽ được liệt kê, không bị thêm vào.
 2. Bấm **Bắt đầu tải**. Ô **Cùng lúc** cho chạy 1 đến 4 video một lúc; mặc định là 2. Giảm số này không bao giờ làm dừng video đang tải: các video dư sẽ tải xong trước.
-3. Mỗi dòng cho biết đang ở bước nào: đang tìm video, *đang chờ trình duyệt riêng* (trang cần trình duyệt thì lần lượt từng trang), *trình duyệt HighVi sẽ mở sau vài giây* (dòng chuyển màu hổ phách, xem bên dưới), đang tải, *đang chờ ghép video*, đang lưu.
+3. Mỗi dòng cho biết đang ở bước nào: đang tìm video, *đang chờ trình duyệt riêng* (trang cần trình duyệt thì lần lượt từng trang), *trình duyệt HighVi sẽ mở sau vài giây* (dòng chuyển màu hổ phách, xem bên dưới), *đang chờ chỗ trống trên đĩa* (xem bên dưới), đang tải, *đang chờ ghép video*, đang lưu.
 4. **Tự mở trình duyệt HighVi khi trang cần tôi thao tác** được bật sẵn. Tắt đi nếu bạn muốn tự bấm **Mở trong trình duyệt HighVi**. Lựa chọn được lưu trên máy này và có hiệu lực ngay, kể cả với các video đang tải.
 5. Mỗi dòng có **Hủy**, **Thử lại**, **Xóa**, và với trang mà cửa sổ hiện ra có thể giúp được thì có **Mở trong trình duyệt HighVi**. Cho cả hàng chờ: **Tạm dừng hàng chờ**, **Hủy tất cả**, **Thử lại các video lỗi**, **Xóa các video đã xong**.
-6. Dòng bị lỗi có thể hiện thông tin chẩn đoán (các bước, mã lỗi, phiên bản công cụ, tên máy chủ; không bao giờ có link, cookie hay mật khẩu) để bạn chép vào báo lỗi.
+6. Dòng bị lỗi có thể hiện thông tin chẩn đoán (các bước, mã lỗi, phiên bản công cụ, tên máy chủ, số liệu dung lượng đĩa; không bao giờ có link, cookie hay mật khẩu) để bạn chép vào báo lỗi.
+
+**Dung lượng đĩa.** Mỗi video giữ chỗ khoảng gấp đôi dung lượng của nó, vì các phần đã tải và file MP4 hoàn chỉnh cùng nằm trên đĩa trong chốc lát. Video không đủ chỗ bên cạnh các video đang tải sẽ không báo lỗi: nó chờ, và tự bắt đầu khi đủ chỗ. Video chờ trước được tải trước, và vẫn bấm **Hủy** được khi đang chờ. Chỉ báo lỗi khi video không vừa ngay cả lúc không có video nào khác. Sau 10 phút chờ, HighVi tìm lại link của video, vì link của một số trang có hạn dùng.
+
+<p align="center"><img src="docs/assets/tutorial/6-space-vi.png" alt="Một dòng đang chờ chỗ trống trên đĩa trong khi video khác đang tải" width="560" /><br /><sub>Video thứ hai chờ chỗ trống trong khi video đầu đang tải.</sub></p>
 
 Hàng chờ chỉ nằm trong bộ nhớ: đóng HighVi sẽ dừng các video đang tải (file đã xong vẫn còn) và xóa danh sách.
 
@@ -244,7 +248,7 @@ Video được lưu ở **`~/Downloads/HighVi`** (hoặc `Downloads/HighVi` tron
 | `media_access_denied` | Đã tìm thấy trang, nhưng máy chủ video **từ chối** (HTTP 403). | Thường là do `yt-dlp` cũ: hãy cập nhật. Có trang chỉ cho trình phát của chính nó tải. |
 | `download_stalled` | Việc tải đứng yên suốt 2 phút. | Thử lại sau. |
 | `download_timeout` | Một phần tải lâu hơn 24 giờ. | Thử lại với mạng nhanh hơn. |
-| `insufficient_disk_space` | Không đủ chỗ trống cho video. | Dọn bớt rồi thử lại. |
+| `insufficient_disk_space` | Không đủ chỗ trống cho video, kể cả khi không có video nào khác đang tải. | Dọn bớt rồi thử lại. (Video chỉ thiếu chỗ vì các video khác đang tải sẽ tự chờ.) |
 | `discovery_overloaded` | Trang gửi quá nhiều request, trình duyệt riêng không theo dõi kịp. | Dùng **Link playlist** nếu bạn có link `.m3u8`. |
 | `browser_closed` | Cửa sổ trình duyệt HighVi bị đóng trước khi video bắt đầu phát. | Mở lại và bấm phát video trong đó, hoặc để nguyên dòng đó. |
 | `interactive_timeout` | Không có video nào được phát trong cửa sổ trình duyệt HighVi kịp lúc (3 phút, hoặc 10 phút nếu mở bằng nút). | Mở lại; bấm phát video trong cửa sổ. |
