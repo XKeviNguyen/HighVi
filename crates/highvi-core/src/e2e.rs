@@ -2320,6 +2320,140 @@ async fn a_download_waits_for_space_other_downloads_hold() {
     assert!(disk.contains(", waited "), "{disk}");
 }
 
+/// The merge needs room for the finished copy. If other downloads took it
+/// while this one downloaded, the merge waits for them instead of failing.
+#[tokio::test]
+async fn a_merge_waits_for_space_other_downloads_took() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    let mut environment = fixture.environment();
+    environment.free_space = Some(Arc::new(|| Some(1 << 40)));
+    environment.limits.space_recheck = Duration::from_secs(60 * 60);
+    let budget = Arc::clone(&environment.shared.disk);
+    let taken: Mutex<Option<crate::filesystem::Reservation>> = Mutex::new(None);
+    let took = std::sync::atomic::AtomicBool::new(false);
+    // The job keeps its merge room while it waits for merge space, so no
+    // other download can start in that room.
+    let room_while_waiting = std::sync::atomic::AtomicU64::new(0);
+    // ...and gives it back once it has its own, so others can start.
+    let room_while_merging = std::sync::atomic::AtomicU64::new(u64::MAX);
+    let (result, updates) = tokio::time::timeout(
+        Duration::from_secs(60),
+        fixture.run_observed(
+            &environment,
+            direct("https://media.test/muxed/master.m3u8"),
+            crate::Discovery::Automatic,
+            None,
+            &|update| match update.stage {
+                // Another download takes all but 1 KiB beside this one.
+                Stage::DownloadingVideo
+                    if !took.swap(true, std::sync::atomic::Ordering::SeqCst) =>
+                {
+                    let rest = (1u64 << 40) - budget.reserved() - budget.merge_room() - 1024;
+                    *taken.lock().unwrap() = Some(budget.hold(rest));
+                }
+                Stage::Merging => room_while_merging
+                    .store(budget.merge_room(), std::sync::atomic::Ordering::SeqCst),
+                Stage::WaitingForSpace => {
+                    room_while_waiting
+                        .store(budget.merge_room(), std::sync::atomic::Ordering::SeqCst);
+                    if let Some(space) = taken.lock().unwrap().take() {
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_millis(300)).await;
+                            drop(space);
+                        });
+                    }
+                }
+                _ => {}
+            },
+        ),
+    )
+    .await
+    .expect("the merge never got its space");
+    result.unwrap();
+    let stages: Vec<_> = updates.iter().map(|update| update.stage).collect();
+    let downloading = stages
+        .iter()
+        .position(|stage| *stage == Stage::DownloadingVideo)
+        .unwrap();
+    let waited = stages
+        .iter()
+        .position(|stage| *stage == Stage::WaitingForSpace)
+        .unwrap_or_else(|| panic!("the merge never waited: {stages:?}"));
+    let merging = stages
+        .iter()
+        .position(|stage| *stage == Stage::Merging)
+        .unwrap();
+    assert!(downloading < waited && waited < merging, "{stages:?}");
+    assert!(
+        room_while_waiting.load(std::sync::atomic::Ordering::SeqCst) > 0,
+        "the merge room was given back before the merge had space"
+    );
+    assert_eq!(
+        room_while_merging.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "the merge room was kept while merging"
+    );
+    assert_eq!(fixture.saved_files().len(), 1);
+    assert_eq!(environment.shared.disk.reserved(), 0);
+    assert_eq!(environment.shared.disk.merge_room(), 0);
+    let report = fixture.last_report.lock().unwrap().clone();
+    let merge = report
+        .lines()
+        .find(|line| line.starts_with("disk: merge needs"))
+        .unwrap_or_else(|| panic!("no merge disk line in:\n{report}"));
+    assert!(merge.contains(", waited "), "{merge}");
+}
+
+/// Alone, downloaded, and the disk filled up meanwhile: the merge cannot
+/// fit and nothing will free space, so it fails at once. (Its own download
+/// must not count as "another download" to wait for.)
+#[tokio::test]
+async fn a_merge_that_cannot_fit_alone_fails_at_once() {
+    let Some(fixture) = Fixture::new().await else {
+        return;
+    };
+    // Free space unknown while the download is admitted (so its reservation
+    // never shrinks and the whole estimate is still held when it is done),
+    // then 1 byte: the disk filled up.
+    const UNKNOWN: u64 = u64::MAX;
+    let free = Arc::new(std::sync::atomic::AtomicU64::new(UNKNOWN));
+    let mut environment = fixture.environment();
+    environment.free_space = Some(Arc::new({
+        let free = Arc::clone(&free);
+        move || Some(free.load(std::sync::atomic::Ordering::SeqCst)).filter(|free| *free != UNKNOWN)
+    }));
+    // No floor, so the download itself is not stopped by the full disk.
+    environment.limits.disk_floor = 0;
+    environment.limits.space_recheck = Duration::from_secs(60 * 60);
+    let (result, updates) = tokio::time::timeout(
+        Duration::from_secs(60),
+        fixture.run_observed(
+            &environment,
+            direct("https://media.test/muxed/master.m3u8"),
+            crate::Discovery::Automatic,
+            None,
+            &|update| {
+                if update.stage == Stage::DownloadingVideo {
+                    free.store(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            },
+        ),
+    )
+    .await
+    .expect("the merge waited for its own download");
+    assert_code(&result, "insufficient_disk_space");
+    assert!(
+        !updates
+            .iter()
+            .any(|update| update.stage == Stage::WaitingForSpace),
+        "waited although nothing else was running"
+    );
+    assert_eq!(environment.shared.disk.reserved(), 0);
+    assert_eq!(environment.shared.disk.merge_room(), 0);
+}
+
 /// The user frees space while the other download still runs: the waiting
 /// one notices on its next look and starts.
 #[tokio::test]

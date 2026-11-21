@@ -13,8 +13,8 @@ use crate::{
     diagnostics::Diagnostics,
     egress::{EgressProxy, EgressStats, RefusalCounts, Resolver},
     filesystem::{
-        Admission, DiskBudget, JobDir, Reservation, WaitTicket, cleanup_stale_jobs, free_bytes,
-        output_dir_error, prepare_output_dir, publish_unique,
+        Admission, DiskBudget, JobDir, Need, Reservation, WaitTicket, cleanup_stale_jobs,
+        free_bytes, output_dir_error, prepare_output_dir, publish_unique,
     },
     formats::{MediaInfo, select_media},
     mux::{Container, MuxInput, SNIFF_BYTES, mux_args, sniff},
@@ -411,10 +411,32 @@ async fn run(
     let tunnels = proxy.stats().tunnels();
     record(recorder, |diagnostics| diagnostics.egress(tunnels, refused));
     drop(proxy);
-    let (media, _reservation) = result?;
+    let (media, mut download_space) = result?;
+    download_space.finish_download();
     // The info JSON holds the media URLs, which may be signed; nothing after
     // this point needs it, and a kept recovery directory must not hold it.
     let _ = tokio::fs::remove_file(job.path().join(INFO_JSON)).await;
+
+    // Room for the merged copy, now that the tracks' real size is known.
+    // Taken before the download's own reservation (and its merge room) is
+    // given back, so no other job can slip into that room in between.
+    let merge = Need::Merge {
+        bytes: mux_space_needed(track_bytes(job.path()).await),
+    };
+    let _merge_space = match wait_for_space(
+        env,
+        merge,
+        &mut SpaceWait::merge(),
+        &mut cancel,
+        report,
+        recorder,
+    )
+    .await?
+    {
+        Space::Granted(reservation) => reservation,
+        Space::LinksStale => unreachable!("a merge has no links to refresh"),
+    };
+    drop(download_space);
 
     report(JobUpdate::stage(Stage::WaitingToMerge));
     let _muxer = tokio::select! {
@@ -486,13 +508,16 @@ async fn fetch(
     let mut media = found_media(source, discovered.media, report, recorder);
     let mut wait = SpaceWait::new(discovery);
     let mut reservation = loop {
-        // The tracks and the muxed copy exist together for a moment: twice
-        // the estimate. An unknown size reserves nothing; the floor still
-        // applies while downloading.
-        let needed = media
-            .estimated_bytes
-            .map_or(0, |bytes| bytes.saturating_mul(2));
-        match wait_for_space(env, needed, &mut wait, cancel, report, recorder).await? {
+        // The tracks and the muxed copy exist together for a moment, so the
+        // budget also keeps room to merge (for the largest download at a
+        // time, not for each). An unknown size reserves nothing; the floor
+        // still applies while downloading.
+        let size = media.estimated_bytes.unwrap_or(0);
+        let need = Need::Download {
+            bytes: size,
+            merge: mux_space_needed(size),
+        };
+        match wait_for_space(env, need, &mut wait, cancel, report, recorder).await? {
             Space::Granted(reservation) => break reservation,
             Space::LinksStale => {
                 // Find the links again (yt-dlp, then the headless browser;
@@ -1316,6 +1341,21 @@ fn mux_space_needed(inputs: u64) -> u64 {
     inputs.saturating_add(inputs / 16)
 }
 
+/// Bytes of the downloaded tracks in `job`.
+async fn track_bytes(job: &Path) -> u64 {
+    let mut total = 0u64;
+    for kind in ["video", "audio"] {
+        if let Ok(path) = find_track(job, kind).await {
+            total = total.saturating_add(
+                tokio::fs::metadata(&path)
+                    .await
+                    .map_or(0, |metadata| metadata.len()),
+            );
+        }
+    }
+    total
+}
+
 /// The media as found, with a meaningful title, recorded and shown.
 fn found_media(
     source: &ValidatedSource,
@@ -1363,6 +1403,15 @@ impl SpaceWait {
             links_refreshable: discovery == Discovery::Automatic,
         }
     }
+
+    /// Waiting to write the merged copy: the tracks are already on disk, so
+    /// there are no links to find again.
+    fn merge() -> Self {
+        Self {
+            links_refreshable: false,
+            ..Self::new(Discovery::Interactive)
+        }
+    }
 }
 
 enum Space {
@@ -1376,7 +1425,7 @@ enum Space {
 /// video that does not fit fails at once.
 async fn wait_for_space(
     env: &JobEnvironment,
-    needed: u64,
+    need: Need,
     wait: &mut SpaceWait,
     cancel: &mut CancelToken,
     report: &(dyn Fn(JobUpdate) + Send + Sync),
@@ -1390,11 +1439,11 @@ async fn wait_for_space(
         tokio::pin!(released);
         released.as_mut().enable();
         let free = env.free_space();
-        let (admission, held) = env.shared.disk.admit(free, needed, floor, &mut wait.ticket);
+        let (admission, held) = env.shared.disk.admit(free, need, floor, &mut wait.ticket);
         let note = |since: Option<Instant>| {
             let waited = since.map(|since| since.elapsed());
             record(recorder, |diagnostics| {
-                diagnostics.disk(needed, free, held, floor, waited);
+                diagnostics.disk(need, free, held, floor, waited);
             });
         };
         match admission {
@@ -1404,7 +1453,7 @@ async fn wait_for_space(
             }
             Admission::Refused => {
                 note(wait.since);
-                return Err(no_space_error(Some(needed), free.unwrap_or(u64::MAX)));
+                return Err(no_space_error(Some(need.total()), free.unwrap_or(u64::MAX)));
             }
             Admission::Wait => {}
         }

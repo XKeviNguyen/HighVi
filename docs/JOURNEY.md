@@ -15,7 +15,7 @@ It is written for contributors, and for anyone building a tool that drives other
 | Duration | 8 days, from MVP (13 Oct) to v0.1.1 (20 Oct) |
 | Pull requests | 13 merged, plus the v0.1.1 release branch |
 | Commits | ~70 |
-| Bugs catalogued | **57**, each with its root cause, location and fix (§7). B51–B57 came after v0.1.1 (§5.7). |
+| Bugs catalogued | **60**, each with its root cause, location and fix (§7). B51–B60 came after v0.1.1 (§5.7). |
 | Bugs found by the author's own tests | 4 of 50. Independent review found 24, native runs and measurements 9, users and CI 6, the baseline audit 4, the dev workflow 3 (§3). |
 | Tests at the end | 188 unit and end-to-end tests with real yt-dlp, FFmpeg and Chrome, on two yt-dlp versions in CI |
 
@@ -85,13 +85,13 @@ pie showData
 
 ```mermaid
 pie showData
-  title How each bug was found (57)
-  "Independent code review" : 20
+  title How each bug was found (60)
+  "Independent code review" : 22
   "Security review" : 9
   "Native run on a real system" : 7
   "End-to-end test with real tools" : 4
   "Baseline audit" : 4
-  "User report" : 4
+  "User report" : 5
   "Measurement" : 3
   "Dev workflow, self-discovered" : 3
   "CI" : 3
@@ -324,6 +324,21 @@ flowchart TB
 The diagnostics report now has a `disk:` line (needs, free, the floor, what others held,
 how long it waited), placed early so the 4 KiB cap never cuts it.
 
+**It came back as "At once does nothing" (B58).** With 0.1.3 the second video no longer
+failed; it waited. With ~4.2 GB videos and 17 GB free, every second video waited, so whatever
+**At once** said, one video downloaded at a time. Waiting was right; the **amount** was not.
+Every job reserved two copies, but only a merge needs two copies, and merges can take turns.
+Now each download reserves its own size plus one shared merge room (the largest merge any
+downloading job will need), and a merge reserves its real size just before it starts. Two
+4.2 GB videos need about 13.1 GB instead of 17.5 GB.
+
+The breaker review of that change found the queue could **deadlock** in exactly the user's case
+(B59): with three videos, two finished downloading and waited to merge behind the third, which
+waited for their merges. And a merge that could not fit waited for its own download forever
+(B60). Merges now have their own line, served before downloads; a finished download gives
+back what it reserved but did not write; and a merge waits only for downloads and merges in
+progress, so with nothing moving it is refused at once.
+
 **Lesson.** A resource the user will have later is not a reason to fail now: queue for it, in
 order, and say what you are waiting for. And a test suite for a waiting mechanism has to
 prove the **wake-up**, not just the outcome; a periodic recheck quietly hides a broken
@@ -420,6 +435,9 @@ test with real tools, **NR** = native run, **M** = measurement, **U** = user rep
 | B55 | Disk | A big waiter could wait forever | No order among waiters | `DiskBudget` waiters | #17 (v0.1.3) | IR |
 | B56 | Disk | Links could expire during a long wait | Links found before waiting, used after | `wait_for_space` | #17 (v0.1.3) | IR |
 | B57 | Tests | Broken wake-up or recheck still passed | Tests checked outcomes, not the mechanism; recheck hid it | e2e disk tests | #17 (v0.1.3) | IR |
+| B58 | Disk | One video at a time whatever **At once** said | Every job reserved room for its own merge, though merges take turns | `DiskBudget`, `run` | fix/concurrent-large-downloads | U |
+| B59 | Disk | Queue could hang forever with 3 large videos | Merges queued behind a download that waited for them | `DiskBudget` lines | fix/concurrent-large-downloads | IR |
+| B60 | Disk | A merge that could not fit waited forever | It counted its own download as another job to wait for | `DiskBudget::admit`, `run` | fix/concurrent-large-downloads | IR |
 
 ## 8. Lessons
 
@@ -442,6 +460,8 @@ test with real tools, **NR** = native run, **M** = measurement, **U** = user rep
 | 15 | Write down accepted risks with their reasons. | B38 |
 | 16 | A resource that will free up is a reason to wait in line, not to fail; say what you wait for. | B52, B55 |
 | 17 | Make every check-then-act decision under one lock, and test the wake-up, not just the result. | B53, B57 |
+| 18 | Reserve for the peak that can actually happen together, not the sum of every job's own peak. | B58 |
+| 19 | In any wait-for graph, the step that frees the resource must never queue behind what waits for it. | B59, B60 |
 
 ## 9. Practices that worked
 
