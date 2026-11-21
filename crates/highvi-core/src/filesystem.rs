@@ -361,8 +361,9 @@ impl Reservation {
     /// filesystems report writes late, and the count comes from yt-dlp.
     /// Each job compares with its own reading, so jobs writing at once on
     /// such a filesystem may each count the same fall for a moment; the
-    /// floor watched while writing still holds. Waiters are not woken:
-    /// free space fell by as much, so nothing opened up for them.
+    /// floor watched while writing still holds. Waiters are woken only when
+    /// nothing is held any more: otherwise free space fell by as much, so
+    /// nothing opened up for them.
     pub fn written(&mut self, written: u64, free: Option<u64>) {
         let (Some(before), Some(free)) = (self.free, free) else {
             return;
@@ -375,6 +376,12 @@ impl Reservation {
         let mut ledger = self.budget.ledger();
         ledger.reserved = ledger.reserved.saturating_sub(self.bytes - outstanding);
         self.bytes = outstanding;
+        let drained = ledger.reserved == 0;
+        drop(ledger);
+        // Nothing held any more: a merge waiting on it can now be decided.
+        if drained {
+            self.budget.released.notify_waiters();
+        }
     }
 }
 

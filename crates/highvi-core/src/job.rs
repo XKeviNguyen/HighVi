@@ -382,6 +382,11 @@ async fn run(
     report(JobUpdate::stage(Stage::Discovering));
     prepare_output_dir(&env.output_dir).await?;
     cleanup_stale_jobs(&env.output_dir).await;
+    // Declared before the job directory, so they are given back only after
+    // it (and the tracks in it) is deleted: a job woken by the release must
+    // see that space free, or it may be refused for space about to return.
+    let mut download_space: Option<Reservation> = None;
+    let mut merge_space: Option<Reservation> = None;
     let mut job = JobDir::create(&env.output_dir).await?;
     let python = match &env.python {
         Some(python) => tokio::select! {
@@ -405,14 +410,17 @@ async fn run(
         &mut cancel,
         report,
         recorder,
+        &mut download_space,
     ))
     .await;
     let refused = proxy.stats().counts();
     let tunnels = proxy.stats().tunnels();
     record(recorder, |diagnostics| diagnostics.egress(tunnels, refused));
     drop(proxy);
-    let (media, mut download_space) = result?;
-    download_space.finish_download();
+    let media = result?;
+    if let Some(space) = download_space.as_mut() {
+        space.finish_download();
+    }
     // The info JSON holds the media URLs, which may be signed; nothing after
     // this point needs it, and a kept recovery directory must not hold it.
     let _ = tokio::fs::remove_file(job.path().join(INFO_JSON)).await;
@@ -423,7 +431,7 @@ async fn run(
     let merge = Need::Merge {
         bytes: mux_space_needed(track_bytes(job.path()).await),
     };
-    let _merge_space = match wait_for_space(
+    let granted = match wait_for_space(
         env,
         merge,
         &mut SpaceWait::merge(),
@@ -436,7 +444,8 @@ async fn run(
         Space::Granted(reservation) => reservation,
         Space::LinksStale => unreachable!("a merge has no links to refresh"),
     };
-    drop(download_space);
+    let _ = merge_space.insert(granted);
+    drop(download_space.take());
 
     report(JobUpdate::stage(Stage::WaitingToMerge));
     let _muxer = tokio::select! {
@@ -498,7 +507,8 @@ async fn fetch(
     cancel: &mut CancelToken,
     report: &(dyn Fn(JobUpdate) + Send + Sync),
     recorder: &Mutex<Diagnostics>,
-) -> Result<(MediaInfo, Reservation), PublicError> {
+    space: &mut Option<Reservation>,
+) -> Result<MediaInfo, PublicError> {
     let proxy_url = proxy.url();
     let discovered = Box::pin(discover(
         env, job, proxy, source, discovery, cancel, report, recorder,
@@ -507,7 +517,8 @@ async fn fetch(
     let mut referer = discovered.referer;
     let mut media = found_media(source, discovered.media, report, recorder);
     let mut wait = SpaceWait::new(discovery);
-    let mut reservation = loop {
+    // Kept by the caller, even on error, so it outlives the job directory.
+    let reservation = space.insert(loop {
         // The tracks and the muxed copy exist together for a moment, so the
         // budget also keeps room to merge (for the largest download at a
         // time, not for each). An unknown size reserves nothing; the floor
@@ -537,7 +548,7 @@ async fn fetch(
                 }
             }
         }
-    };
+    });
     tokio::fs::write(job.path().join(INFO_JSON), &media.info_json)
         .await
         .map_err(|_| output_dir_error())?;
@@ -575,7 +586,7 @@ async fn fetch(
         .await?;
         written = written.saturating_add(track);
     }
-    Ok((media, reservation))
+    Ok(media)
 }
 
 /// A visible window: how long it waits for the user, and how long the row
