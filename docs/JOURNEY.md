@@ -31,6 +31,7 @@ timeline
   19 Oct : 4 HLS fragments at once, 3.3× faster : Browser window opens by itself (PR #13)
   20 Oct : CI flake, Chrome cold start over 20 s : v0.1.1
   21 Nov : v0.1.2, downloaded bytes counted once against free space : A second download no longer refused while the first holds the space (v0.1.3)
+          : Large videos run side by side, merge room kept once (v0.1.4)
 ```
 
 ## 3. Where the bugs lived
@@ -435,9 +436,9 @@ test with real tools, **NR** = native run, **M** = measurement, **U** = user rep
 | B55 | Disk | A big waiter could wait forever | No order among waiters | `DiskBudget` waiters | #17 (v0.1.3) | IR |
 | B56 | Disk | Links could expire during a long wait | Links found before waiting, used after | `wait_for_space` | #17 (v0.1.3) | IR |
 | B57 | Tests | Broken wake-up or recheck still passed | Tests checked outcomes, not the mechanism; recheck hid it | e2e disk tests | #17 (v0.1.3) | IR |
-| B58 | Disk | One video at a time whatever **At once** said | Every job reserved room for its own merge, though merges take turns | `DiskBudget`, `run` | fix/concurrent-large-downloads | U |
-| B59 | Disk | Queue could hang forever with 3 large videos | Merges queued behind a download that waited for them | `DiskBudget` lines | fix/concurrent-large-downloads | IR |
-| B60 | Disk | A merge that could not fit waited forever | It counted its own download as another job to wait for | `DiskBudget::admit`, `run` | fix/concurrent-large-downloads | IR |
+| B58 | Disk | One video at a time whatever **At once** said | Every job reserved room for its own merge, though merges take turns | `DiskBudget`, `run` | #19 (v0.1.4) | U |
+| B59 | Disk | Queue could hang forever with 3 large videos | Merges queued behind a download that waited for them | `DiskBudget` lines | #19 (v0.1.4) | IR |
+| B60 | Disk | A merge that could not fit waited forever | It counted its own download as another job to wait for | `DiskBudget::admit`, `run` | #19 (v0.1.4) | IR |
 
 ## 8. Lessons
 
